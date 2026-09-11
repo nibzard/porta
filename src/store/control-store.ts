@@ -33,7 +33,10 @@ export type StoreErrorKind =
   | "not-found"
   | "cas-failed"
   | "integrity"
-  | "invalid";
+  | "invalid"
+  | "lease-held"
+  | "lease-expired"
+  | "fenced-out";
 
 /** Typed control store failure. Runtime code maps these to Portable errors. */
 export class StoreError extends Error {
@@ -53,13 +56,34 @@ export class StoreError extends Error {
         ? "RequestConflict"
         : this.kind === "integrity"
           ? "IntegrityFailure"
-          : this.kind === "cas-failed"
+          : this.kind === "cas-failed" || this.kind === "fenced-out"
             ? "StaleHandle"
-            : "InvalidRequest";
+            : this.kind === "lease-expired"
+              ? "LeaseExpired"
+              : this.kind === "lease-held"
+                ? "HandoffBlocked"
+                : "InvalidRequest";
     return portableError(code, this.message, {
       details: { storeErrorKind: this.kind, constraint: this.constraint },
     });
   }
+}
+
+/**
+ * Durable authority to mutate one attachment (SPEC.md sections 5.2, 8.1).
+ *
+ * Release and replacement serialize on this lease. Each acquisition
+ * increments the fencing token; a mutation commits only while the token
+ * it holds is still current and unexpired.
+ */
+export interface MutationLease {
+  sessionId: string;
+  attachmentId: string;
+  fencingToken: number;
+  holder: string;
+  acquiredAt: string;
+  expiresAt: string;
+  releasedAt?: string | undefined;
 }
 
 /** Durable replacement transition record. Fully shaped by later tasks. */
@@ -128,6 +152,13 @@ export class ControlStore {
 
   close(): void {
     this.db.close();
+  }
+
+  /** Identifiers of every applied migration, in order. */
+  appliedMigrations(): number[] {
+    return (this.db.prepare("SELECT id FROM migrations ORDER BY id").all() as Array<{ id: number }>).map(
+      (row) => row.id,
+    );
   }
 
   // -- Infrastructure ------------------------------------------------------
@@ -726,6 +757,240 @@ export class ControlStore {
     return changes === 0 ? null : next;
   }
 
+  // -- Mutation leases --------------------------------------------------------
+
+  /** Read the current mutation lease of one attachment. */
+  getMutationLease(sessionId: string, attachmentId: string): MutationLease | null {
+    const row = this.get(
+      "SELECT record_json FROM mutation_leases WHERE session_id = ? AND attachment_id = ?",
+      sessionId,
+      attachmentId,
+    );
+    return row === undefined ? null : (JSON.parse(row.record_json as string) as MutationLease);
+  }
+
+  /**
+   * Acquire the mutation lease of one attachment.
+   *
+   * Acquisition succeeds when no lease exists, when the previous lease was
+   * released, or when it expired. Every acquisition increments the fencing
+   * token, so tokens rise monotonically per attachment and an earlier
+   * holder can never look current again. A still-valid lease refuses the
+   * request with a `lease-held` error: release and replacement serialize
+   * here (SPEC.md sections 5.2 and 8.1).
+   */
+  acquireMutationLease(
+    sessionId: string,
+    attachmentId: string,
+    holder: string,
+    ttlMs: number,
+  ): MutationLease {
+    if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) {
+      throw new StoreError("invalid", "The mutation lease needs a positive whole-number duration.");
+    }
+    return this.transaction(() => {
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const now = nowUtcTimestamp();
+        const row = this.get(
+          "SELECT record_json FROM mutation_leases WHERE session_id = ? AND attachment_id = ?",
+          sessionId,
+          attachmentId,
+        );
+        if (row === undefined) {
+          const lease: MutationLease = {
+            sessionId,
+            attachmentId,
+            fencingToken: 1,
+            holder,
+            acquiredAt: now,
+            expiresAt: offsetTimestamp(now, ttlMs),
+          };
+          this.run(
+            "INSERT INTO mutation_leases (session_id, attachment_id, fencing_token, holder, acquired_at, expires_at, released_at, record_json) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)",
+            sessionId,
+            attachmentId,
+            lease.fencingToken,
+            holder,
+            lease.acquiredAt,
+            lease.expiresAt,
+            JSON.stringify(lease),
+          );
+          return lease;
+        }
+        const current = JSON.parse(row.record_json as string) as MutationLease;
+        const active = current.releasedAt === undefined && epochMs(current.expiresAt) > epochMs(now);
+        if (active) {
+          throw new StoreError(
+            "lease-held",
+            `Attachment ${attachmentId} holds a valid mutation lease (token ${current.fencingToken}).`,
+          );
+        }
+        const lease: MutationLease = {
+          sessionId,
+          attachmentId,
+          fencingToken: current.fencingToken + 1,
+          holder,
+          acquiredAt: now,
+          expiresAt: offsetTimestamp(now, ttlMs),
+        };
+        const changes = this.stmt(
+          "UPDATE mutation_leases SET fencing_token = ?, holder = ?, acquired_at = ?, expires_at = ?, released_at = NULL, record_json = ? WHERE session_id = ? AND attachment_id = ? AND fencing_token = ? AND released_at IS ?",
+        ).run(
+          lease.fencingToken,
+          holder,
+          lease.acquiredAt,
+          lease.expiresAt,
+          JSON.stringify(lease),
+          sessionId,
+          attachmentId,
+          current.fencingToken,
+          current.releasedAt ?? null,
+        ).changes;
+        if (changes > 0) {
+          return lease;
+        }
+        // The row moved between read and update; re-read and retry.
+      }
+      throw new StoreError("cas-failed", "The mutation lease kept moving; try again.");
+    });
+  }
+
+  /**
+   * Extend the lease the caller still holds.
+   *
+   * Returns the extended lease, or null when the token is no longer
+   * current or the lease was released. The new expiry never moves back.
+   */
+  renewMutationLease(
+    sessionId: string,
+    attachmentId: string,
+    fencingToken: number,
+    extendMs: number,
+  ): MutationLease | null {
+    if (!Number.isSafeInteger(extendMs) || extendMs <= 0) {
+      throw new StoreError("invalid", "The lease renewal needs a positive whole-number duration.");
+    }
+    return this.transaction(() => {
+      const current = this.readLease(sessionId, attachmentId);
+      if (current.fencingToken !== fencingToken || current.releasedAt !== undefined) {
+        return null;
+      }
+      const now = nowUtcTimestamp();
+      const base = Math.max(epochMs(current.expiresAt), epochMs(now));
+      const lease: MutationLease = {
+        ...current,
+        expiresAt: new Date(base + extendMs).toISOString(),
+      };
+      const changes = this.stmt(
+        "UPDATE mutation_leases SET expires_at = ?, record_json = ? WHERE session_id = ? AND attachment_id = ? AND fencing_token = ? AND released_at IS NULL",
+      ).run(
+        lease.expiresAt,
+        JSON.stringify(lease),
+        sessionId,
+        attachmentId,
+        fencingToken,
+      ).changes;
+      return changes > 0 ? lease : null;
+    });
+  }
+
+  /**
+   * Release the mutation lease.
+   *
+   * Releasing the same token again succeeds without effect. A token that
+   * is no longer current returns false: another controller owns the lease
+   * now, and the old holder must not undo it.
+   */
+  releaseMutationLease(
+    sessionId: string,
+    attachmentId: string,
+    fencingToken: number,
+  ): boolean {
+    return this.transaction(() => {
+      const current = this.readLease(sessionId, attachmentId);
+      if (current.fencingToken !== fencingToken) {
+        return false;
+      }
+      if (current.releasedAt !== undefined) {
+        return true;
+      }
+      const releasedAt = nowUtcTimestamp();
+      const released: MutationLease = { ...current, releasedAt };
+      const changes = this.stmt(
+        "UPDATE mutation_leases SET released_at = ?, record_json = ? WHERE session_id = ? AND attachment_id = ? AND fencing_token = ? AND released_at IS NULL",
+      ).run(
+        releasedAt,
+        JSON.stringify(released),
+        sessionId,
+        attachmentId,
+        fencingToken,
+      ).changes;
+      return changes > 0;
+    });
+  }
+
+  /**
+   * Confirm a fencing token still carries authority.
+   *
+   * Throws `fenced-out` when a newer controller acquired the lease or the
+   * lease was released, and `lease-expired` when the token is current but
+   * its time ran out. Expiration alone revokes authority: a delayed
+   * provider response cannot be committed under a lapsed token even when
+   * nobody else has taken over (SPEC.md section 5.2).
+   */
+  validateMutationLease(sessionId: string, attachmentId: string, fencingToken: number): void {
+    const current = this.readLease(sessionId, attachmentId);
+    if (current.fencingToken !== fencingToken) {
+      throw new StoreError(
+        "fenced-out",
+        `Fencing token ${fencingToken} is stale; attachment ${attachmentId} is at token ${current.fencingToken}.`,
+      );
+    }
+    if (current.releasedAt !== undefined) {
+      throw new StoreError("fenced-out", `The mutation lease for ${attachmentId} was released.`);
+    }
+    if (epochMs(current.expiresAt) <= epochMs(nowUtcTimestamp())) {
+      throw new StoreError(
+        "lease-expired",
+        `The mutation lease for ${attachmentId} expired at ${current.expiresAt}.`,
+      );
+    }
+  }
+
+  /**
+   * Run a control mutation under a fencing check.
+   *
+   * The lease check and the body commit in one transaction: the mutation
+   * lands only while the token is current, unexpired, and unreleased, and
+   * a failure inside the body rolls everything back.
+   */
+  mutateWithLease<T>(
+    sessionId: string,
+    attachmentId: string,
+    fencingToken: number,
+    body: () => T,
+  ): T {
+    return this.transaction(() => {
+      this.validateMutationLease(sessionId, attachmentId, fencingToken);
+      return body();
+    });
+  }
+
+  private readLease(sessionId: string, attachmentId: string): MutationLease {
+    const row = this.get(
+      "SELECT record_json FROM mutation_leases WHERE session_id = ? AND attachment_id = ?",
+      sessionId,
+      attachmentId,
+    );
+    if (row === undefined) {
+      throw new StoreError(
+        "not-found",
+        `No mutation lease exists for attachment ${attachmentId}.`,
+      );
+    }
+    return JSON.parse(row.record_json as string) as MutationLease;
+  }
+
   // -- Blobs and revisions ----------------------------------------------------
 
   /** Record a blob in the registry. Registration alone does not verify it. */
@@ -876,6 +1141,20 @@ function mapSqliteError(error: unknown): unknown {
 /** Sleep without yielding the event loop, for brief cross-process setup. */
 function sleepSyncMs(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** Epoch milliseconds of a UTC timestamp. */
+function epochMs(timestamp: string): number {
+  const ms = Date.parse(timestamp);
+  if (Number.isNaN(ms)) {
+    throw new StoreError("invalid", `The stored timestamp ${timestamp} is malformed.`);
+  }
+  return ms;
+}
+
+/** A new UTC timestamp offset from a base one. */
+function offsetTimestamp(base: string, deltaMs: number): string {
+  return new Date(epochMs(base) + deltaMs).toISOString();
 }
 
 /**

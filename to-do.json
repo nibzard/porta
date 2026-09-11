@@ -108,7 +108,7 @@
       "id": "T005",
       "title": "Implement mutation leases and fencing",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Serialize attachment mutations with durable leases and monotonic fencing tokens.",
       "depends_on": [
         "T004"

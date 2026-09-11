@@ -126,7 +126,26 @@ export const INITIAL_SCHEMA: Migration = {
   ],
 };
 
-export const MIGRATIONS: readonly Migration[] = [INITIAL_SCHEMA];
+/** Durable mutation leases with fencing tokens (SPEC.md sections 5.2, 8.1). */
+export const MUTATION_LEASES: Migration = {
+  id: 2,
+  name: "mutation-leases",
+  statements: [
+    `CREATE TABLE mutation_leases (
+      session_id TEXT NOT NULL REFERENCES sessions(id),
+      attachment_id TEXT NOT NULL,
+      fencing_token INTEGER NOT NULL CHECK (fencing_token >= 1),
+      holder TEXT NOT NULL,
+      acquired_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      released_at TEXT,
+      record_json TEXT NOT NULL,
+      PRIMARY KEY (session_id, attachment_id)
+    )`,
+  ],
+};
+
+export const MIGRATIONS: readonly Migration[] = [INITIAL_SCHEMA, MUTATION_LEASES];
 
 /** Tables with compare-and-swap support and their writable columns. */
 export const CAS_TABLES = {
