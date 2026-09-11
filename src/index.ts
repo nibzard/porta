@@ -689,3 +689,6 @@ export { workspaceCases } from "./conformance/cases/workspace.js";
 
 // Conformance: the process and operation case pack (SPEC.md section 21).
 export { processOperationCases } from "./conformance/cases/process-operations.js";
+
+// Conformance: the lightweight Python case pack (SPEC.md section 21).
+export { pythonCases } from "./conformance/cases/python.js";

@@ -1431,7 +1431,7 @@
     "id": "T057",
     "title": "Add lightweight Python conformance cases",
     "priority": 2,
-    "status": "todo",
+    "status": "done",
     "details": "Verify the selected engine against its advertised evaluation subset.",
     "depends_on": [
       "T032",
