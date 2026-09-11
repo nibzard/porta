@@ -678,3 +678,7 @@ export type {
   ConformanceSuite,
   ConformanceTestAuthority,
 } from "./conformance/runner.js";
+
+// Conformance: the acquisition and matching case pack (SPEC.md
+// section 21).
+export { acquisitionPolicyCases } from "./conformance/cases/acquisition-policy.js";

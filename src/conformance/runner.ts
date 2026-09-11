@@ -278,8 +278,12 @@ function failed(
   started: number,
   error: unknown,
 ): ConformanceCaseRecord {
+  // Portable errors are plain records, not Error instances; both carry
+  // a message worth reporting.
   const detail =
-    error instanceof Error ? error.message : JSON.stringify(String(error));
+    error !== null && typeof error === "object" && "message" in error
+      ? String((error as { message: unknown }).message)
+      : String(error);
   return {
     id: entry.id,
     area: entry.area,

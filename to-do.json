@@ -1357,7 +1357,7 @@
     "id": "T054",
     "title": "Add acquisition and policy conformance cases",
     "priority": 2,
-    "status": "todo",
+    "status": "done",
     "details": "Test acquisition reconciliation, lease behavior, matching, and authorization.",
     "depends_on": [
       "T010",
