@@ -263,6 +263,22 @@ export const EXECUTION_PROVENANCE: Migration = {
   ],
 };
 
+/** Committed policy revocations (SPEC.md section 7). */
+export const POLICY_REVOCATIONS: Migration = {
+  id: 9,
+  name: "policy-revocations",
+  statements: [
+    `CREATE TABLE policy_revocations (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES sessions(id),
+      committed_at TEXT NOT NULL,
+      record_json TEXT NOT NULL
+    )`,
+    `CREATE INDEX idx_policy_revocations_session
+      ON policy_revocations(session_id, committed_at)`,
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   INITIAL_SCHEMA,
   MUTATION_LEASES,
@@ -272,6 +288,7 @@ export const MIGRATIONS: readonly Migration[] = [
   STREAMED_OUTPUT,
   RESOURCE_BINDINGS,
   EXECUTION_PROVENANCE,
+  POLICY_REVOCATIONS,
 ];
 
 /** Tables with compare-and-swap support and their writable columns. */

@@ -349,6 +349,20 @@ export type {
   VerificationSettleOptions,
 } from "./runtime/provenance.js";
 
+// Runtime: policy revocation and cancellation sweeps.
+export {
+  commitPolicyRevocation,
+  findBlockingRevocation,
+  revocationCovers,
+  revocationDenied,
+} from "./runtime/revocation.js";
+export type {
+  RevocationCancellation,
+  RevocationOptions,
+  RevocationOutcome,
+  RevocationTarget,
+} from "./runtime/revocation.js";
+
 // Records and schemas.
 export * from "./schema/error.js";
 export * from "./schema/event.js";

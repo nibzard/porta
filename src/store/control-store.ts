@@ -18,6 +18,7 @@ import { operationRecordSchema, outputChunkSchema, artifactRecordSchema } from "
 import type { ArtifactRecord, OperationRecord, OutputChunk } from "../schema/operation.js";
 import { cleanupObligationSchema } from "../schema/handoff.js";
 import type { CleanupObligation } from "../schema/handoff.js";
+import type { PolicyRevocation } from "../schema/policy.js";
 import {
   proposalRecordSchema,
   workspaceRevisionSchema,
@@ -1016,6 +1017,55 @@ export class ControlStore {
         `Provenance record of ${record.operationId} does not exist.`,
       );
     }
+  }
+
+  // -- Policy revocations -----------------------------------------------------
+
+  /**
+   * Store one committed policy revocation (SPEC.md section 7).
+   *
+   * One revocation identity commits once; a repeated identity refuses.
+   */
+  insertPolicyRevocation(record: PolicyRevocation): void {
+    if (!record.id || !record.sessionId || !record.committedAt || !record.reason) {
+      throw new StoreError(
+        "invalid",
+        "Policy revocations need id, session, reason, and committedAt.",
+      );
+    }
+    this.run(
+      "INSERT INTO policy_revocations (id, session_id, committed_at, record_json) VALUES (?, ?, ?, ?)",
+      record.id,
+      record.sessionId,
+      record.committedAt,
+      JSON.stringify(record),
+    );
+  }
+
+  /** One committed revocation by its identifier, or null. */
+  getPolicyRevocation(revocationId: string): PolicyRevocation | null {
+    const row = this.get("SELECT record_json FROM policy_revocations WHERE id = ?", revocationId);
+    return row === undefined
+      ? null
+      : (JSON.parse(row.record_json as string) as PolicyRevocation);
+  }
+
+  /** Every committed revocation of one session, oldest first. */
+  listPolicyRevocations(sessionId: string): PolicyRevocation[] {
+    const rows = this.all(
+      "SELECT record_json FROM policy_revocations WHERE session_id = ? ORDER BY committed_at, id",
+      sessionId,
+    );
+    return rows.map((row) => JSON.parse(row.record_json as string) as PolicyRevocation);
+  }
+
+  /** Every operation record of one session, insertion order. */
+  listOperationsBySession(sessionId: string): OperationRecord[] {
+    const rows = this.all(
+      "SELECT record_json FROM operations WHERE session_id = ? ORDER BY updated_at, id",
+      sessionId,
+    );
+    return rows.map((row) => JSON.parse(row.record_json as string) as OperationRecord);
   }
 
   // -- Transitions ----------------------------------------------------------

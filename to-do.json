@@ -707,7 +707,7 @@
       "id": "T029",
       "title": "Implement policy revocation",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Commit updated authority and stop further admissions under revoked permissions.",
       "depends_on": [
         "T008",

@@ -16,6 +16,7 @@ import { StoreError } from "../store/control-store.js";
 import type { ControlStore } from "../store/control-store.js";
 import { canonicalJson } from "./acquisition.js";
 import { checkAttachmentAcceptsOperations } from "./lifecycle.js";
+import { findBlockingRevocation, revocationDenied } from "./revocation.js";
 import { requireOpenSession } from "./workspace.js";
 
 /**
@@ -144,6 +145,19 @@ function admitLocked(
   const denied = options.authority.checkOperation(request.capability, request.operation);
   if (denied !== null) {
     throw denied;
+  }
+
+  // A committed revocation blocks this admission from its commit onward;
+  // the check runs inside the transaction, so no window separates the
+  // revocation commit from the block (SPEC.md section 7).
+  const target = {
+    capability: request.capability,
+    operation: request.operation,
+    ...(attachment.providerId !== undefined ? { providerId: attachment.providerId } : {}),
+  };
+  const blocking = findBlockingRevocation(store, sessionId, target);
+  if (blocking !== null) {
+    throw revocationDenied(blocking, target);
   }
 
   // Another admission may have committed this key while this call ran

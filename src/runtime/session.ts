@@ -67,6 +67,9 @@ import {
   recordInvocationProvenance as recordInvocationProvenanceFlow,
   settleVerificationRun as settleVerificationRunFlow,
 } from "./provenance.js";
+import { commitPolicyRevocation as commitPolicyRevocationFlow } from "./revocation.js";
+import type { RevocationOptions, RevocationOutcome } from "./revocation.js";
+import type { PolicyRevocationInput } from "../schema/policy.js";
 import type {
   ProvenanceEnvironmentOptions,
   VerificationRunOptions,
@@ -563,6 +566,21 @@ export class ManagedSession {
   /** One operation's provenance record, or null when none was captured. */
   async executionProvenance(operationId: string): Promise<ExecutionProvenance | null> {
     return this.store.getExecutionProvenance(operationId);
+  }
+
+  /**
+   * Commit one policy revocation and cancel covered in-flight work.
+   *
+   * New admissions under the revoked permissions refuse from the commit
+   * onward. Each covered in-flight operation receives one cancellation
+   * request; an unconfirmed stop stays visible, never reported as
+   * stopped (SPEC.md section 7).
+   */
+  async revokePolicy(
+    input: PolicyRevocationInput,
+    options: RevocationOptions = {},
+  ): Promise<RevocationOutcome> {
+    return commitPolicyRevocationFlow(this.store, this.id, input, options);
   }
 
   /**
