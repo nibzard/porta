@@ -41,6 +41,8 @@ import type {
   OperationResolution,
   OutcomeOptions,
 } from "./outcomes.js";
+import { cancelOperation as cancelOperationFlow, waitForOperation } from "./cancellation.js";
+import type { CancelTransport, WaitOutcome } from "./cancellation.js";
 import type {
   AcceptOutcome,
   CheckpointOptions,
@@ -55,6 +57,7 @@ import type { ExportFlowOptions, ExportOutcome, ExportRequest } from "./export.j
 import type { BlobStore } from "../store/blob-store.js";
 import type { CheckpointRequest } from "../schema/workspace.js";
 import type { InvocationRequest, OperationRecord } from "../schema/operation.js";
+import type { CancellationResult } from "../schema/adapter.js";
 import type { AttachmentSummary } from "../schema/session.js";
 
 /**
@@ -330,6 +333,34 @@ export class ManagedSession {
     options?: OutcomeOptions,
   ): Promise<OperationRecord> {
     return reconcileOperation(this.store, this.id, operationId, resolution, options ?? {});
+  }
+
+  /**
+   * Wait for one operation to settle, bounded by a deadline.
+   *
+   * A timed-out wait changes nothing: the operation keeps its status
+   * and the remote work keeps running. Stopping the remote work needs
+   * an explicit `cancelOperation` call (SPEC.md sections 9.2 and 15).
+   */
+  async waitFor(
+    operationId: string,
+    options: { waitMs: number; pollIntervalMs?: number },
+  ): Promise<WaitOutcome> {
+    return waitForOperation(this.store, this.id, operationId, options);
+  }
+
+  /**
+   * Explicitly cancel one operation at its provider.
+   *
+   * Only a confirmed stop settles the record as cancelled; a
+   * best-effort stop without confirmation leaves the outcome unknown,
+   * with the attempt on the cancellation trail.
+   */
+  async cancelOperation(
+    operationId: string,
+    transport: CancelTransport,
+  ): Promise<{ operation: OperationRecord; result: CancellationResult }> {
+    return cancelOperationFlow(this.store, this.id, operationId, transport);
   }
 
   /** Complete or restore one interrupted export of a destination. */

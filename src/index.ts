@@ -242,6 +242,19 @@ export type {
   ReconciliationTrail,
 } from "./runtime/outcomes.js";
 
+// Runtime: cancellation and deadlines.
+export {
+  cancelOperation,
+  deadlineFromTimeoutMs,
+  waitForOperation,
+} from "./runtime/cancellation.js";
+export type {
+  CancelTransport,
+  CancellationAttempt,
+  CancellationTrail,
+  WaitOutcome,
+} from "./runtime/cancellation.js";
+
 // Records and schemas.
 export * from "./schema/error.js";
 export * from "./schema/event.js";

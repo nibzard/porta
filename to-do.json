@@ -551,7 +551,7 @@
       "id": "T023",
       "title": "Implement cancellation and deadlines",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Apply deadlines and represent confirmed, best-effort, and unsupported cancellation.",
       "depends_on": [
         "T013",

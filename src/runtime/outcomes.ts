@@ -30,9 +30,9 @@ export interface OutcomeOptions {
 /** One settled outcome of an operation. */
 export type OperationOutcome =
   | { kind: "completed"; resultRef: string; extensions?: Extensions }
-  | { kind: "failed"; error: PortableError }
-  | { kind: "cancelled"; error: PortableError }
-  | { kind: "unknown"; error: PortableError };
+  | { kind: "failed"; error: PortableError; extensions?: Extensions }
+  | { kind: "cancelled"; error: PortableError; extensions?: Extensions }
+  | { kind: "unknown"; error: PortableError; extensions?: Extensions };
 
 /** One reconciliation result, offered against an unknown operation. */
 export type OperationResolution =
@@ -258,9 +258,24 @@ function settledRecord(
     };
   }
   if (outcome.kind === "unknown") {
-    return { ...base, status: "unknown", error: outcome.error };
+    return merged(base, outcome);
   }
-  return { ...base, status: outcome.kind, error: outcome.error };
+  return merged(base, outcome);
+}
+
+/** One non-completed outcome merged onto the cleared base record. */
+function merged(
+  base: OperationRecord,
+  outcome: { kind: "failed" | "cancelled" | "unknown"; error: PortableError; extensions?: Extensions },
+): OperationRecord {
+  return {
+    ...base,
+    status: outcome.kind,
+    error: outcome.error,
+    ...(outcome.extensions !== undefined
+      ? { extensions: { ...base.extensions, ...outcome.extensions } }
+      : {}),
+  };
 }
 
 /** One record without its result and error fields. */
