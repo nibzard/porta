@@ -916,7 +916,7 @@
     "id": "T037",
     "title": "Implement replacement planning",
     "priority": 2,
-    "status": "todo",
+    "status": "done",
     "details": "Build a side-effect-free plan for replacing one attachment.",
     "depends_on": [
       "T010",
