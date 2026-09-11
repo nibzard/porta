@@ -686,3 +686,6 @@ export { acquisitionPolicyCases } from "./conformance/cases/acquisition-policy.j
 // Conformance: the workspace and workspace-authority case pack
 // (SPEC.md section 21).
 export { workspaceCases } from "./conformance/cases/workspace.js";
+
+// Conformance: the process and operation case pack (SPEC.md section 21).
+export { processOperationCases } from "./conformance/cases/process-operations.js";
