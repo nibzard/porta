@@ -528,7 +528,7 @@
       "id": "T022",
       "title": "Implement operation outcomes and reconciliation",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Persist dispatch, completion, failure, and uncertainty without unsafe replay.",
       "depends_on": [
         "T011",

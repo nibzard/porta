@@ -31,6 +31,16 @@ import { exportRevision, recoverBridgeExport } from "./export.js";
 import { WorkspaceFiles } from "./workspace-capability.js";
 import { admitInvocation } from "./admission.js";
 import type { AdmissionOptions, AdmissionOutcome } from "./admission.js";
+import {
+  markOperationDispatched,
+  reconcileOperation,
+  settleOperation,
+} from "./outcomes.js";
+import type {
+  OperationOutcome,
+  OperationResolution,
+  OutcomeOptions,
+} from "./outcomes.js";
 import type {
   AcceptOutcome,
   CheckpointOptions,
@@ -44,7 +54,7 @@ import type { ProposalRequest } from "../schema/workspace.js";
 import type { ExportFlowOptions, ExportOutcome, ExportRequest } from "./export.js";
 import type { BlobStore } from "../store/blob-store.js";
 import type { CheckpointRequest } from "../schema/workspace.js";
-import type { InvocationRequest } from "../schema/operation.js";
+import type { InvocationRequest, OperationRecord } from "../schema/operation.js";
 import type { AttachmentSummary } from "../schema/session.js";
 
 /**
@@ -280,6 +290,46 @@ export class ManagedSession {
     options: AdmissionOptions,
   ): Promise<AdmissionOutcome> {
     return admitInvocation(this.store, this.id, request, options);
+  }
+
+  /**
+   * Record that provider execution of one operation started.
+   *
+   * The record moves `accepted` to `running` under compare-and-set.
+   * A settled or unknown operation refuses, so an unsafe effect is
+   * never replayed (SPEC.md section 9.2).
+   */
+  async markDispatched(operationId: string, options?: OutcomeOptions): Promise<OperationRecord> {
+    return markOperationDispatched(this.store, this.id, operationId, options ?? {});
+  }
+
+  /**
+   * Settle one operation with a known outcome.
+   *
+   * A nonzero process exit is completed with its exit code, not a
+   * transport failure. A lost response settles as `unknown`, because
+   * a timeout does not establish cancellation.
+   */
+  async settle(
+    operationId: string,
+    outcome: OperationOutcome,
+    options?: OutcomeOptions,
+  ): Promise<OperationRecord> {
+    return settleOperation(this.store, this.id, operationId, outcome, options ?? {});
+  }
+
+  /**
+   * Reconcile one unknown operation with provider evidence.
+   *
+   * The original uncertainty stays on the record and in the journal;
+   * every pass appends its observation to the trail.
+   */
+  async reconcile(
+    operationId: string,
+    resolution: OperationResolution,
+    options?: OutcomeOptions,
+  ): Promise<OperationRecord> {
+    return reconcileOperation(this.store, this.id, operationId, resolution, options ?? {});
   }
 
   /** Complete or restore one interrupted export of a destination. */

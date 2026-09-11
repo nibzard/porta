@@ -66,6 +66,12 @@ export interface OperationUpdatedPayload {
   requestKey?: string;
   resultRef?: string;
   error?: PortableError;
+  /** Evidence one reconciliation pass produced (SPEC.md section 9.2). */
+  reconciliation?: {
+    observedAt: string;
+    outcome: "completed" | "failed" | "cancelled" | "still-unknown";
+    detail?: string;
+  };
 }
 
 export interface OperationOutputPayload {
@@ -238,6 +244,16 @@ export const EVENT_PAYLOAD_SCHEMAS: Record<EventTypeName, object> = {
       requestKey: { $ref: "#/$defs/requestKey" },
       resultRef: { type: "string", minLength: 1, maxLength: 512 },
       error: { $ref: "https://portable.dev/schema/error.json" },
+      reconciliation: {
+        type: "object",
+        required: ["observedAt", "outcome"],
+        additionalProperties: false,
+        properties: {
+          observedAt: { $ref: "#/$defs/timestamp" },
+          outcome: { enum: ["completed", "failed", "cancelled", "still-unknown"] },
+          detail: { type: "string", minLength: 1, maxLength: 2048 },
+        },
+      },
     },
   },
   "operation.output": {

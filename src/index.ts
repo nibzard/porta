@@ -228,6 +228,20 @@ export type {
 export { admitInvocation } from "./runtime/admission.js";
 export type { AdmissionOptions, AdmissionOutcome } from "./runtime/admission.js";
 
+// Runtime: operation outcomes and reconciliation.
+export {
+  markOperationDispatched,
+  reconcileOperation,
+  settleOperation,
+} from "./runtime/outcomes.js";
+export type {
+  OperationOutcome,
+  OperationResolution,
+  OutcomeOptions,
+  ReconciliationObservation,
+  ReconciliationTrail,
+} from "./runtime/outcomes.js";
+
 // Records and schemas.
 export * from "./schema/error.js";
 export * from "./schema/event.js";
