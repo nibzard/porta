@@ -1048,7 +1048,7 @@
     "id": "T042",
     "title": "Define browser and service capability contracts",
     "priority": 2,
-    "status": "todo",
+    "status": "done",
     "details": "Specify browser lifecycle and service exposure schemas with owner generations and audiences.",
     "depends_on": [
       "T002",
