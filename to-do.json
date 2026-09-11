@@ -28,7 +28,7 @@
       "id": "T002",
       "title": "Define core records and validation schemas",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Define JSON Schema draft 2020-12 schemas and TypeScript types, including every supporting type named in the specification.",
       "depends_on": [
         "T001"
