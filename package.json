@@ -29,6 +29,7 @@
     "typescript": "^5.7.0"
   },
   "dependencies": {
+    "@e2b/sdk": "^2.5.0",
     "@pydantic/monty": "^0.0.23",
     "ajv": "^8.20.0"
   }

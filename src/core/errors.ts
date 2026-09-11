@@ -248,7 +248,8 @@ export function toPortableError(thrown: unknown): PortableError {
   });
 }
 
-function isPortableError(value: unknown): value is PortableError {
+/** Whether one thrown value already carries the Portable error shape. */
+export function isPortableError(value: unknown): value is PortableError {
   return (
     value !== null &&
     typeof value === "object" &&

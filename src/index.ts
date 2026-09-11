@@ -46,6 +46,7 @@ export {
   integrityFailureError,
   invalidRequestError,
   invalidRequestFromValidation,
+  isPortableError,
   isProviderFailure,
   isSafeRetry,
   leaseExpiredError,
@@ -375,6 +376,20 @@ export type {
   MontyHostFunction,
   MontyPythonAdapterOptions,
 } from "./adapters/monty-python-adapter.js";
+
+// Adapter: remote Linux allocation and leases on E2B.
+export {
+  E2B_LINUX_PROVIDER_ID,
+  E2BLinuxAdapter,
+  E2BLinuxLease,
+  SdkE2BClient,
+} from "./adapters/e2b-adapter.js";
+export type {
+  E2BAcquisitionRecord,
+  E2BClient,
+  E2BLinuxAdapterOptions,
+  E2BSandboxInfo,
+} from "./adapters/e2b-adapter.js";
 
 // Runtime: execution provenance and verification runs.
 export {

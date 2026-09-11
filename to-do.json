@@ -841,7 +841,7 @@
       "id": "T034",
       "title": "Implement remote Linux allocation and leases",
       "priority": 2,
-      "status": "todo",
+      "status": "done",
       "details": "Implement remote discovery, acquisition, reconciliation, renewal, and release.",
       "depends_on": [
         "T009",
