@@ -247,6 +247,22 @@ export const RESOURCE_BINDINGS: Migration = {
   ],
 };
 
+/** Execution provenance records (SPEC.md section 11.5). */
+export const EXECUTION_PROVENANCE: Migration = {
+  id: 8,
+  name: "execution-provenance",
+  statements: [
+    `CREATE TABLE execution_provenance (
+      operation_id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES sessions(id),
+      created_at TEXT NOT NULL,
+      record_json TEXT NOT NULL
+    )`,
+    `CREATE INDEX idx_execution_provenance_session
+      ON execution_provenance(session_id, created_at)`,
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   INITIAL_SCHEMA,
   MUTATION_LEASES,
@@ -255,6 +271,7 @@ export const MIGRATIONS: readonly Migration[] = [
   WORKSPACE_PROPOSALS,
   STREAMED_OUTPUT,
   RESOURCE_BINDINGS,
+  EXECUTION_PROVENANCE,
 ];
 
 /** Tables with compare-and-swap support and their writable columns. */

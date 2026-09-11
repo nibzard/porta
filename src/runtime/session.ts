@@ -62,6 +62,22 @@ import type {
   ResourceFlowOptions,
   ResolveResourceOptions,
 } from "./resources.js";
+import {
+  prepareVerificationRun as prepareVerificationRunFlow,
+  recordInvocationProvenance as recordInvocationProvenanceFlow,
+  settleVerificationRun as settleVerificationRunFlow,
+} from "./provenance.js";
+import type {
+  ProvenanceEnvironmentOptions,
+  VerificationRunOptions,
+  VerificationRunPreparation,
+  VerificationSettleOptions,
+} from "./provenance.js";
+import type {
+  ExecutionProvenance,
+  ProvenanceCaptureRequest,
+  ProvenanceSettleRequest,
+} from "../schema/workspace.js";
 import type { ResourceDescription } from "../schema/resource.js";
 import type {
   AcceptOutcome,
@@ -506,6 +522,47 @@ export class ManagedSession {
     options: ExportFlowOptions,
   ): Promise<ExportOutcome> {
     return recoverBridgeExport(this.store, this.id, blobs, destination, options);
+  }
+
+  /**
+   * Record one workspace-backed invocation's provenance.
+   *
+   * The capture names the base revision and working copy, the arguments
+   * dispatched, and the environment facts supplied (SPEC.md 11.5).
+   */
+  async recordInvocationProvenance(
+    request: ProvenanceCaptureRequest,
+    options: ProvenanceEnvironmentOptions = {},
+  ): Promise<ExecutionProvenance> {
+    return recordInvocationProvenanceFlow(this.store, this.id, request, options);
+  }
+
+  /**
+   * Prepare one verification run: checkpoint the copy, materialize the
+   * private copy the command runs in, and record the input hash.
+   */
+  async prepareVerificationRun(
+    blobs: BlobStore,
+    request: ProvenanceCaptureRequest,
+    options: VerificationRunOptions,
+  ): Promise<VerificationRunPreparation> {
+    return prepareVerificationRunFlow(this.store, this.id, blobs, request, options);
+  }
+
+  /**
+   * Measure one verification run's output tree and tracked changes.
+   */
+  async settleVerificationRun(
+    blobs: BlobStore,
+    request: ProvenanceSettleRequest,
+    options: VerificationSettleOptions = {},
+  ): Promise<ExecutionProvenance> {
+    return settleVerificationRunFlow(this.store, this.id, blobs, request, options);
+  }
+
+  /** One operation's provenance record, or null when none was captured. */
+  async executionProvenance(operationId: string): Promise<ExecutionProvenance | null> {
+    return this.store.getExecutionProvenance(operationId);
   }
 
   /**

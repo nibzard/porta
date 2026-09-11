@@ -681,7 +681,7 @@
       "id": "T028",
       "title": "Implement verification provenance",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Associate executions with actual inputs, working copies, manifests, and dependency identifiers.",
       "depends_on": [
         "T016",

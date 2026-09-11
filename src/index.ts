@@ -335,6 +335,20 @@ export type {
   ProcessRecord,
 } from "./adapters/local-process-adapter.js";
 
+// Runtime: execution provenance and verification runs.
+export {
+  manifestDigestOf,
+  prepareVerificationRun,
+  recordInvocationProvenance,
+  settleVerificationRun,
+} from "./runtime/provenance.js";
+export type {
+  ProvenanceEnvironmentOptions,
+  VerificationRunOptions,
+  VerificationRunPreparation,
+  VerificationSettleOptions,
+} from "./runtime/provenance.js";
+
 // Records and schemas.
 export * from "./schema/error.js";
 export * from "./schema/event.js";

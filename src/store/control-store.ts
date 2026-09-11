@@ -24,6 +24,7 @@ import {
   workingCopyRecordSchema,
 } from "../schema/workspace.js";
 import type {
+  ExecutionProvenance,
   ProposalRecord,
   ProposalStatus,
   WorkingCopyRecord,
@@ -968,6 +969,53 @@ export class ControlStore {
       ).run(JSON.stringify(updated), resourceId).changes;
       return changes === 0 ? null : updated;
     });
+  }
+
+  // -- Execution provenance ---------------------------------------------------
+
+  /**
+   * Store one execution provenance record (SPEC.md section 11.5).
+   *
+   * One operation owns at most one record; a repeated insert refuses.
+   */
+  insertExecutionProvenance(record: ExecutionProvenance): void {
+    if (!record.operationId || !record.sessionId || !record.capturedAt) {
+      throw new StoreError(
+        "invalid",
+        "Provenance records need operation, session, and capturedAt.",
+      );
+    }
+    this.run(
+      "INSERT INTO execution_provenance (operation_id, session_id, created_at, record_json) VALUES (?, ?, ?, ?)",
+      record.operationId,
+      record.sessionId,
+      record.capturedAt,
+      JSON.stringify(record),
+    );
+  }
+
+  /** One provenance record by its operation, or null. */
+  getExecutionProvenance(operationId: string): ExecutionProvenance | null {
+    const row = this.get(
+      "SELECT record_json FROM execution_provenance WHERE operation_id = ?",
+      operationId,
+    );
+    return row === undefined
+      ? null
+      : (JSON.parse(row.record_json as string) as ExecutionProvenance);
+  }
+
+  /** Overwrite one stored provenance record in place. */
+  saveExecutionProvenance(record: ExecutionProvenance): void {
+    const changes = this.stmt(
+      "UPDATE execution_provenance SET record_json = ? WHERE operation_id = ?",
+    ).run(JSON.stringify(record), record.operationId).changes;
+    if (changes === 0) {
+      throw new StoreError(
+        "not-found",
+        `Provenance record of ${record.operationId} does not exist.`,
+      );
+    }
   }
 
   // -- Transitions ----------------------------------------------------------

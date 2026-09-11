@@ -254,3 +254,158 @@ export const checkpointRequestSchema = {
     extensions: { $ref: "#/$defs/extensions" },
   },
 } as const;
+
+// -- Execution provenance (SPEC.md section 11.5) --------------------------------
+
+/** How one tracked path changed between a run's input and output trees. */
+export type TrackedPathChangeKind = "added" | "removed" | "modified";
+
+/** One tracked path a run changed, as the output tree proves. */
+export interface TrackedPathChange {
+  path: string;
+  change: TrackedPathChangeKind;
+}
+
+/**
+ * What one workspace-backed execution actually ran against
+ * (SPEC.md section 11.5).
+ *
+ * Every workspace-backed invocation records its base revision and working
+ * copy. Verification runs add the tested revision, input and output tree
+ * hashes, and the tracked paths the run changed. The record describes
+ * what ran; it never promises identical results across providers.
+ */
+export interface ExecutionProvenance {
+  operationId: Identifier;
+  sessionId: Identifier;
+  attachment: AttachmentRef;
+  capability: string;
+  operation: string;
+  /** The command's arguments as dispatched. */
+  arguments: unknown;
+  /** Revision the working copy was based on. */
+  baseRevisionId: Identifier;
+  /** Working copy the command ran against. */
+  workingCopyId: Identifier;
+  /**
+   * Revision the run actually tested: the base revision when the copy
+   * was clean, otherwise the pre-run checkpoint. Present when measured.
+   */
+  testedRevisionId?: Identifier;
+  /** `true` when the copy differed from its base at capture time. */
+  copyModified?: boolean;
+  /** Private copy the verification ran in, excluding unrelated writers. */
+  verificationCopyId?: Identifier;
+  /** Tree hash of the verification input. */
+  inputRootHash?: Sha256Hex;
+  /** Tree hash of the verification output. */
+  outputRootHash?: Sha256Hex;
+  /** Tracked paths the run changed. */
+  changedPaths?: TrackedPathChange[];
+  /** Version of the adapter that executed. */
+  adapterVersion?: string;
+  /** Digest of the environment manifest. */
+  manifestDigest?: Sha256Hex;
+  /** Available dependency identifiers. */
+  dependencyIds?: string[];
+  /** Available image identifier. */
+  imageId?: string;
+  capturedAt: UtcTimestamp;
+  /** When the output hash and tracked changes were measured. */
+  settledAt?: UtcTimestamp;
+}
+
+const trackedPathChangeSchema = {
+  type: "object",
+  required: ["path", "change"],
+  additionalProperties: false,
+  properties: {
+    path: { type: "string", minLength: 1, maxLength: 1024 },
+    change: { enum: ["added", "removed", "modified"] },
+  },
+};
+
+const provenanceIdentityProperties = {
+  operationId: { $ref: "#/$defs/identifier" },
+  attachment: { $ref: "https://portable.dev/schema/attachment-ref.json" },
+  capability: { $ref: "#/$defs/capabilityId" },
+  operation: { $ref: "#/$defs/operationName" },
+  arguments: { $ref: "#/$defs/jsonValue" },
+  workingCopyId: { $ref: "#/$defs/identifier" },
+};
+
+export const executionProvenanceSchema = {
+  $id: "https://portable.dev/schema/execution-provenance.json",
+  $defs: DEFS,
+  type: "object",
+  required: [
+    "operationId",
+    "sessionId",
+    "attachment",
+    "capability",
+    "operation",
+    "arguments",
+    "baseRevisionId",
+    "workingCopyId",
+    "capturedAt",
+  ],
+  additionalProperties: false,
+  properties: {
+    ...provenanceIdentityProperties,
+    sessionId: { $ref: "#/$defs/identifier" },
+    baseRevisionId: { $ref: "#/$defs/identifier" },
+    testedRevisionId: { $ref: "#/$defs/identifier" },
+    copyModified: { type: "boolean" },
+    verificationCopyId: { $ref: "#/$defs/identifier" },
+    inputRootHash: { $ref: "#/$defs/digest" },
+    outputRootHash: { $ref: "#/$defs/digest" },
+    changedPaths: { type: "array", maxItems: 65536, items: trackedPathChangeSchema },
+    adapterVersion: { type: "string", minLength: 1, maxLength: 64 },
+    manifestDigest: { $ref: "#/$defs/digest" },
+    dependencyIds: {
+      type: "array",
+      maxItems: 1024,
+      items: { type: "string", minLength: 1, maxLength: 512 },
+    },
+    imageId: { type: "string", minLength: 1, maxLength: 512 },
+    capturedAt: { $ref: "#/$defs/timestamp" },
+    settledAt: { $ref: "#/$defs/timestamp" },
+  },
+} as const;
+
+/** Request that associates one invocation with its workspace context. */
+export interface ProvenanceCaptureRequest {
+  operationId: Identifier;
+  attachment: AttachmentRef;
+  capability: string;
+  operation: string;
+  arguments: unknown;
+  workingCopyId: Identifier;
+}
+
+export const provenanceCaptureRequestSchema = {
+  $id: "https://portable.dev/schema/provenance-capture-request.json",
+  $defs: DEFS,
+  type: "object",
+  required: ["operationId", "attachment", "capability", "operation", "arguments", "workingCopyId"],
+  additionalProperties: false,
+  properties: provenanceIdentityProperties,
+} as const;
+
+/** Request that measures one verification run's output. */
+export interface ProvenanceSettleRequest {
+  operationId: Identifier;
+  attachment: AttachmentRef;
+}
+
+export const provenanceSettleRequestSchema = {
+  $id: "https://portable.dev/schema/provenance-settle-request.json",
+  $defs: DEFS,
+  type: "object",
+  required: ["operationId", "attachment"],
+  additionalProperties: false,
+  properties: {
+    operationId: { $ref: "#/$defs/identifier" },
+    attachment: { $ref: "https://portable.dev/schema/attachment-ref.json" },
+  },
+} as const;

@@ -584,7 +584,7 @@ export function acceptProposal(
  * A replaced or missing attachment makes every handle that names its
  * old generation stale (SPEC.md section 4).
  */
-function requireCurrentAttachment(
+export function requireCurrentAttachment(
   store: ControlStore,
   reference: { attachmentId: string; generation: number },
 ): void {
@@ -606,7 +606,7 @@ function requireCurrentAttachment(
 // -- Internals ----------------------------------------------------------------
 
 /** Enforce the configured import limits before anything publishes. */
-function checkImportLimits(blobRefs: readonly BlobRef[], limits: BlobLimits | undefined): void {
+export function checkImportLimits(blobRefs: readonly BlobRef[], limits: BlobLimits | undefined): void {
   if (limits === undefined) {
     return;
   }
