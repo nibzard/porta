@@ -377,7 +377,7 @@ export type {
   MontyPythonAdapterOptions,
 } from "./adapters/monty-python-adapter.js";
 
-// Adapter: remote Linux allocation and leases on E2B.
+// Adapter: remote Linux allocation, processes, and transfers on E2B.
 export {
   E2B_LINUX_PROVIDER_ID,
   E2BLinuxAdapter,
@@ -387,8 +387,17 @@ export {
 export type {
   E2BAcquisitionRecord,
   E2BClient,
-  E2BLinuxAdapterOptions,
+  E2BCommandOutcome,
+  E2BListedEntry,
+  E2BProcessRecord,
+  E2BPullCopyInput,
+  E2BPushCopyInput,
+  E2BPushReport,
   E2BSandboxInfo,
+  E2BSandboxSession,
+  E2BSessionCommand,
+  E2BStartCommand,
+  E2BTransferLimits,
 } from "./adapters/e2b-adapter.js";
 
 // Runtime: execution provenance and verification runs.

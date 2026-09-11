@@ -1,1640 +1,1634 @@
-{
-  "schema_version": "1.0",
-  "source_files": [
-    "SPEC.md"
-  ],
-  "tasks": [
-    {
-      "id": "T001",
-      "title": "Bootstrap the TypeScript project",
-      "priority": 1,
-      "status": "done",
-      "details": "Set up the library, CLI entry point, build, type checks, and test runner.",
-      "depends_on": [],
-      "tags": [
-        "foundation",
-        "v1"
-      ],
-      "spec_sections": [
-        "15",
-        "22"
-      ],
-      "acceptance_criteria": [
-        "A clean checkout builds and runs tests with documented commands.",
-        "The CLI imports the library; module boundaries allow independent adapters."
-      ]
-    },
-    {
-      "id": "T002",
-      "title": "Define core records and validation schemas",
-      "priority": 1,
-      "status": "done",
-      "details": "Define JSON Schema draft 2020-12 schemas and TypeScript types, including every supporting type named in the specification.",
-      "depends_on": [
-        "T001"
-      ],
-      "tags": [
-        "foundation",
-        "v1"
-      ],
-      "spec_sections": [
-        "3",
-        "5.1",
-        "6",
-        "8",
-        "9.1",
-        "10",
-        "11.1",
-        "13.1",
-        "15",
-        "18",
-        "19"
-      ],
-      "acceptance_criteria": [
-        "Identifiers, names, timestamps, units, status values, and version fields are validated.",
-        "All public requests, results, manifests, recipes, events, and bundles round-trip through JSON.",
-        "Invalid inputs produce field-specific errors before side effects."
-      ]
-    },
-    {
-      "id": "T003",
-      "title": "Implement structured errors and compatibility rules",
-      "priority": 1,
-      "status": "done",
-      "details": "Implement error codes, retry classifications, version checks, and extension handling.",
-      "depends_on": [
-        "T002"
-      ],
-      "tags": [
-        "foundation",
-        "v1"
-      ],
-      "spec_sections": [
-        "6.1",
-        "18.2",
-        "20"
-      ],
-      "acceptance_criteria": [
-        "Every required error code has a stable serializable representation.",
-        "Unknown descriptive extensions are tolerated; unknown requirements and required extensions are rejected.",
-        "Errors exclude credentials and distinguish policy, input, semantic, and provider failures."
-      ]
-    },
-    {
-      "id": "T004",
-      "title": "Implement the durable control store",
-      "priority": 1,
-      "status": "done",
-      "details": "Add a local transactional database, migrations, durable records, and atomic compare-and-swap operations.",
-      "depends_on": [
-        "T002",
-        "T003"
-      ],
-      "tags": [
-        "storage",
-        "v1"
-      ],
-      "spec_sections": [
-        "4",
-        "5.2"
-      ],
-      "acceptance_criteria": [
-        "Concurrent processes share uniqueness and transaction guarantees.",
-        "Restart preserves sessions, attachments, operations, transitions, and cleanup records.",
-        "Missing or unverified blobs cannot become committed revision references."
-      ]
-    },
-    {
-      "id": "T005",
-      "title": "Implement mutation leases and fencing",
-      "priority": 1,
-      "status": "done",
-      "details": "Serialize attachment mutations with durable leases and monotonic fencing tokens.",
-      "depends_on": [
-        "T004"
-      ],
-      "tags": [
-        "storage",
-        "v1"
-      ],
-      "spec_sections": [
-        "5.2",
-        "8.1",
-        "13.3"
-      ],
-      "acceptance_criteria": [
-        "An expired controller cannot commit after a newer controller acquires authority.",
-        "Release and replacement use the same mutation lock.",
-        "Tests race controllers and deliver delayed provider responses after lease expiration."
-      ]
-    },
-    {
-      "id": "T006",
-      "title": "Implement the durable event stream",
-      "priority": 1,
-      "status": "done",
-      "details": "Write events with state mutations and expose replay by session sequence.",
-      "depends_on": [
-        "T004"
-      ],
-      "tags": [
-        "storage",
-        "v1"
-      ],
-      "spec_sections": [
-        "9.3",
-        "18.1"
-      ],
-      "acceptance_criteria": [
-        "All required event types have validated payloads.",
-        "State and its event commit together; restart preserves sequence order.",
-        "Consumers can resume and tolerate duplicate delivery without missing committed events."
-      ]
-    },
-    {
-      "id": "T007",
-      "title": "Implement session creation and inspection",
-      "priority": 1,
-      "status": "done",
-      "details": "Create durable session identities and describe their workspace, policy, attachments, and resources.",
-      "depends_on": [
-        "T004",
-        "T006"
-      ],
-      "tags": [
-        "runtime",
-        "v1"
-      ],
-      "spec_sections": [
-        "5.1",
-        "15"
-      ],
-      "acceptance_criteria": [
-        "Attachment names are unique within each session.",
-        "Inspection reports actual persisted state without claiming harness restoration.",
-        "Public create and describe results satisfy their schemas."
-      ]
-    },
-    {
-      "id": "T008",
-      "title": "Implement trusted policy evaluation",
-      "priority": 1,
-      "status": "done",
-      "details": "Accept authenticated authority from the embedding context and enforce all version-one policy dimensions.",
-      "depends_on": [
-        "T002",
-        "T003",
-        "T004"
-      ],
-      "tags": [
-        "policy",
-        "v1"
-      ],
-      "spec_sections": [
-        "6.4",
-        "7"
-      ],
-      "acceptance_criteria": [
-        "Check provider, operation, locality, transfer, egress, host access, lifetime, resources, secrets, and service audience limits.",
-        "Model-controlled inputs cannot replace authenticated authority.",
-        "Omitted permissions inherit configured limits and preferences never weaken them."
-      ]
-    },
-    {
-      "id": "T009",
-      "title": "Implement secret reference resolution",
-      "priority": 1,
-      "status": "done",
-      "details": "Resolve authorized secret references at use time and keep credentials out of public metadata.",
-      "depends_on": [
-        "T008"
-      ],
-      "tags": [
-        "policy",
-        "v1"
-      ],
-      "spec_sections": [
-        "7",
-        "9.3",
-        "10",
-        "19"
-      ],
-      "acceptance_criteria": [
-        "Resolution rejects unauthorized references and uses current authority.",
-        "Resource serialization, events, errors, and bundles omit reusable credentials.",
-        "Raw artifact and file storage follows configured access and export policy."
-      ]
-    },
-    {
-      "id": "T010",
-      "title": "Implement capability discovery and matching",
-      "priority": 1,
-      "status": "done",
-      "details": "Validate descriptors and match semantic requirements against configured environment offers.",
-      "depends_on": [
-        "T002",
-        "T003",
-        "T008"
-      ],
-      "tags": [
-        "capabilities",
-        "v1"
-      ],
-      "spec_sections": [
-        "6"
-      ],
-      "acceptance_criteria": [
-        "Explicit provider selection works; zero and multiple matches produce the specified errors.",
-        "Platform, resource minima, engine semantics, and constraints are checked without silent fallback.",
-        "Acquired manifests undergo the same validation before activation."
-      ]
-    },
-    {
-      "id": "T011",
-      "title": "Define adapter contracts and a deterministic test adapter",
-      "priority": 1,
-      "status": "done",
-      "details": "Implement adapter interfaces and a controllable fake for allocation, operation, lease, and failure behavior.",
-      "depends_on": [
-        "T002",
-        "T003"
-      ],
-      "tags": [
-        "adapters",
-        "v1"
-      ],
-      "spec_sections": [
-        "8",
-        "21"
-      ],
-      "acceptance_criteria": [
-        "All supporting acquisition, cancellation, binding, and lease types are concrete.",
-        "The fake simulates lost responses, delayed completion, expiration, and release failure.",
-        "Tests require no external accounts or paid allocations."
-      ]
-    },
-    {
-      "id": "T012",
-      "title": "Implement durable acquisition and reconciliation",
-      "priority": 1,
-      "status": "done",
-      "details": "Persist acquisition identities, validate acquired environments, and activate attachments.",
-      "depends_on": [
-        "T005",
-        "T006",
-        "T007",
-        "T008",
-        "T010",
-        "T011"
-      ],
-      "tags": [
-        "runtime",
-        "v1"
-      ],
-      "spec_sections": [
-        "5.2",
-        "8"
-      ],
-      "acceptance_criteria": [
-        "Duplicate requests recover the same logical acquisition or reject conflicting inputs.",
-        "A lost acquisition response triggers reconciliation before another allocation.",
-        "Unresolved allocations and failed validation remain visible until cleanup completes."
-      ]
-    },
-    {
-      "id": "T013",
-      "title": "Implement lease renewal and allocation cleanup",
-      "priority": 1,
-      "status": "done",
-      "details": "Persist lease state and retry idempotent release through visible cleanup obligations.",
-      "depends_on": [
-        "T012"
-      ],
-      "tags": [
-        "runtime",
-        "v1"
-      ],
-      "spec_sections": [
-        "8",
-        "8.1"
-      ],
-      "acceptance_criteria": [
-        "Expired attachments reject operations and report provider termination separately.",
-        "Renewal failures mark resources unavailable when authority expires.",
-        "Cleanup survives restart and cannot invalidate unrelated attachments."
-      ]
-    },
-    {
-      "id": "T014",
-      "title": "Implement content-addressed blob storage",
-      "priority": 1,
-      "status": "done",
-      "details": "Store and retrieve durable SHA-256 blobs with integrity and size checks.",
-      "depends_on": [
-        "T004",
-        "T008"
-      ],
-      "tags": [
-        "workspace",
-        "v1"
-      ],
-      "spec_sections": [
-        "11.2",
-        "11.6"
-      ],
-      "acceptance_criteria": [
-        "Corrupt or incomplete blobs cannot be published in revisions.",
-        "Binary data round-trips and duplicate content shares a digest.",
-        "Authorized retrieval and transfer limits apply before publication."
-      ]
-    },
-    {
-      "id": "T015",
-      "title": "Implement canonical workspace trees and paths",
-      "priority": 1,
-      "status": "done",
-      "details": "Build sorted tree manifests with the exact hash encoding and portable metadata rules.",
-      "depends_on": [
-        "T002",
-        "T003",
-        "T014"
-      ],
-      "tags": [
-        "workspace",
-        "v1"
-      ],
-      "spec_sections": [
-        "11.1",
-        "11.2"
-      ],
-      "acceptance_criteria": [
-        "Digest vectors cover Unicode sequences, executable bits, directories, and binary files.",
-        "Absolute paths, traversal, null bytes, unsupported links, and special files fail explicitly.",
-        "Target path collisions and unrepresentable names are rejected without renaming."
-      ]
-    },
-    {
-      "id": "T016",
-      "title": "Implement stable workspace import and checkpoints",
-      "priority": 1,
-      "status": "done",
-      "details": "Create immutable revisions from locked or snapshotted sources with recorded import exclusions.",
-      "depends_on": [
-        "T004",
-        "T006",
-        "T015"
-      ],
-      "tags": [
-        "workspace",
-        "v1"
-      ],
-      "spec_sections": [
-        "11.3",
-        "11.4",
-        "11.6"
-      ],
-      "acceptance_criteria": [
-        "Initial import creates a revision; later imports require the expected head.",
-        "Uncoordinated writers without a snapshot cause WorkspaceUnstable.",
-        "File counts, byte limits, and exclusion provenance are enforced."
-      ]
-    },
-    {
-      "id": "T017",
-      "title": "Implement materialization and private working copies",
-      "priority": 1,
-      "status": "done",
-      "details": "Transfer selected revisions into read-only snapshots or isolated mutable copies.",
-      "depends_on": [
-        "T008",
-        "T012",
-        "T016"
-      ],
-      "tags": [
-        "workspace",
-        "v1"
-      ],
-      "spec_sections": [
-        "11.1",
-        "11.3",
-        "11.6"
-      ],
-      "acceptance_criteria": [
-        "Transfer policy is checked before bytes leave the source.",
-        "Materialization verifies all hashes and target filesystem compatibility.",
-        "Private copies cannot publish directly to the authoritative head."
-      ]
-    },
-    {
-      "id": "T018",
-      "title": "Implement workspace proposals and acceptance",
-      "priority": 1,
-      "status": "done",
-      "details": "Create candidate revisions and accept them through an atomic expected-head check.",
-      "depends_on": [
-        "T005",
-        "T006",
-        "T017"
-      ],
-      "tags": [
-        "workspace",
-        "v1"
-      ],
-      "spec_sections": [
-        "4",
-        "11.3"
-      ],
-      "acceptance_criteria": [
-        "Concurrent proposals cannot overwrite each other silently.",
-        "A stale head returns WorkspaceConflict without mutation or automatic merging.",
-        "Acceptance rejects proposals from stale attachment generations."
-      ]
-    },
-    {
-      "id": "T019",
-      "title": "Implement local export and crash recovery",
-      "priority": 1,
-      "status": "done",
-      "details": "Stage accepted changes, validate the local base tree, and journal export recovery.",
-      "depends_on": [
-        "T016",
-        "T018"
-      ],
-      "tags": [
-        "workspace",
-        "v1"
-      ],
-      "spec_sections": [
-        "11.4"
-      ],
-      "acceptance_criteria": [
-        "Changed local files cause a conflict before overwrite.",
-        "An exclusive bridge lock protects export and recovery.",
-        "Crashes between file updates can complete or restore before another bridge operation."
-      ]
-    },
-    {
-      "id": "T020",
-      "title": "Implement the workspace capability",
-      "priority": 1,
-      "status": "done",
-      "details": "Expose list, read, write, delete, and stat against authorized working copies.",
-      "depends_on": [
-        "T008",
-        "T017"
-      ],
-      "tags": [
-        "capabilities",
-        "v1"
-      ],
-      "spec_sections": [
-        "14.3"
-      ],
-      "acceptance_criteria": [
-        "Read-only copies reject mutation and paths are validated on every call.",
-        "Writes are atomic per file and binary transfer is explicit.",
-        "Capability operations cannot change revision authority directly."
-      ]
-    },
-    {
-      "id": "T021",
-      "title": "Implement invocation admission and request deduplication",
-      "priority": 1,
-      "status": "done",
-      "details": "Atomically admit operations and persist request keys and input hashes before dispatch.",
-      "depends_on": [
-        "T004",
-        "T005",
-        "T006",
-        "T008",
-        "T010",
-        "T012"
-      ],
-      "tags": [
-        "operations",
-        "v1"
-      ],
-      "spec_sections": [
-        "5.3",
-        "9.1"
-      ],
-      "acceptance_criteria": [
-        "Admission checks session, attachment, generation, policy, and lease together.",
-        "A repeated key returns the existing operation; changed input returns RequestConflict.",
-        "Admission races with replacement and release cannot dispatch stale work."
-      ]
-    },
-    {
-      "id": "T022",
-      "title": "Implement operation outcomes and reconciliation",
-      "priority": 1,
-      "status": "done",
-      "details": "Persist dispatch, completion, failure, and uncertainty without unsafe replay.",
-      "depends_on": [
-        "T011",
-        "T021"
-      ],
-      "tags": [
-        "operations",
-        "v1"
-      ],
-      "spec_sections": [
-        "9.2"
-      ],
-      "acceptance_criteria": [
-        "A lost response after possible effects becomes unknown.",
-        "Reconciliation appends evidence and preserves the original unknown record.",
-        "Nonzero process exit codes remain completed operations; unsafe effects are not retried automatically."
-      ]
-    },
-    {
-      "id": "T023",
-      "title": "Implement cancellation and deadlines",
-      "priority": 1,
-      "status": "done",
-      "details": "Apply deadlines and represent confirmed, best-effort, and unsupported cancellation.",
-      "depends_on": [
-        "T013",
-        "T022"
-      ],
-      "tags": [
-        "operations",
-        "v1"
-      ],
-      "spec_sections": [
-        "7",
-        "9.2",
-        "15"
-      ],
-      "acceptance_criteria": [
-        "Timeout alone never proves termination.",
-        "Cancelling a caller wait leaves the remote operation running unless explicitly cancelled.",
-        "Prior effects remain visible after cancellation and unconfirmed stops remain unresolved."
-      ]
-    },
-    {
-      "id": "T024",
-      "title": "Implement streamed output and artifact records",
-      "priority": 1,
-      "status": "done",
-      "details": "Persist ordered output streams and content-addressed result artifacts.",
-      "depends_on": [
-        "T006",
-        "T009",
-        "T014",
-        "T022"
-      ],
-      "tags": [
-        "operations",
-        "v1"
-      ],
-      "spec_sections": [
-        "9.3"
-      ],
-      "acceptance_criteria": [
-        "Standard output and standard error remain separate with per-stream sequence numbers.",
-        "Binary output, truncation, omitted byte counts when known, and continued execution are reported.",
-        "Artifact records contain digest, size, media type, and authorized retrieval information."
-      ]
-    },
-    {
-      "id": "T025",
-      "title": "Implement resource binding and validity checks",
-      "priority": 1,
-      "status": "done",
-      "details": "Track ownership, generation, lifetime, expiry, and authorized bindings.",
-      "depends_on": [
-        "T005",
-        "T008",
-        "T009",
-        "T012",
-        "T013"
-      ],
-      "tags": [
-        "resources",
-        "v1"
-      ],
-      "spec_sections": [
-        "10"
-      ],
-      "acceptance_criteria": [
-        "Stale, expired, unauthorized, and released resources fail resolution.",
-        "Reattachment creates a new binding without reviving old handles.",
-        "Provider credentials never appear in portable references."
-      ]
-    },
-    {
-      "id": "T026",
-      "title": "Implement the native process capability contract",
-      "priority": 1,
-      "status": "done",
-      "details": "Define validated run, start, inspect, and terminate requests and results.",
-      "depends_on": [
-        "T002",
-        "T010",
-        "T011"
-      ],
-      "tags": [
-        "capabilities",
-        "v1"
-      ],
-      "spec_sections": [
-        "14.1"
-      ],
-      "acceptance_criteria": [
-        "Arguments, working directory, environment, input, timeout, and output limits have explicit semantics.",
-        "Signals, descendant termination, and process lifetime are declared attributes.",
-        "Shell interpretation occurs only through an explicitly requested shell executable."
-      ]
-    },
-    {
-      "id": "T027",
-      "title": "Implement the local process adapter",
-      "priority": 1,
-      "status": "done",
-      "details": "Execute managed local processes and report actual host access and enforcement.",
-      "depends_on": [
-        "T013",
-        "T017",
-        "T022",
-        "T023",
-        "T024",
-        "T025",
-        "T026"
-      ],
-      "tags": [
-        "adapters",
-        "v1"
-      ],
-      "spec_sections": [
-        "7",
-        "8",
-        "14.1"
-      ],
-      "acceptance_criteria": [
-        "All required process operations work with binary input and separate output streams.",
-        "Background resources remain inspectable across CLI exits through a documented supervisor or equivalent mechanism.",
-        "Unsupported isolation is rejected and termination claims are tested against descendants."
-      ]
-    },
-    {
-      "id": "T028",
-      "title": "Implement verification provenance",
-      "priority": 1,
-      "status": "done",
-      "details": "Associate executions with actual inputs, working copies, manifests, and dependency identifiers.",
-      "depends_on": [
-        "T016",
-        "T020",
-        "T022",
-        "T024",
-        "T027"
-      ],
-      "tags": [
-        "workspace",
-        "v1"
-      ],
-      "spec_sections": [
-        "11.5"
-      ],
-      "acceptance_criteria": [
-        "Verification excludes unrelated writers and records input and output tree hashes.",
-        "Modified working copies are never reported as testing the unchanged base revision.",
-        "Results report tracked input changes, arguments, adapter version, and available image or dependency identifiers."
-      ]
-    },
-    {
-      "id": "T029",
-      "title": "Implement policy revocation",
-      "priority": 1,
-      "status": "done",
-      "details": "Commit updated authority and stop further admissions under revoked permissions.",
-      "depends_on": [
-        "T008",
-        "T021",
-        "T023"
-      ],
-      "tags": [
-        "policy",
-        "v1"
-      ],
-      "spec_sections": [
-        "7"
-      ],
-      "acceptance_criteria": [
-        "New admissions reject revoked authority immediately after commit.",
-        "Existing operations receive supported cancellation requests.",
-        "Unconfirmed cancellation remains visible rather than being reported as stopped."
-      ]
-    },
-    {
-      "id": "T030",
-      "title": "Implement release and session reopening",
-      "priority": 1,
-      "status": "done",
-      "details": "Release attachments and reopen or close sessions with reconciled resource state.",
-      "depends_on": [
-        "T007",
-        "T013",
-        "T022",
-        "T025",
-        "T029"
-      ],
-      "tags": [
-        "runtime",
-        "v1"
-      ],
-      "spec_sections": [
-        "5.1",
-        "5.3",
-        "8",
-        "15"
-      ],
-      "acceptance_criteria": [
-        "Closing rejects new work and stays closing until release succeeds or unresolved allocations are recorded.",
-        "Repeated release is idempotent and invalidates owned handles.",
-        "Reopening reconciles leases and operations without pretending to restore a harness conversation."
-      ]
-    },
-    {
-      "id": "T031",
-      "title": "Define the lightweight Python capability",
-      "priority": 2,
-      "status": "done",
-      "details": "Define evaluation schemas, engine attributes, language subsets, limits, and host-function bindings.",
-      "depends_on": [
-        "T002",
-        "T010",
-        "T020"
-      ],
-      "tags": [
-        "capabilities",
-        "v1"
-      ],
-      "spec_sections": [
-        "14.2"
-      ],
-      "acceptance_criteria": [
-        "Matching distinguishes lightweight execution from full Python semantics.",
-        "Input and result serialization, output, and structured exceptions are specified.",
-        "Interpreter locals are not declared portable workspace state."
-      ]
-    },
-    {
-      "id": "T032",
-      "title": "Implement the lightweight Python adapter",
-      "priority": 2,
-      "status": "done",
-      "details": "Select and integrate a lightweight engine, starting with Monty if it satisfies the required profile.",
-      "depends_on": [
-        "T009",
-        "T011",
-        "T020",
-        "T022",
-        "T024",
-        "T031"
-      ],
-      "tags": [
-        "adapters",
-        "v1"
-      ],
-      "spec_sections": [
-        "8",
-        "14.2",
-        "22"
-      ],
-      "acceptance_criteria": [
-        "Document the selected engine version, subset, imports, limits, and unsupported requirements.",
-        "Isolated evaluation works with authorized workspace and host functions.",
-        "Conformance cases cover unsupported imports, serialization, limits, and state isolation."
-      ]
-    },
-    {
-      "id": "T033",
-      "title": "Select remote compute and browser providers",
-      "priority": 2,
-      "status": "done",
-      "details": "Evaluate provider contracts and select one remote Linux provider and one independent browser provider.",
-      "depends_on": [
-        "T010",
-        "T011",
-        "T026",
-        "T031"
-      ],
-      "tags": [
-        "adapters",
-        "v1"
-      ],
-      "spec_sections": [
-        "8",
-        "14.4",
-        "14.6",
-        "22"
-      ],
-      "acceptance_criteria": [
-        "Record acquisition reconciliation, persistence, enforcement, and service connectivity support from provider documentation.",
-        "Document credentials, test authority, cleanup behavior, and unsupported requirements.",
-        "Selected providers can satisfy the acceptance workflow without adding an MCP dependency."
-      ]
-    },
-    {
-      "id": "T034",
-      "title": "Implement remote Linux allocation and leases",
-      "priority": 2,
-      "status": "done",
-      "details": "Implement remote discovery, acquisition, reconciliation, renewal, and release.",
-      "depends_on": [
-        "T009",
-        "T012",
-        "T013",
-        "T033"
-      ],
-      "tags": [
-        "adapters",
-        "v1"
-      ],
-      "spec_sections": [
-        "8",
-        "22"
-      ],
-      "acceptance_criteria": [
-        "Lost acquisition responses are recoverable by durable identity.",
-        "Acquired manifests describe actual resources and supported enforcement.",
-        "Paid tests require configured authority; leaked or uncertain allocations remain visible."
-      ]
-    },
-    {
-      "id": "T035",
-      "title": "Implement remote processes and workspace transfer",
-      "priority": 2,
-      "status": "todo",
-      "details": "Run native commands and manage private copies on the selected remote provider.",
-      "depends_on": [
-        "T017",
-        "T022",
-        "T023",
-        "T024",
-        "T025",
-        "T026",
-        "T034"
-      ],
-      "tags": [
-        "adapters",
-        "v1"
-      ],
-      "spec_sections": [
-        "11.6",
-        "14.1"
-      ],
-      "acceptance_criteria": [
-        "Arguments, binary output, timeouts, background processes, and termination semantics satisfy the declared profile.",
-        "Transfers validate policy and hashes before use.",
-        "Changes return as proposals with provenance instead of overwriting local files."
-      ]
-    },
-    {
-      "id": "T036",
-      "title": "Implement reconstruction recipes and state classification",
-      "priority": 2,
-      "status": "todo",
-      "details": "Validate state dispositions and run declared reconstruction through authorized operations.",
-      "depends_on": [
-        "T020",
-        "T022",
-        "T025",
-        "T028"
-      ],
-      "tags": [
-        "handoff",
-        "v1"
-      ],
-      "spec_sections": [
-        "12"
-      ],
-      "acceptance_criteria": [
-        "Recipes declare revision, capabilities, operations, outputs, and failure conditions.",
-        "Portable, reconstructable, reattachable, and native state receive explicit treatment.",
-        "Native state is invalidated and parsing a recipe never executes it."
-      ]
-    },
-    {
-      "id": "T037",
-      "title": "Implement replacement planning",
-      "priority": 2,
-      "status": "todo",
-      "details": "Build a side-effect-free plan for replacing one attachment.",
-      "depends_on": [
-        "T010",
-        "T018",
-        "T025",
-        "T036"
-      ],
-      "tags": [
-        "handoff",
-        "v1"
-      ],
-      "spec_sections": [
-        "13.1"
-      ],
-      "acceptance_criteria": [
-        "Plans list preserved, reconstructed, reattached, and invalidated state.",
-        "Stale source generations and unsatisfied required resources fail before provisioning.",
-        "Planning allocates nothing and does not change the workspace head."
-      ]
-    },
-    {
-      "id": "T038",
-      "title": "Implement replacement preparation and checkpointing",
-      "priority": 2,
-      "status": "todo",
-      "details": "Quiesce the source, block admissions, and persist the selected revision and transition inventory.",
-      "depends_on": [
-        "T005",
-        "T016",
-        "T021",
-        "T023",
-        "T027",
-        "T037"
-      ],
-      "tags": [
-        "handoff",
-        "v1"
-      ],
-      "spec_sections": [
-        "5.3",
-        "13.2"
-      ],
-      "acceptance_criteria": [
-        "Wait, cancel, and reject policies handle active operations explicitly.",
-        "Unknown outcomes block replacement; deadlines cannot bypass them.",
-        "Managed background writers stop or use a declared consistent snapshot before checkpointing."
-      ]
-    },
-    {
-      "id": "T039",
-      "title": "Implement replacement destination preparation",
-      "priority": 2,
-      "status": "todo",
-      "details": "Provision, materialize, reconstruct, bind resources, and validate the candidate environment.",
-      "depends_on": [
-        "T012",
-        "T017",
-        "T025",
-        "T035",
-        "T036",
-        "T038"
-      ],
-      "tags": [
-        "handoff",
-        "v1"
-      ],
-      "spec_sections": [
-        "13.2"
-      ],
-      "acceptance_criteria": [
-        "Acquisition uses the transition request identity and reconciles interrupted requests.",
-        "Validation checks manifest, enforcement, revision integrity, and required resources.",
-        "Source authority remains unchanged until the switch transaction."
-      ]
-    },
-    {
-      "id": "T040",
-      "title": "Implement the atomic attachment switch",
-      "priority": 2,
-      "status": "todo",
-      "details": "Commit the new binding, generation, resources, event, outcome, and cleanup obligations together.",
-      "depends_on": [
-        "T005",
-        "T006",
-        "T018",
-        "T025",
-        "T039"
-      ],
-      "tags": [
-        "handoff",
-        "v1"
-      ],
-      "spec_sections": [
-        "4",
-        "13.3"
-      ],
-      "acceptance_criteria": [
-        "The transaction validates generation, fencing token, and candidate validation state.",
-        "Unrelated attachment generations and the workspace head remain unchanged.",
-        "A repeated request after a lost switch response returns the committed result."
-      ]
-    },
-    {
-      "id": "T041",
-      "title": "Implement replacement abort and forward recovery",
-      "priority": 2,
-      "status": "todo",
-      "details": "Resume or abort durable transitions and preserve the committed authority boundary.",
-      "depends_on": [
-        "T013",
-        "T022",
-        "T030",
-        "T040"
-      ],
-      "tags": [
-        "handoff",
-        "v1"
-      ],
-      "spec_sections": [
-        "13.4"
-      ],
-      "acceptance_criteria": [
-        "Failures before switch retain the source binding and clean up candidates.",
-        "Failures after switch never reactivate the old generation; source cleanup retries independently.",
-        "Failure reports list surviving reconstruction effects and any source services that need rebuilding."
-      ]
-    },
-    {
-      "id": "T042",
-      "title": "Define browser and service capability contracts",
-      "priority": 2,
-      "status": "todo",
-      "details": "Specify browser lifecycle and service exposure schemas with owner generations and audiences.",
-      "depends_on": [
-        "T002",
-        "T010",
-        "T025"
-      ],
-      "tags": [
-        "capabilities",
-        "v1"
-      ],
-      "spec_sections": [
-        "14.4",
-        "14.6"
-      ],
-      "acceptance_criteria": [
-        "Browser create, navigate, screenshot, inspect, and close are fully typed.",
-        "Service expose, connect, and close specify process, port, protocol, audience, and expiration.",
-        "Independent browser lifetimes and dependent service bindings have distinct validity rules."
-      ]
-    },
-    {
-      "id": "T043",
-      "title": "Implement the independent browser adapter",
-      "priority": 2,
-      "status": "todo",
-      "details": "Create and operate browser sessions independently of compute allocation.",
-      "depends_on": [
-        "T009",
-        "T013",
-        "T022",
-        "T024",
-        "T025",
-        "T033",
-        "T042"
-      ],
-      "tags": [
-        "adapters",
-        "v1"
-      ],
-      "spec_sections": [
-        "14.4"
-      ],
-      "acceptance_criteria": [
-        "Sessions support the selected persistence and reattachment behavior.",
-        "Screenshots become authorized artifacts and provider expiration is reported.",
-        "Cookies stay provider-owned and releasing compute does not close the browser."
-      ]
-    },
-    {
-      "id": "T044",
-      "title": "Implement authorized service connections",
-      "priority": 2,
-      "status": "todo",
-      "details": "Expose application ports and bind an authorized browser consumer to the service.",
-      "depends_on": [
-        "T008",
-        "T009",
-        "T025",
-        "T027",
-        "T035",
-        "T042",
-        "T043"
-      ],
-      "tags": [
-        "resources",
-        "v1"
-      ],
-      "spec_sections": [
-        "10",
-        "14.6"
-      ],
-      "acceptance_criteria": [
-        "Exposure and consumer egress policy are checked independently.",
-        "Public unauthenticated exposure requires explicit authority.",
-        "Compute replacement invalidates old connections while preserving the browser session."
-      ]
-    },
-    {
-      "id": "T045",
-      "title": "Integrate browser continuity with compute replacement",
-      "priority": 2,
-      "status": "todo",
-      "details": "Reconstruct the application server and create a new service binding after compute replacement.",
-      "depends_on": [
-        "T041",
-        "T043",
-        "T044"
-      ],
-      "tags": [
-        "handoff",
-        "v1"
-      ],
-      "spec_sections": [
-        "10",
-        "13",
-        "14.6"
-      ],
-      "acceptance_criteria": [
-        "The same valid browser handle connects to the replacement server.",
-        "Old compute and service handles fail without affecting the browser generation.",
-        "Expired browser leases are reported honestly instead of claiming preservation."
-      ]
-    },
-    {
-      "id": "T046",
-      "title": "Implement bundle export",
-      "priority": 3,
-      "status": "todo",
-      "details": "Export validated workspace state, journal entries, resource references, and state dispositions.",
-      "depends_on": [
-        "T006",
-        "T009",
-        "T015",
-        "T018",
-        "T024",
-        "T025",
-        "T036"
-      ],
-      "tags": [
-        "portability",
-        "v1"
-      ],
-      "spec_sections": [
-        "19",
-        "20"
-      ],
-      "acceptance_criteria": [
-        "Self-contained bundles include every referenced blob; reference-only bundles identify authorized locations.",
-        "Manifests include schema, revision, root hash, generations, inventory, and dispositions.",
-        "Secrets and reusable credentials are absent and opaque harness references remain opaque."
-      ]
-    },
-    {
-      "id": "T047",
-      "title": "Implement bundle validation and import",
-      "priority": 3,
-      "status": "todo",
-      "details": "Validate bundles before creating a new session and materializing approved state.",
-      "depends_on": [
-        "T008",
-        "T016",
-        "T030",
-        "T046"
-      ],
-      "tags": [
-        "portability",
-        "v1"
-      ],
-      "spec_sections": [
-        "19",
-        "20"
-      ],
-      "acceptance_criteria": [
-        "Reject missing or corrupt blobs, unsafe paths, size violations, and unknown required extensions.",
-        "Import does not execute recipes or claim authority over the source session.",
-        "Same-session continuation requires the original authoritative control store and its locks."
-      ]
-    },
-    {
-      "id": "T048",
-      "title": "Assemble the public library interface",
-      "priority": 3,
-      "status": "todo",
-      "details": "Expose the complete Portable and Session interfaces with validated serializable results.",
-      "depends_on": [
-        "T019",
-        "T020",
-        "T028",
-        "T030",
-        "T032",
-        "T041",
-        "T045",
-        "T047"
-      ],
-      "tags": [
-        "library",
-        "v1"
-      ],
-      "spec_sections": [
-        "15"
-      ],
-      "acceptance_criteria": [
-        "Every specified method is available and documented with concrete supporting types.",
-        "Long operations expose durable identifiers before completion without implicit cancellation on wait exit.",
-        "Adapter-specific behavior stays behind declared capability contracts."
-      ]
-    },
-    {
-      "id": "T049",
-      "title": "Implement CLI configuration and output conventions",
-      "priority": 3,
-      "status": "todo",
-      "details": "Build the thin CLI with explicit session selection, request files, standard input, and structured output.",
-      "depends_on": [
-        "T003",
-        "T008",
-        "T009",
-        "T048"
-      ],
-      "tags": [
-        "cli",
-        "v1"
-      ],
-      "spec_sections": [
-        "16"
-      ],
-      "acceptance_criteria": [
-        "Machine output is JSON or newline-delimited JSON; diagnostics use standard error.",
-        "Exit codes distinguish known failure, invalid input, and unknown outcome.",
-        "Secrets and JSON requests do not require shell interpolation; multiple sessions are never guessed."
-      ]
-    },
-    {
-      "id": "T050",
-      "title": "Implement CLI session and workspace commands",
-      "priority": 3,
-      "status": "todo",
-      "details": "Expose session creation, description, checkpoints, proposals, and acceptance.",
-      "depends_on": [
-        "T049"
-      ],
-      "tags": [
-        "cli",
-        "v1"
-      ],
-      "spec_sections": [
-        "16"
-      ],
-      "acceptance_criteria": [
-        "Commands call library methods and validate expected revisions and generations.",
-        "Conflicts leave existing files and authoritative state unchanged.",
-        "Documented examples run against a temporary local workspace."
-      ]
-    },
-    {
-      "id": "T051",
-      "title": "Implement CLI attachment and operation commands",
-      "priority": 3,
-      "status": "todo",
-      "details": "Expose attach, invoke, operation inspection, cancellation, and release.",
-      "depends_on": [
-        "T049"
-      ],
-      "tags": [
-        "cli",
-        "v1"
-      ],
-      "spec_sections": [
-        "16"
-      ],
-      "acceptance_criteria": [
-        "Request keys and generations reach the library without being regenerated on retries.",
-        "Completed process failures retain their process exit code in the result.",
-        "Long operations return identifiers and remain inspectable across CLI process exits."
-      ]
-    },
-    {
-      "id": "T052",
-      "title": "Implement CLI replacement, recovery, and events",
-      "priority": 3,
-      "status": "todo",
-      "details": "Expose replacement plans, execution, durable recovery, and event replay.",
-      "depends_on": [
-        "T049"
-      ],
-      "tags": [
-        "cli",
-        "v1"
-      ],
-      "spec_sections": [
-        "16",
-        "18.1"
-      ],
-      "acceptance_criteria": [
-        "Plan mode makes no allocations and reports state dispositions.",
-        "Recovery reports unresolved operations and pending allocation cleanup.",
-        "Event output resumes by sequence and replacement results report old and new generations."
-      ]
-    },
-    {
-      "id": "T053",
-      "title": "Implement the reusable conformance runner",
-      "priority": 2,
-      "status": "todo",
-      "details": "Load adapters and execute capability profiles with machine-readable reports.",
-      "depends_on": [
-        "T002",
-        "T003",
-        "T011",
-        "T024"
-      ],
-      "tags": [
-        "conformance",
-        "v1"
-      ],
-      "spec_sections": [
-        "21"
-      ],
-      "acceptance_criteria": [
-        "Reports identify spec, adapter, provider configuration, passed cases, failed cases, and skipped cases.",
-        "Skipped cases never count as supported behavior.",
-        "External effects and paid allocation require configured test authority."
-      ]
-    },
-    {
-      "id": "T054",
-      "title": "Add acquisition and policy conformance cases",
-      "priority": 2,
-      "status": "todo",
-      "details": "Test acquisition reconciliation, lease behavior, matching, and authorization.",
-      "depends_on": [
-        "T010",
-        "T013",
-        "T029",
-        "T053"
-      ],
-      "tags": [
-        "conformance",
-        "v1"
-      ],
-      "spec_sections": [
-        "21"
-      ],
-      "acceptance_criteria": [
-        "Cover duplicate acquisition, lost response, release retry, expiration, and stale controllers.",
-        "Cover missing capability, insufficient resources, unknown constraints, ambiguous provider, and policy denial.",
-        "Verify declared restrictions using observable behavior and report their enforcement limits."
-      ]
-    },
-    {
-      "id": "T055",
-      "title": "Add workspace conformance cases",
-      "priority": 2,
-      "status": "todo",
-      "details": "Verify tree integrity, portable files, proposal authority, stable checkpoints, and export recovery.",
-      "depends_on": [
-        "T019",
-        "T020",
-        "T028",
-        "T053"
-      ],
-      "tags": [
-        "conformance",
-        "v1"
-      ],
-      "spec_sections": [
-        "21"
-      ],
-      "acceptance_criteria": [
-        "Cover binary files, Unicode, executable bits, invalid paths, links, size limits, and hash mismatch.",
-        "Race proposals and local edits to verify conflict behavior.",
-        "Inject interruptions during export and confirm recovery before subsequent bridge operations."
-      ]
-    },
-    {
-      "id": "T056",
-      "title": "Add process and operation conformance cases",
-      "priority": 2,
-      "status": "todo",
-      "details": "Exercise declared process behavior and operation uncertainty against local and remote adapters.",
-      "depends_on": [
-        "T027",
-        "T035",
-        "T053"
-      ],
-      "tags": [
-        "conformance",
-        "v1"
-      ],
-      "spec_sections": [
-        "21"
-      ],
-      "acceptance_criteria": [
-        "Cover arguments, directory, environment, binary output, exit codes, limits, timeout, and descendants.",
-        "Cover duplicate keys, mismatched inputs, lost responses after effects, and unconfirmed cancellation.",
-        "Verify reconciliation preserves uncertainty history without duplicate unsafe execution."
-      ]
-    },
-    {
-      "id": "T057",
-      "title": "Add lightweight Python conformance cases",
-      "priority": 2,
-      "status": "todo",
-      "details": "Verify the selected engine against its advertised evaluation subset.",
-      "depends_on": [
-        "T032",
-        "T053"
-      ],
-      "tags": [
-        "conformance",
-        "v1"
-      ],
-      "spec_sections": [
-        "21"
-      ],
-      "acceptance_criteria": [
-        "Cover supported syntax, unsupported imports, host-function limits, serialization, and structured exceptions.",
-        "Independent calls cannot accidentally depend on prior interpreter locals.",
-        "Unsupported full-Python requirements fail matching explicitly."
-      ]
-    },
-    {
-      "id": "T058",
-      "title": "Add replacement failure and resource conformance cases",
-      "priority": 2,
-      "status": "todo",
-      "details": "Inject failures across all replacement phases and verify attachment and resource authority.",
-      "depends_on": [
-        "T045",
-        "T053"
-      ],
-      "tags": [
-        "conformance",
-        "v1"
-      ],
-      "spec_sections": [
-        "21"
-      ],
-      "acceptance_criteria": [
-        "Crash immediately before and after switch; race expired controllers and duplicate requests.",
-        "Cover failed candidate validation, failed cleanup, unavailable destination, and unknown operations.",
-        "Verify browser survival, browser expiry, stale handles, and invalidated service connections."
-      ]
-    },
-    {
-      "id": "T059",
-      "title": "Add event and bundle conformance cases",
-      "priority": 3,
-      "status": "todo",
-      "details": "Verify durable event delivery and portable bundle integrity boundaries.",
-      "depends_on": [
-        "T006",
-        "T047",
-        "T053"
-      ],
-      "tags": [
-        "conformance",
-        "v1"
-      ],
-      "spec_sections": [
-        "21"
-      ],
-      "acceptance_criteria": [
-        "Restart and replay events without missing committed state; tolerate duplicate delivery.",
-        "Reject missing blobs, tampering, unsupported required extensions, and unauthorized references.",
-        "Import creates no competing controller and executes no reconstruction recipe."
-      ]
-    },
-    {
-      "id": "T060",
-      "title": "Expose conformance through the CLI",
-      "priority": 3,
-      "status": "todo",
-      "details": "Wire the conformance command to adapter loading, profile selection, and report output.",
-      "depends_on": [
-        "T049",
-        "T054",
-        "T055",
-        "T056",
-        "T057",
-        "T058",
-        "T059"
-      ],
-      "tags": [
-        "cli",
-        "v1"
-      ],
-      "spec_sections": [
-        "16",
-        "21"
-      ],
-      "acceptance_criteria": [
-        "The documented command runs a selected profile against a configured adapter.",
-        "Failures and skips remain distinct in machine output and command exit status.",
-        "Paid profiles do not run without configured test authority."
-      ]
-    },
-    {
-      "id": "T061",
-      "title": "Document and implement one harness integration",
-      "priority": 3,
-      "status": "todo",
-      "details": "Select one existing coding harness and supply a wrapper or instructions for managed Portable execution.",
-      "depends_on": [
-        "T050",
-        "T051",
-        "T052"
-      ],
-      "tags": [
-        "integration",
-        "v1"
-      ],
-      "spec_sections": [
-        "17"
-      ],
-      "acceptance_criteria": [
-        "Define the local bridge, file authority, and route for built-in shell and file tools.",
-        "Translate trusted approvals into bounded runtime authority; surface environment changes to the agent.",
-        "Demonstrate session reopening while stating the limits of harness conversation restoration."
-      ]
-    },
-    {
-      "id": "T062",
-      "title": "Create the executable acceptance fixture",
-      "priority": 3,
-      "status": "todo",
-      "details": "Add a small repository fixture with data inspection, native tests, and a browser-visible application.",
-      "depends_on": [
-        "T028",
-        "T032",
-        "T035",
-        "T043",
-        "T044"
-      ],
-      "tags": [
-        "acceptance",
-        "v1"
-      ],
-      "spec_sections": [
-        "22.1"
-      ],
-      "acceptance_criteria": [
-        "The fixture needs lightweight evaluation, native processes, and independent browser inspection for concrete reasons.",
-        "Dependency reconstruction and application startup use declared recipes.",
-        "Artifacts identify their workspace revision and can be checked by the acceptance driver."
-      ]
-    },
-    {
-      "id": "T063",
-      "title": "Run and automate the full acceptance demonstration",
-      "priority": 3,
-      "status": "todo",
-      "details": "Execute the complete scale, compose, replace, recover, release, and reopen workflow.",
-      "depends_on": [
-        "T045",
-        "T060",
-        "T061",
-        "T062"
-      ],
-      "tags": [
-        "acceptance",
-        "v1"
-      ],
-      "spec_sections": [
-        "22.1"
-      ],
-      "acceptance_criteria": [
-        "All seven specification steps produce retained evidence and resource status.",
-        "Injected failure proves one authority, stale handle rejection, and no unsafe retry of unknown effects.",
-        "A local edit after verification produces a conflict and results retain the earlier tested revision."
-      ]
-    },
-    {
-      "id": "T064",
-      "title": "Complete release documentation and coverage review",
-      "priority": 3,
-      "status": "todo",
-      "details": "Document setup, schemas, providers, lifecycle behavior, and conformance evidence; review every first-release requirement.",
-      "depends_on": [
-        "T063"
-      ],
-      "tags": [
-        "documentation",
-        "v1"
-      ],
-      "spec_sections": [
-        "1",
-        "2",
-        "4",
-        "15",
-        "16",
-        "17",
-        "21",
-        "22",
-        "23"
-      ],
-      "acceptance_criteria": [
-        "Map all normative first-release requirements to implementation and validation evidence.",
-        "README examples match implemented library-first behavior and describe unresolved provider limitations.",
-        "The documented clean-checkout build, local conformance suite, and authorized acceptance workflow pass."
-      ]
-    }
-  ]
-}
+[
+  {
+    "id": "T001",
+    "title": "Bootstrap the TypeScript project",
+    "priority": 1,
+    "status": "done",
+    "details": "Set up the library, CLI entry point, build, type checks, and test runner.",
+    "depends_on": [],
+    "tags": [
+      "foundation",
+      "v1"
+    ],
+    "spec_sections": [
+      "15",
+      "22"
+    ],
+    "acceptance_criteria": [
+      "A clean checkout builds and runs tests with documented commands.",
+      "The CLI imports the library; module boundaries allow independent adapters."
+    ]
+  },
+  {
+    "id": "T002",
+    "title": "Define core records and validation schemas",
+    "priority": 1,
+    "status": "done",
+    "details": "Define JSON Schema draft 2020-12 schemas and TypeScript types, including every supporting type named in the specification.",
+    "depends_on": [
+      "T001"
+    ],
+    "tags": [
+      "foundation",
+      "v1"
+    ],
+    "spec_sections": [
+      "3",
+      "5.1",
+      "6",
+      "8",
+      "9.1",
+      "10",
+      "11.1",
+      "13.1",
+      "15",
+      "18",
+      "19"
+    ],
+    "acceptance_criteria": [
+      "Identifiers, names, timestamps, units, status values, and version fields are validated.",
+      "All public requests, results, manifests, recipes, events, and bundles round-trip through JSON.",
+      "Invalid inputs produce field-specific errors before side effects."
+    ]
+  },
+  {
+    "id": "T003",
+    "title": "Implement structured errors and compatibility rules",
+    "priority": 1,
+    "status": "done",
+    "details": "Implement error codes, retry classifications, version checks, and extension handling.",
+    "depends_on": [
+      "T002"
+    ],
+    "tags": [
+      "foundation",
+      "v1"
+    ],
+    "spec_sections": [
+      "6.1",
+      "18.2",
+      "20"
+    ],
+    "acceptance_criteria": [
+      "Every required error code has a stable serializable representation.",
+      "Unknown descriptive extensions are tolerated; unknown requirements and required extensions are rejected.",
+      "Errors exclude credentials and distinguish policy, input, semantic, and provider failures."
+    ]
+  },
+  {
+    "id": "T004",
+    "title": "Implement the durable control store",
+    "priority": 1,
+    "status": "done",
+    "details": "Add a local transactional database, migrations, durable records, and atomic compare-and-swap operations.",
+    "depends_on": [
+      "T002",
+      "T003"
+    ],
+    "tags": [
+      "storage",
+      "v1"
+    ],
+    "spec_sections": [
+      "4",
+      "5.2"
+    ],
+    "acceptance_criteria": [
+      "Concurrent processes share uniqueness and transaction guarantees.",
+      "Restart preserves sessions, attachments, operations, transitions, and cleanup records.",
+      "Missing or unverified blobs cannot become committed revision references."
+    ]
+  },
+  {
+    "id": "T005",
+    "title": "Implement mutation leases and fencing",
+    "priority": 1,
+    "status": "done",
+    "details": "Serialize attachment mutations with durable leases and monotonic fencing tokens.",
+    "depends_on": [
+      "T004"
+    ],
+    "tags": [
+      "storage",
+      "v1"
+    ],
+    "spec_sections": [
+      "5.2",
+      "8.1",
+      "13.3"
+    ],
+    "acceptance_criteria": [
+      "An expired controller cannot commit after a newer controller acquires authority.",
+      "Release and replacement use the same mutation lock.",
+      "Tests race controllers and deliver delayed provider responses after lease expiration."
+    ]
+  },
+  {
+    "id": "T006",
+    "title": "Implement the durable event stream",
+    "priority": 1,
+    "status": "done",
+    "details": "Write events with state mutations and expose replay by session sequence.",
+    "depends_on": [
+      "T004"
+    ],
+    "tags": [
+      "storage",
+      "v1"
+    ],
+    "spec_sections": [
+      "9.3",
+      "18.1"
+    ],
+    "acceptance_criteria": [
+      "All required event types have validated payloads.",
+      "State and its event commit together; restart preserves sequence order.",
+      "Consumers can resume and tolerate duplicate delivery without missing committed events."
+    ]
+  },
+  {
+    "id": "T007",
+    "title": "Implement session creation and inspection",
+    "priority": 1,
+    "status": "done",
+    "details": "Create durable session identities and describe their workspace, policy, attachments, and resources.",
+    "depends_on": [
+      "T004",
+      "T006"
+    ],
+    "tags": [
+      "runtime",
+      "v1"
+    ],
+    "spec_sections": [
+      "5.1",
+      "15"
+    ],
+    "acceptance_criteria": [
+      "Attachment names are unique within each session.",
+      "Inspection reports actual persisted state without claiming harness restoration.",
+      "Public create and describe results satisfy their schemas."
+    ]
+  },
+  {
+    "id": "T008",
+    "title": "Implement trusted policy evaluation",
+    "priority": 1,
+    "status": "done",
+    "details": "Accept authenticated authority from the embedding context and enforce all version-one policy dimensions.",
+    "depends_on": [
+      "T002",
+      "T003",
+      "T004"
+    ],
+    "tags": [
+      "policy",
+      "v1"
+    ],
+    "spec_sections": [
+      "6.4",
+      "7"
+    ],
+    "acceptance_criteria": [
+      "Check provider, operation, locality, transfer, egress, host access, lifetime, resources, secrets, and service audience limits.",
+      "Model-controlled inputs cannot replace authenticated authority.",
+      "Omitted permissions inherit configured limits and preferences never weaken them."
+    ]
+  },
+  {
+    "id": "T009",
+    "title": "Implement secret reference resolution",
+    "priority": 1,
+    "status": "done",
+    "details": "Resolve authorized secret references at use time and keep credentials out of public metadata.",
+    "depends_on": [
+      "T008"
+    ],
+    "tags": [
+      "policy",
+      "v1"
+    ],
+    "spec_sections": [
+      "7",
+      "9.3",
+      "10",
+      "19"
+    ],
+    "acceptance_criteria": [
+      "Resolution rejects unauthorized references and uses current authority.",
+      "Resource serialization, events, errors, and bundles omit reusable credentials.",
+      "Raw artifact and file storage follows configured access and export policy."
+    ]
+  },
+  {
+    "id": "T010",
+    "title": "Implement capability discovery and matching",
+    "priority": 1,
+    "status": "done",
+    "details": "Validate descriptors and match semantic requirements against configured environment offers.",
+    "depends_on": [
+      "T002",
+      "T003",
+      "T008"
+    ],
+    "tags": [
+      "capabilities",
+      "v1"
+    ],
+    "spec_sections": [
+      "6"
+    ],
+    "acceptance_criteria": [
+      "Explicit provider selection works; zero and multiple matches produce the specified errors.",
+      "Platform, resource minima, engine semantics, and constraints are checked without silent fallback.",
+      "Acquired manifests undergo the same validation before activation."
+    ]
+  },
+  {
+    "id": "T011",
+    "title": "Define adapter contracts and a deterministic test adapter",
+    "priority": 1,
+    "status": "done",
+    "details": "Implement adapter interfaces and a controllable fake for allocation, operation, lease, and failure behavior.",
+    "depends_on": [
+      "T002",
+      "T003"
+    ],
+    "tags": [
+      "adapters",
+      "v1"
+    ],
+    "spec_sections": [
+      "8",
+      "21"
+    ],
+    "acceptance_criteria": [
+      "All supporting acquisition, cancellation, binding, and lease types are concrete.",
+      "The fake simulates lost responses, delayed completion, expiration, and release failure.",
+      "Tests require no external accounts or paid allocations."
+    ]
+  },
+  {
+    "id": "T012",
+    "title": "Implement durable acquisition and reconciliation",
+    "priority": 1,
+    "status": "done",
+    "details": "Persist acquisition identities, validate acquired environments, and activate attachments.",
+    "depends_on": [
+      "T005",
+      "T006",
+      "T007",
+      "T008",
+      "T010",
+      "T011"
+    ],
+    "tags": [
+      "runtime",
+      "v1"
+    ],
+    "spec_sections": [
+      "5.2",
+      "8"
+    ],
+    "acceptance_criteria": [
+      "Duplicate requests recover the same logical acquisition or reject conflicting inputs.",
+      "A lost acquisition response triggers reconciliation before another allocation.",
+      "Unresolved allocations and failed validation remain visible until cleanup completes."
+    ]
+  },
+  {
+    "id": "T013",
+    "title": "Implement lease renewal and allocation cleanup",
+    "priority": 1,
+    "status": "done",
+    "details": "Persist lease state and retry idempotent release through visible cleanup obligations.",
+    "depends_on": [
+      "T012"
+    ],
+    "tags": [
+      "runtime",
+      "v1"
+    ],
+    "spec_sections": [
+      "8",
+      "8.1"
+    ],
+    "acceptance_criteria": [
+      "Expired attachments reject operations and report provider termination separately.",
+      "Renewal failures mark resources unavailable when authority expires.",
+      "Cleanup survives restart and cannot invalidate unrelated attachments."
+    ]
+  },
+  {
+    "id": "T014",
+    "title": "Implement content-addressed blob storage",
+    "priority": 1,
+    "status": "done",
+    "details": "Store and retrieve durable SHA-256 blobs with integrity and size checks.",
+    "depends_on": [
+      "T004",
+      "T008"
+    ],
+    "tags": [
+      "workspace",
+      "v1"
+    ],
+    "spec_sections": [
+      "11.2",
+      "11.6"
+    ],
+    "acceptance_criteria": [
+      "Corrupt or incomplete blobs cannot be published in revisions.",
+      "Binary data round-trips and duplicate content shares a digest.",
+      "Authorized retrieval and transfer limits apply before publication."
+    ]
+  },
+  {
+    "id": "T015",
+    "title": "Implement canonical workspace trees and paths",
+    "priority": 1,
+    "status": "done",
+    "details": "Build sorted tree manifests with the exact hash encoding and portable metadata rules.",
+    "depends_on": [
+      "T002",
+      "T003",
+      "T014"
+    ],
+    "tags": [
+      "workspace",
+      "v1"
+    ],
+    "spec_sections": [
+      "11.1",
+      "11.2"
+    ],
+    "acceptance_criteria": [
+      "Digest vectors cover Unicode sequences, executable bits, directories, and binary files.",
+      "Absolute paths, traversal, null bytes, unsupported links, and special files fail explicitly.",
+      "Target path collisions and unrepresentable names are rejected without renaming."
+    ]
+  },
+  {
+    "id": "T016",
+    "title": "Implement stable workspace import and checkpoints",
+    "priority": 1,
+    "status": "done",
+    "details": "Create immutable revisions from locked or snapshotted sources with recorded import exclusions.",
+    "depends_on": [
+      "T004",
+      "T006",
+      "T015"
+    ],
+    "tags": [
+      "workspace",
+      "v1"
+    ],
+    "spec_sections": [
+      "11.3",
+      "11.4",
+      "11.6"
+    ],
+    "acceptance_criteria": [
+      "Initial import creates a revision; later imports require the expected head.",
+      "Uncoordinated writers without a snapshot cause WorkspaceUnstable.",
+      "File counts, byte limits, and exclusion provenance are enforced."
+    ]
+  },
+  {
+    "id": "T017",
+    "title": "Implement materialization and private working copies",
+    "priority": 1,
+    "status": "done",
+    "details": "Transfer selected revisions into read-only snapshots or isolated mutable copies.",
+    "depends_on": [
+      "T008",
+      "T012",
+      "T016"
+    ],
+    "tags": [
+      "workspace",
+      "v1"
+    ],
+    "spec_sections": [
+      "11.1",
+      "11.3",
+      "11.6"
+    ],
+    "acceptance_criteria": [
+      "Transfer policy is checked before bytes leave the source.",
+      "Materialization verifies all hashes and target filesystem compatibility.",
+      "Private copies cannot publish directly to the authoritative head."
+    ]
+  },
+  {
+    "id": "T018",
+    "title": "Implement workspace proposals and acceptance",
+    "priority": 1,
+    "status": "done",
+    "details": "Create candidate revisions and accept them through an atomic expected-head check.",
+    "depends_on": [
+      "T005",
+      "T006",
+      "T017"
+    ],
+    "tags": [
+      "workspace",
+      "v1"
+    ],
+    "spec_sections": [
+      "4",
+      "11.3"
+    ],
+    "acceptance_criteria": [
+      "Concurrent proposals cannot overwrite each other silently.",
+      "A stale head returns WorkspaceConflict without mutation or automatic merging.",
+      "Acceptance rejects proposals from stale attachment generations."
+    ]
+  },
+  {
+    "id": "T019",
+    "title": "Implement local export and crash recovery",
+    "priority": 1,
+    "status": "done",
+    "details": "Stage accepted changes, validate the local base tree, and journal export recovery.",
+    "depends_on": [
+      "T016",
+      "T018"
+    ],
+    "tags": [
+      "workspace",
+      "v1"
+    ],
+    "spec_sections": [
+      "11.4"
+    ],
+    "acceptance_criteria": [
+      "Changed local files cause a conflict before overwrite.",
+      "An exclusive bridge lock protects export and recovery.",
+      "Crashes between file updates can complete or restore before another bridge operation."
+    ]
+  },
+  {
+    "id": "T020",
+    "title": "Implement the workspace capability",
+    "priority": 1,
+    "status": "done",
+    "details": "Expose list, read, write, delete, and stat against authorized working copies.",
+    "depends_on": [
+      "T008",
+      "T017"
+    ],
+    "tags": [
+      "capabilities",
+      "v1"
+    ],
+    "spec_sections": [
+      "14.3"
+    ],
+    "acceptance_criteria": [
+      "Read-only copies reject mutation and paths are validated on every call.",
+      "Writes are atomic per file and binary transfer is explicit.",
+      "Capability operations cannot change revision authority directly."
+    ]
+  },
+  {
+    "id": "T021",
+    "title": "Implement invocation admission and request deduplication",
+    "priority": 1,
+    "status": "done",
+    "details": "Atomically admit operations and persist request keys and input hashes before dispatch.",
+    "depends_on": [
+      "T004",
+      "T005",
+      "T006",
+      "T008",
+      "T010",
+      "T012"
+    ],
+    "tags": [
+      "operations",
+      "v1"
+    ],
+    "spec_sections": [
+      "5.3",
+      "9.1"
+    ],
+    "acceptance_criteria": [
+      "Admission checks session, attachment, generation, policy, and lease together.",
+      "A repeated key returns the existing operation; changed input returns RequestConflict.",
+      "Admission races with replacement and release cannot dispatch stale work."
+    ]
+  },
+  {
+    "id": "T022",
+    "title": "Implement operation outcomes and reconciliation",
+    "priority": 1,
+    "status": "done",
+    "details": "Persist dispatch, completion, failure, and uncertainty without unsafe replay.",
+    "depends_on": [
+      "T011",
+      "T021"
+    ],
+    "tags": [
+      "operations",
+      "v1"
+    ],
+    "spec_sections": [
+      "9.2"
+    ],
+    "acceptance_criteria": [
+      "A lost response after possible effects becomes unknown.",
+      "Reconciliation appends evidence and preserves the original unknown record.",
+      "Nonzero process exit codes remain completed operations; unsafe effects are not retried automatically."
+    ]
+  },
+  {
+    "id": "T023",
+    "title": "Implement cancellation and deadlines",
+    "priority": 1,
+    "status": "done",
+    "details": "Apply deadlines and represent confirmed, best-effort, and unsupported cancellation.",
+    "depends_on": [
+      "T013",
+      "T022"
+    ],
+    "tags": [
+      "operations",
+      "v1"
+    ],
+    "spec_sections": [
+      "7",
+      "9.2",
+      "15"
+    ],
+    "acceptance_criteria": [
+      "Timeout alone never proves termination.",
+      "Cancelling a caller wait leaves the remote operation running unless explicitly cancelled.",
+      "Prior effects remain visible after cancellation and unconfirmed stops remain unresolved."
+    ]
+  },
+  {
+    "id": "T024",
+    "title": "Implement streamed output and artifact records",
+    "priority": 1,
+    "status": "done",
+    "details": "Persist ordered output streams and content-addressed result artifacts.",
+    "depends_on": [
+      "T006",
+      "T009",
+      "T014",
+      "T022"
+    ],
+    "tags": [
+      "operations",
+      "v1"
+    ],
+    "spec_sections": [
+      "9.3"
+    ],
+    "acceptance_criteria": [
+      "Standard output and standard error remain separate with per-stream sequence numbers.",
+      "Binary output, truncation, omitted byte counts when known, and continued execution are reported.",
+      "Artifact records contain digest, size, media type, and authorized retrieval information."
+    ]
+  },
+  {
+    "id": "T025",
+    "title": "Implement resource binding and validity checks",
+    "priority": 1,
+    "status": "done",
+    "details": "Track ownership, generation, lifetime, expiry, and authorized bindings.",
+    "depends_on": [
+      "T005",
+      "T008",
+      "T009",
+      "T012",
+      "T013"
+    ],
+    "tags": [
+      "resources",
+      "v1"
+    ],
+    "spec_sections": [
+      "10"
+    ],
+    "acceptance_criteria": [
+      "Stale, expired, unauthorized, and released resources fail resolution.",
+      "Reattachment creates a new binding without reviving old handles.",
+      "Provider credentials never appear in portable references."
+    ]
+  },
+  {
+    "id": "T026",
+    "title": "Implement the native process capability contract",
+    "priority": 1,
+    "status": "done",
+    "details": "Define validated run, start, inspect, and terminate requests and results.",
+    "depends_on": [
+      "T002",
+      "T010",
+      "T011"
+    ],
+    "tags": [
+      "capabilities",
+      "v1"
+    ],
+    "spec_sections": [
+      "14.1"
+    ],
+    "acceptance_criteria": [
+      "Arguments, working directory, environment, input, timeout, and output limits have explicit semantics.",
+      "Signals, descendant termination, and process lifetime are declared attributes.",
+      "Shell interpretation occurs only through an explicitly requested shell executable."
+    ]
+  },
+  {
+    "id": "T027",
+    "title": "Implement the local process adapter",
+    "priority": 1,
+    "status": "done",
+    "details": "Execute managed local processes and report actual host access and enforcement.",
+    "depends_on": [
+      "T013",
+      "T017",
+      "T022",
+      "T023",
+      "T024",
+      "T025",
+      "T026"
+    ],
+    "tags": [
+      "adapters",
+      "v1"
+    ],
+    "spec_sections": [
+      "7",
+      "8",
+      "14.1"
+    ],
+    "acceptance_criteria": [
+      "All required process operations work with binary input and separate output streams.",
+      "Background resources remain inspectable across CLI exits through a documented supervisor or equivalent mechanism.",
+      "Unsupported isolation is rejected and termination claims are tested against descendants."
+    ]
+  },
+  {
+    "id": "T028",
+    "title": "Implement verification provenance",
+    "priority": 1,
+    "status": "done",
+    "details": "Associate executions with actual inputs, working copies, manifests, and dependency identifiers.",
+    "depends_on": [
+      "T016",
+      "T020",
+      "T022",
+      "T024",
+      "T027"
+    ],
+    "tags": [
+      "workspace",
+      "v1"
+    ],
+    "spec_sections": [
+      "11.5"
+    ],
+    "acceptance_criteria": [
+      "Verification excludes unrelated writers and records input and output tree hashes.",
+      "Modified working copies are never reported as testing the unchanged base revision.",
+      "Results report tracked input changes, arguments, adapter version, and available image or dependency identifiers."
+    ]
+  },
+  {
+    "id": "T029",
+    "title": "Implement policy revocation",
+    "priority": 1,
+    "status": "done",
+    "details": "Commit updated authority and stop further admissions under revoked permissions.",
+    "depends_on": [
+      "T008",
+      "T021",
+      "T023"
+    ],
+    "tags": [
+      "policy",
+      "v1"
+    ],
+    "spec_sections": [
+      "7"
+    ],
+    "acceptance_criteria": [
+      "New admissions reject revoked authority immediately after commit.",
+      "Existing operations receive supported cancellation requests.",
+      "Unconfirmed cancellation remains visible rather than being reported as stopped."
+    ]
+  },
+  {
+    "id": "T030",
+    "title": "Implement release and session reopening",
+    "priority": 1,
+    "status": "done",
+    "details": "Release attachments and reopen or close sessions with reconciled resource state.",
+    "depends_on": [
+      "T007",
+      "T013",
+      "T022",
+      "T025",
+      "T029"
+    ],
+    "tags": [
+      "runtime",
+      "v1"
+    ],
+    "spec_sections": [
+      "5.1",
+      "5.3",
+      "8",
+      "15"
+    ],
+    "acceptance_criteria": [
+      "Closing rejects new work and stays closing until release succeeds or unresolved allocations are recorded.",
+      "Repeated release is idempotent and invalidates owned handles.",
+      "Reopening reconciles leases and operations without pretending to restore a harness conversation."
+    ]
+  },
+  {
+    "id": "T031",
+    "title": "Define the lightweight Python capability",
+    "priority": 2,
+    "status": "done",
+    "details": "Define evaluation schemas, engine attributes, language subsets, limits, and host-function bindings.",
+    "depends_on": [
+      "T002",
+      "T010",
+      "T020"
+    ],
+    "tags": [
+      "capabilities",
+      "v1"
+    ],
+    "spec_sections": [
+      "14.2"
+    ],
+    "acceptance_criteria": [
+      "Matching distinguishes lightweight execution from full Python semantics.",
+      "Input and result serialization, output, and structured exceptions are specified.",
+      "Interpreter locals are not declared portable workspace state."
+    ]
+  },
+  {
+    "id": "T032",
+    "title": "Implement the lightweight Python adapter",
+    "priority": 2,
+    "status": "done",
+    "details": "Select and integrate a lightweight engine, starting with Monty if it satisfies the required profile.",
+    "depends_on": [
+      "T009",
+      "T011",
+      "T020",
+      "T022",
+      "T024",
+      "T031"
+    ],
+    "tags": [
+      "adapters",
+      "v1"
+    ],
+    "spec_sections": [
+      "8",
+      "14.2",
+      "22"
+    ],
+    "acceptance_criteria": [
+      "Document the selected engine version, subset, imports, limits, and unsupported requirements.",
+      "Isolated evaluation works with authorized workspace and host functions.",
+      "Conformance cases cover unsupported imports, serialization, limits, and state isolation."
+    ]
+  },
+  {
+    "id": "T033",
+    "title": "Select remote compute and browser providers",
+    "priority": 2,
+    "status": "done",
+    "details": "Evaluate provider contracts and select one remote Linux provider and one independent browser provider.",
+    "depends_on": [
+      "T010",
+      "T011",
+      "T026",
+      "T031"
+    ],
+    "tags": [
+      "adapters",
+      "v1"
+    ],
+    "spec_sections": [
+      "8",
+      "14.4",
+      "14.6",
+      "22"
+    ],
+    "acceptance_criteria": [
+      "Record acquisition reconciliation, persistence, enforcement, and service connectivity support from provider documentation.",
+      "Document credentials, test authority, cleanup behavior, and unsupported requirements.",
+      "Selected providers can satisfy the acceptance workflow without adding an MCP dependency."
+    ]
+  },
+  {
+    "id": "T034",
+    "title": "Implement remote Linux allocation and leases",
+    "priority": 2,
+    "status": "done",
+    "details": "Implement remote discovery, acquisition, reconciliation, renewal, and release.",
+    "depends_on": [
+      "T009",
+      "T012",
+      "T013",
+      "T033"
+    ],
+    "tags": [
+      "adapters",
+      "v1"
+    ],
+    "spec_sections": [
+      "8",
+      "22"
+    ],
+    "acceptance_criteria": [
+      "Lost acquisition responses are recoverable by durable identity.",
+      "Acquired manifests describe actual resources and supported enforcement.",
+      "Paid tests require configured authority; leaked or uncertain allocations remain visible."
+    ]
+  },
+  {
+    "id": "T035",
+    "title": "Implement remote processes and workspace transfer",
+    "priority": 2,
+    "status": "done",
+    "details": "Run native commands and manage private copies on the selected remote provider.",
+    "depends_on": [
+      "T017",
+      "T022",
+      "T023",
+      "T024",
+      "T025",
+      "T026",
+      "T034"
+    ],
+    "tags": [
+      "adapters",
+      "v1"
+    ],
+    "spec_sections": [
+      "11.6",
+      "14.1"
+    ],
+    "acceptance_criteria": [
+      "Arguments, binary output, timeouts, background processes, and termination semantics satisfy the declared profile.",
+      "Transfers validate policy and hashes before use.",
+      "Changes return as proposals with provenance instead of overwriting local files."
+    ]
+  },
+  {
+    "id": "T036",
+    "title": "Implement reconstruction recipes and state classification",
+    "priority": 2,
+    "status": "todo",
+    "details": "Validate state dispositions and run declared reconstruction through authorized operations.",
+    "depends_on": [
+      "T020",
+      "T022",
+      "T025",
+      "T028"
+    ],
+    "tags": [
+      "handoff",
+      "v1"
+    ],
+    "spec_sections": [
+      "12"
+    ],
+    "acceptance_criteria": [
+      "Recipes declare revision, capabilities, operations, outputs, and failure conditions.",
+      "Portable, reconstructable, reattachable, and native state receive explicit treatment.",
+      "Native state is invalidated and parsing a recipe never executes it."
+    ]
+  },
+  {
+    "id": "T037",
+    "title": "Implement replacement planning",
+    "priority": 2,
+    "status": "todo",
+    "details": "Build a side-effect-free plan for replacing one attachment.",
+    "depends_on": [
+      "T010",
+      "T018",
+      "T025",
+      "T036"
+    ],
+    "tags": [
+      "handoff",
+      "v1"
+    ],
+    "spec_sections": [
+      "13.1"
+    ],
+    "acceptance_criteria": [
+      "Plans list preserved, reconstructed, reattached, and invalidated state.",
+      "Stale source generations and unsatisfied required resources fail before provisioning.",
+      "Planning allocates nothing and does not change the workspace head."
+    ]
+  },
+  {
+    "id": "T038",
+    "title": "Implement replacement preparation and checkpointing",
+    "priority": 2,
+    "status": "todo",
+    "details": "Quiesce the source, block admissions, and persist the selected revision and transition inventory.",
+    "depends_on": [
+      "T005",
+      "T016",
+      "T021",
+      "T023",
+      "T027",
+      "T037"
+    ],
+    "tags": [
+      "handoff",
+      "v1"
+    ],
+    "spec_sections": [
+      "5.3",
+      "13.2"
+    ],
+    "acceptance_criteria": [
+      "Wait, cancel, and reject policies handle active operations explicitly.",
+      "Unknown outcomes block replacement; deadlines cannot bypass them.",
+      "Managed background writers stop or use a declared consistent snapshot before checkpointing."
+    ]
+  },
+  {
+    "id": "T039",
+    "title": "Implement replacement destination preparation",
+    "priority": 2,
+    "status": "todo",
+    "details": "Provision, materialize, reconstruct, bind resources, and validate the candidate environment.",
+    "depends_on": [
+      "T012",
+      "T017",
+      "T025",
+      "T035",
+      "T036",
+      "T038"
+    ],
+    "tags": [
+      "handoff",
+      "v1"
+    ],
+    "spec_sections": [
+      "13.2"
+    ],
+    "acceptance_criteria": [
+      "Acquisition uses the transition request identity and reconciles interrupted requests.",
+      "Validation checks manifest, enforcement, revision integrity, and required resources.",
+      "Source authority remains unchanged until the switch transaction."
+    ]
+  },
+  {
+    "id": "T040",
+    "title": "Implement the atomic attachment switch",
+    "priority": 2,
+    "status": "todo",
+    "details": "Commit the new binding, generation, resources, event, outcome, and cleanup obligations together.",
+    "depends_on": [
+      "T005",
+      "T006",
+      "T018",
+      "T025",
+      "T039"
+    ],
+    "tags": [
+      "handoff",
+      "v1"
+    ],
+    "spec_sections": [
+      "4",
+      "13.3"
+    ],
+    "acceptance_criteria": [
+      "The transaction validates generation, fencing token, and candidate validation state.",
+      "Unrelated attachment generations and the workspace head remain unchanged.",
+      "A repeated request after a lost switch response returns the committed result."
+    ]
+  },
+  {
+    "id": "T041",
+    "title": "Implement replacement abort and forward recovery",
+    "priority": 2,
+    "status": "todo",
+    "details": "Resume or abort durable transitions and preserve the committed authority boundary.",
+    "depends_on": [
+      "T013",
+      "T022",
+      "T030",
+      "T040"
+    ],
+    "tags": [
+      "handoff",
+      "v1"
+    ],
+    "spec_sections": [
+      "13.4"
+    ],
+    "acceptance_criteria": [
+      "Failures before switch retain the source binding and clean up candidates.",
+      "Failures after switch never reactivate the old generation; source cleanup retries independently.",
+      "Failure reports list surviving reconstruction effects and any source services that need rebuilding."
+    ]
+  },
+  {
+    "id": "T042",
+    "title": "Define browser and service capability contracts",
+    "priority": 2,
+    "status": "todo",
+    "details": "Specify browser lifecycle and service exposure schemas with owner generations and audiences.",
+    "depends_on": [
+      "T002",
+      "T010",
+      "T025"
+    ],
+    "tags": [
+      "capabilities",
+      "v1"
+    ],
+    "spec_sections": [
+      "14.4",
+      "14.6"
+    ],
+    "acceptance_criteria": [
+      "Browser create, navigate, screenshot, inspect, and close are fully typed.",
+      "Service expose, connect, and close specify process, port, protocol, audience, and expiration.",
+      "Independent browser lifetimes and dependent service bindings have distinct validity rules."
+    ]
+  },
+  {
+    "id": "T043",
+    "title": "Implement the independent browser adapter",
+    "priority": 2,
+    "status": "todo",
+    "details": "Create and operate browser sessions independently of compute allocation.",
+    "depends_on": [
+      "T009",
+      "T013",
+      "T022",
+      "T024",
+      "T025",
+      "T033",
+      "T042"
+    ],
+    "tags": [
+      "adapters",
+      "v1"
+    ],
+    "spec_sections": [
+      "14.4"
+    ],
+    "acceptance_criteria": [
+      "Sessions support the selected persistence and reattachment behavior.",
+      "Screenshots become authorized artifacts and provider expiration is reported.",
+      "Cookies stay provider-owned and releasing compute does not close the browser."
+    ]
+  },
+  {
+    "id": "T044",
+    "title": "Implement authorized service connections",
+    "priority": 2,
+    "status": "todo",
+    "details": "Expose application ports and bind an authorized browser consumer to the service.",
+    "depends_on": [
+      "T008",
+      "T009",
+      "T025",
+      "T027",
+      "T035",
+      "T042",
+      "T043"
+    ],
+    "tags": [
+      "resources",
+      "v1"
+    ],
+    "spec_sections": [
+      "10",
+      "14.6"
+    ],
+    "acceptance_criteria": [
+      "Exposure and consumer egress policy are checked independently.",
+      "Public unauthenticated exposure requires explicit authority.",
+      "Compute replacement invalidates old connections while preserving the browser session."
+    ]
+  },
+  {
+    "id": "T045",
+    "title": "Integrate browser continuity with compute replacement",
+    "priority": 2,
+    "status": "todo",
+    "details": "Reconstruct the application server and create a new service binding after compute replacement.",
+    "depends_on": [
+      "T041",
+      "T043",
+      "T044"
+    ],
+    "tags": [
+      "handoff",
+      "v1"
+    ],
+    "spec_sections": [
+      "10",
+      "13",
+      "14.6"
+    ],
+    "acceptance_criteria": [
+      "The same valid browser handle connects to the replacement server.",
+      "Old compute and service handles fail without affecting the browser generation.",
+      "Expired browser leases are reported honestly instead of claiming preservation."
+    ]
+  },
+  {
+    "id": "T046",
+    "title": "Implement bundle export",
+    "priority": 3,
+    "status": "todo",
+    "details": "Export validated workspace state, journal entries, resource references, and state dispositions.",
+    "depends_on": [
+      "T006",
+      "T009",
+      "T015",
+      "T018",
+      "T024",
+      "T025",
+      "T036"
+    ],
+    "tags": [
+      "portability",
+      "v1"
+    ],
+    "spec_sections": [
+      "19",
+      "20"
+    ],
+    "acceptance_criteria": [
+      "Self-contained bundles include every referenced blob; reference-only bundles identify authorized locations.",
+      "Manifests include schema, revision, root hash, generations, inventory, and dispositions.",
+      "Secrets and reusable credentials are absent and opaque harness references remain opaque."
+    ]
+  },
+  {
+    "id": "T047",
+    "title": "Implement bundle validation and import",
+    "priority": 3,
+    "status": "todo",
+    "details": "Validate bundles before creating a new session and materializing approved state.",
+    "depends_on": [
+      "T008",
+      "T016",
+      "T030",
+      "T046"
+    ],
+    "tags": [
+      "portability",
+      "v1"
+    ],
+    "spec_sections": [
+      "19",
+      "20"
+    ],
+    "acceptance_criteria": [
+      "Reject missing or corrupt blobs, unsafe paths, size violations, and unknown required extensions.",
+      "Import does not execute recipes or claim authority over the source session.",
+      "Same-session continuation requires the original authoritative control store and its locks."
+    ]
+  },
+  {
+    "id": "T048",
+    "title": "Assemble the public library interface",
+    "priority": 3,
+    "status": "todo",
+    "details": "Expose the complete Portable and Session interfaces with validated serializable results.",
+    "depends_on": [
+      "T019",
+      "T020",
+      "T028",
+      "T030",
+      "T032",
+      "T041",
+      "T045",
+      "T047"
+    ],
+    "tags": [
+      "library",
+      "v1"
+    ],
+    "spec_sections": [
+      "15"
+    ],
+    "acceptance_criteria": [
+      "Every specified method is available and documented with concrete supporting types.",
+      "Long operations expose durable identifiers before completion without implicit cancellation on wait exit.",
+      "Adapter-specific behavior stays behind declared capability contracts."
+    ]
+  },
+  {
+    "id": "T049",
+    "title": "Implement CLI configuration and output conventions",
+    "priority": 3,
+    "status": "todo",
+    "details": "Build the thin CLI with explicit session selection, request files, standard input, and structured output.",
+    "depends_on": [
+      "T003",
+      "T008",
+      "T009",
+      "T048"
+    ],
+    "tags": [
+      "cli",
+      "v1"
+    ],
+    "spec_sections": [
+      "16"
+    ],
+    "acceptance_criteria": [
+      "Machine output is JSON or newline-delimited JSON; diagnostics use standard error.",
+      "Exit codes distinguish known failure, invalid input, and unknown outcome.",
+      "Secrets and JSON requests do not require shell interpolation; multiple sessions are never guessed."
+    ]
+  },
+  {
+    "id": "T050",
+    "title": "Implement CLI session and workspace commands",
+    "priority": 3,
+    "status": "todo",
+    "details": "Expose session creation, description, checkpoints, proposals, and acceptance.",
+    "depends_on": [
+      "T049"
+    ],
+    "tags": [
+      "cli",
+      "v1"
+    ],
+    "spec_sections": [
+      "16"
+    ],
+    "acceptance_criteria": [
+      "Commands call library methods and validate expected revisions and generations.",
+      "Conflicts leave existing files and authoritative state unchanged.",
+      "Documented examples run against a temporary local workspace."
+    ]
+  },
+  {
+    "id": "T051",
+    "title": "Implement CLI attachment and operation commands",
+    "priority": 3,
+    "status": "todo",
+    "details": "Expose attach, invoke, operation inspection, cancellation, and release.",
+    "depends_on": [
+      "T049"
+    ],
+    "tags": [
+      "cli",
+      "v1"
+    ],
+    "spec_sections": [
+      "16"
+    ],
+    "acceptance_criteria": [
+      "Request keys and generations reach the library without being regenerated on retries.",
+      "Completed process failures retain their process exit code in the result.",
+      "Long operations return identifiers and remain inspectable across CLI process exits."
+    ]
+  },
+  {
+    "id": "T052",
+    "title": "Implement CLI replacement, recovery, and events",
+    "priority": 3,
+    "status": "todo",
+    "details": "Expose replacement plans, execution, durable recovery, and event replay.",
+    "depends_on": [
+      "T049"
+    ],
+    "tags": [
+      "cli",
+      "v1"
+    ],
+    "spec_sections": [
+      "16",
+      "18.1"
+    ],
+    "acceptance_criteria": [
+      "Plan mode makes no allocations and reports state dispositions.",
+      "Recovery reports unresolved operations and pending allocation cleanup.",
+      "Event output resumes by sequence and replacement results report old and new generations."
+    ]
+  },
+  {
+    "id": "T053",
+    "title": "Implement the reusable conformance runner",
+    "priority": 2,
+    "status": "todo",
+    "details": "Load adapters and execute capability profiles with machine-readable reports.",
+    "depends_on": [
+      "T002",
+      "T003",
+      "T011",
+      "T024"
+    ],
+    "tags": [
+      "conformance",
+      "v1"
+    ],
+    "spec_sections": [
+      "21"
+    ],
+    "acceptance_criteria": [
+      "Reports identify spec, adapter, provider configuration, passed cases, failed cases, and skipped cases.",
+      "Skipped cases never count as supported behavior.",
+      "External effects and paid allocation require configured test authority."
+    ]
+  },
+  {
+    "id": "T054",
+    "title": "Add acquisition and policy conformance cases",
+    "priority": 2,
+    "status": "todo",
+    "details": "Test acquisition reconciliation, lease behavior, matching, and authorization.",
+    "depends_on": [
+      "T010",
+      "T013",
+      "T029",
+      "T053"
+    ],
+    "tags": [
+      "conformance",
+      "v1"
+    ],
+    "spec_sections": [
+      "21"
+    ],
+    "acceptance_criteria": [
+      "Cover duplicate acquisition, lost response, release retry, expiration, and stale controllers.",
+      "Cover missing capability, insufficient resources, unknown constraints, ambiguous provider, and policy denial.",
+      "Verify declared restrictions using observable behavior and report their enforcement limits."
+    ]
+  },
+  {
+    "id": "T055",
+    "title": "Add workspace conformance cases",
+    "priority": 2,
+    "status": "todo",
+    "details": "Verify tree integrity, portable files, proposal authority, stable checkpoints, and export recovery.",
+    "depends_on": [
+      "T019",
+      "T020",
+      "T028",
+      "T053"
+    ],
+    "tags": [
+      "conformance",
+      "v1"
+    ],
+    "spec_sections": [
+      "21"
+    ],
+    "acceptance_criteria": [
+      "Cover binary files, Unicode, executable bits, invalid paths, links, size limits, and hash mismatch.",
+      "Race proposals and local edits to verify conflict behavior.",
+      "Inject interruptions during export and confirm recovery before subsequent bridge operations."
+    ]
+  },
+  {
+    "id": "T056",
+    "title": "Add process and operation conformance cases",
+    "priority": 2,
+    "status": "todo",
+    "details": "Exercise declared process behavior and operation uncertainty against local and remote adapters.",
+    "depends_on": [
+      "T027",
+      "T035",
+      "T053"
+    ],
+    "tags": [
+      "conformance",
+      "v1"
+    ],
+    "spec_sections": [
+      "21"
+    ],
+    "acceptance_criteria": [
+      "Cover arguments, directory, environment, binary output, exit codes, limits, timeout, and descendants.",
+      "Cover duplicate keys, mismatched inputs, lost responses after effects, and unconfirmed cancellation.",
+      "Verify reconciliation preserves uncertainty history without duplicate unsafe execution."
+    ]
+  },
+  {
+    "id": "T057",
+    "title": "Add lightweight Python conformance cases",
+    "priority": 2,
+    "status": "todo",
+    "details": "Verify the selected engine against its advertised evaluation subset.",
+    "depends_on": [
+      "T032",
+      "T053"
+    ],
+    "tags": [
+      "conformance",
+      "v1"
+    ],
+    "spec_sections": [
+      "21"
+    ],
+    "acceptance_criteria": [
+      "Cover supported syntax, unsupported imports, host-function limits, serialization, and structured exceptions.",
+      "Independent calls cannot accidentally depend on prior interpreter locals.",
+      "Unsupported full-Python requirements fail matching explicitly."
+    ]
+  },
+  {
+    "id": "T058",
+    "title": "Add replacement failure and resource conformance cases",
+    "priority": 2,
+    "status": "todo",
+    "details": "Inject failures across all replacement phases and verify attachment and resource authority.",
+    "depends_on": [
+      "T045",
+      "T053"
+    ],
+    "tags": [
+      "conformance",
+      "v1"
+    ],
+    "spec_sections": [
+      "21"
+    ],
+    "acceptance_criteria": [
+      "Crash immediately before and after switch; race expired controllers and duplicate requests.",
+      "Cover failed candidate validation, failed cleanup, unavailable destination, and unknown operations.",
+      "Verify browser survival, browser expiry, stale handles, and invalidated service connections."
+    ]
+  },
+  {
+    "id": "T059",
+    "title": "Add event and bundle conformance cases",
+    "priority": 3,
+    "status": "todo",
+    "details": "Verify durable event delivery and portable bundle integrity boundaries.",
+    "depends_on": [
+      "T006",
+      "T047",
+      "T053"
+    ],
+    "tags": [
+      "conformance",
+      "v1"
+    ],
+    "spec_sections": [
+      "21"
+    ],
+    "acceptance_criteria": [
+      "Restart and replay events without missing committed state; tolerate duplicate delivery.",
+      "Reject missing blobs, tampering, unsupported required extensions, and unauthorized references.",
+      "Import creates no competing controller and executes no reconstruction recipe."
+    ]
+  },
+  {
+    "id": "T060",
+    "title": "Expose conformance through the CLI",
+    "priority": 3,
+    "status": "todo",
+    "details": "Wire the conformance command to adapter loading, profile selection, and report output.",
+    "depends_on": [
+      "T049",
+      "T054",
+      "T055",
+      "T056",
+      "T057",
+      "T058",
+      "T059"
+    ],
+    "tags": [
+      "cli",
+      "v1"
+    ],
+    "spec_sections": [
+      "16",
+      "21"
+    ],
+    "acceptance_criteria": [
+      "The documented command runs a selected profile against a configured adapter.",
+      "Failures and skips remain distinct in machine output and command exit status.",
+      "Paid profiles do not run without configured test authority."
+    ]
+  },
+  {
+    "id": "T061",
+    "title": "Document and implement one harness integration",
+    "priority": 3,
+    "status": "todo",
+    "details": "Select one existing coding harness and supply a wrapper or instructions for managed Portable execution.",
+    "depends_on": [
+      "T050",
+      "T051",
+      "T052"
+    ],
+    "tags": [
+      "integration",
+      "v1"
+    ],
+    "spec_sections": [
+      "17"
+    ],
+    "acceptance_criteria": [
+      "Define the local bridge, file authority, and route for built-in shell and file tools.",
+      "Translate trusted approvals into bounded runtime authority; surface environment changes to the agent.",
+      "Demonstrate session reopening while stating the limits of harness conversation restoration."
+    ]
+  },
+  {
+    "id": "T062",
+    "title": "Create the executable acceptance fixture",
+    "priority": 3,
+    "status": "todo",
+    "details": "Add a small repository fixture with data inspection, native tests, and a browser-visible application.",
+    "depends_on": [
+      "T028",
+      "T032",
+      "T035",
+      "T043",
+      "T044"
+    ],
+    "tags": [
+      "acceptance",
+      "v1"
+    ],
+    "spec_sections": [
+      "22.1"
+    ],
+    "acceptance_criteria": [
+      "The fixture needs lightweight evaluation, native processes, and independent browser inspection for concrete reasons.",
+      "Dependency reconstruction and application startup use declared recipes.",
+      "Artifacts identify their workspace revision and can be checked by the acceptance driver."
+    ]
+  },
+  {
+    "id": "T063",
+    "title": "Run and automate the full acceptance demonstration",
+    "priority": 3,
+    "status": "todo",
+    "details": "Execute the complete scale, compose, replace, recover, release, and reopen workflow.",
+    "depends_on": [
+      "T045",
+      "T060",
+      "T061",
+      "T062"
+    ],
+    "tags": [
+      "acceptance",
+      "v1"
+    ],
+    "spec_sections": [
+      "22.1"
+    ],
+    "acceptance_criteria": [
+      "All seven specification steps produce retained evidence and resource status.",
+      "Injected failure proves one authority, stale handle rejection, and no unsafe retry of unknown effects.",
+      "A local edit after verification produces a conflict and results retain the earlier tested revision."
+    ]
+  },
+  {
+    "id": "T064",
+    "title": "Complete release documentation and coverage review",
+    "priority": 3,
+    "status": "todo",
+    "details": "Document setup, schemas, providers, lifecycle behavior, and conformance evidence; review every first-release requirement.",
+    "depends_on": [
+      "T063"
+    ],
+    "tags": [
+      "documentation",
+      "v1"
+    ],
+    "spec_sections": [
+      "1",
+      "2",
+      "4",
+      "15",
+      "16",
+      "17",
+      "21",
+      "22",
+      "23"
+    ],
+    "acceptance_criteria": [
+      "Map all normative first-release requirements to implementation and validation evidence.",
+      "README examples match implemented library-first behavior and describe unresolved provider limitations.",
+      "The documented clean-checkout build, local conformance suite, and authorized acceptance workflow pass."
+    ]
+  }
+]

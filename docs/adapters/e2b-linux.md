@@ -12,7 +12,8 @@ the selection record and its sources are in
 | Isolation | One Firecracker microVM per sandbox |
 | Platform | linux, x86_64 |
 | Template | `base` by default, configurable |
-| Capability operations | None yet — `exec.process@1` lands with T035 |
+| Capability operations | `exec.process@1`: run, start, inspect, terminate |
+| Working copies | Push and pull under `/home/user/portable` |
 
 ## Durable identity
 
@@ -93,12 +94,80 @@ when `E2B_API_KEY` is set; without it, it skips. The offline tests run
 against an injected fake client and cover every acceptance criterion
 without spending provider credits.
 
+## Processes
+
+Inside a held lease the adapter serves `exec.process@1`. The envd
+command transport takes one shell-parsed string, so the adapter quotes
+every argument itself: an argument array stays an argument array, with
+no re-splitting, no interpolation, and no globbing. A NUL byte in an
+argument refuses the launch.
+
+The declared profile is the transport's honest limit, and matching
+fails against any requirement that exceeds it:
+
+| Attribute | Declared | Why |
+| --- | --- | --- |
+| `signals` | `SIGKILL` only | The provider kill call sends SIGKILL and nothing else |
+| `descendantTermination` | `none` | The kill reaches one process, never a group |
+| `binaryOutput` | `false` | Output crosses as UTF-8 text; non-UTF-8 stdin refuses |
+| `processLifetime` | `attachment` | Processes die with the sandbox when its timeout ends |
+
+Semantics worth knowing:
+
+- A non-zero exit is a completed result, not a fault. A timeout or a
+  provider kill reports `signal: "SIGKILL"` with `timedOut` and no
+  invented exit code.
+- Foreground runs default to a one-hour timeout. The provider default
+  of sixty seconds would kill honest work silently; every request may
+  tighten the bound through `timeoutMs`.
+- Standard input crosses as UTF-8 text only. A run that reads stdin to
+  end-of-file must end on its own terms — the transport keeps the pipe
+  open until the process exits or the timeout ends it.
+- Started processes live in durable records under
+  `<stateDir>/processes/`. A restarted adapter still inspects and
+  terminates them from the record plus the provider process table.
+- Liveness is provider truth: `inspect` reads the process table, and a
+  provider that cannot answer yields `unknown`, never a guess. An
+  unobserved end reports state `exited` without an exit code.
+- Cancellation and `terminate` state `descendantsStopped: false`
+  because the transport kills exactly one process.
+
+## Working copies
+
+One portable root, `/home/user/portable`, bounds every transferred
+byte in each sandbox.
+
+A push validates three things before the first byte leaves, in order,
+so a refused push spends nothing (SPEC.md section 11.6):
+
+1. **Policy.** The authority must allow `remote` as a transfer
+   destination.
+2. **Hashes.** The staged directory must hash to the tree the caller
+   presented; a copy that changed after authorization refuses with
+   `IntegrityFailure` instead of crossing as trusted content.
+3. **Limits.** File count, per-file bytes, and total bytes must sit
+   under the authorized ceilings.
+
+The last push is recorded in the acquisition record as provenance.
+
+A pull walks the remote tree, reads every byte, and rebuilds the
+staging root through the content-addressed store — the tree is built
+from bytes that crossed, never from provider claims. A stated
+`expectedRootHash` refuses a mismatch with `IntegrityFailure`. The
+destination policy must allow `local`. A pull replaces the staging
+root it was given and nothing else: the change returns to the
+workspace as a proposal with provenance, and the source of the base
+revision is never overwritten.
+
+The executable bit does not transfer; the remote filesystem API
+writes plain files. A tree entry keeps the bit for the workspace, but
+remote content lands non-executable.
+
 ## Unsupported requirements
 
-- **Capability operations.** This adapter provides allocation and
-  lease lifecycle only. `describe()` offers nothing and `invoke`
-  refuses everything until `exec.process@1` support lands (T035).
-  Cancellation and consumer binding answer `unsupported` explicitly.
+- **Signals other than SIGKILL, binary output, confirmed descendant
+  termination.** The envd transport does not carry them; the declared
+  profile says so and matching rejects requirements that need them.
 - **Pause and resume as operations.** The adapter treats a paused
   sandbox as a held allocation and never exposes pause or resume as
   lease operations; renewal through the provider timeout is the only
@@ -107,7 +176,8 @@ without spending provider credits.
   timeout expires, and kill discards state. Persistence of a paused
   sandbox is a provider beta the adapter does not rely on.
 - **Survival of adapter restart for in-flight state.** Durable
-  identity covers acquisition records. Nothing else about a sandbox is
-  cached across restarts; every answer re-reads the provider.
+  identity covers acquisition records and started-process records.
+  Nothing else about a sandbox is cached across restarts; every answer
+  re-reads the provider.
 - **Graphics processors and non-Linux platforms.** Not offered; the
   offer and the manifest say linux, x86_64.
