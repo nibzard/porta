@@ -784,7 +784,7 @@
       "id": "T032",
       "title": "Implement the lightweight Python adapter",
       "priority": 2,
-      "status": "todo",
+      "status": "done",
       "details": "Select and integrate a lightweight engine, starting with Monty if it satisfies the required profile.",
       "depends_on": [
         "T009",

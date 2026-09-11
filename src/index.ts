@@ -364,6 +364,18 @@ export type {
   ProcessRecord,
 } from "./adapters/local-process-adapter.js";
 
+// Adapter: sandboxed lightweight Python on the Monty engine.
+export {
+  MONTY_PYTHON_PROVIDER_ID,
+  MONTY_VERIFIED_IMPORTS,
+  MontyPythonAdapter,
+  MontyPythonLease,
+} from "./adapters/monty-python-adapter.js";
+export type {
+  MontyHostFunction,
+  MontyPythonAdapterOptions,
+} from "./adapters/monty-python-adapter.js";
+
 // Runtime: execution provenance and verification runs.
 export {
   manifestDigestOf,
