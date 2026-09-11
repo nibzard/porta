@@ -972,6 +972,53 @@ export class ControlStore {
     });
   }
 
+  /**
+   * Move every bound binding of one attachment generation to a new
+   * owner, keeping every resource identity.
+   *
+   * The switch transaction adopts candidate bindings this way (SPEC.md
+   * section 13.3): the handles callers already hold stay valid while
+   * ownership moves to the switched generation. The caller owns the
+   * surrounding atomicity; this method invalidates nothing and journals
+   * nothing.
+   */
+  transferResourceBindings(
+    sessionId: string,
+    fromAttachmentId: string,
+    fromGeneration: number,
+    toAttachmentId: string,
+    toGeneration: number,
+  ): ResourceBindingRecord[] {
+    const rows = this.all(
+      "SELECT record_json FROM resource_bindings " +
+        "WHERE session_id = ? AND attachment_id = ? AND generation = ? AND status = 'bound'",
+      sessionId,
+      fromAttachmentId,
+      fromGeneration,
+    );
+    const moved: ResourceBindingRecord[] = [];
+    for (const row of rows) {
+      const current = JSON.parse(row.record_json as string) as ResourceBindingRecord;
+      const updated: ResourceBindingRecord = {
+        ...current,
+        owner: { sessionId, attachmentId: toAttachmentId, generation: toGeneration },
+      };
+      const changes = this.stmt(
+        "UPDATE resource_bindings SET attachment_id = ?, generation = ?, record_json = ? " +
+          "WHERE id = ? AND status = 'bound'",
+      ).run(
+        toAttachmentId,
+        toGeneration,
+        JSON.stringify(updated),
+        current.id,
+      ).changes;
+      if (changes > 0) {
+        moved.push(updated);
+      }
+    }
+    return moved;
+  }
+
   // -- Execution provenance ---------------------------------------------------
 
   /**

@@ -15,6 +15,7 @@ import { assertValid } from "../schema/validate.js";
 import { replaceRequestSchema } from "../schema/handoff.js";
 import type {
   ActiveOperationsPolicy,
+  CleanupObligation,
   DestinationRequest,
   ReplaceRequest,
   HandoffPlan,
@@ -29,6 +30,7 @@ import type {
   EnvironmentLease,
 } from "../schema/adapter.js";
 import type { InvocationRequest } from "../schema/operation.js";
+import type { AttachmentSummary } from "../schema/session.js";
 import type { RecoveryMode } from "../schema/resource.js";
 import type { OperationRecord, OperationStatus } from "../schema/operation.js";
 import { SessionEventStream } from "../store/event-stream.js";
@@ -810,6 +812,7 @@ interface TransitionData {
   }>;
   candidateAttachmentId?: string;
   environmentId?: string;
+  fencingToken?: number;
   copyId?: string;
   reconstruction?: DestinationReconstruction[];
   candidates?: CandidateBinding[];
@@ -1445,4 +1448,384 @@ function workingCopyRoot(store: ControlStore, copyId: string | undefined): strin
     return null;
   }
   return store.getWorkingCopy(copyId)?.rootPath ?? null;
+}
+// -- Switch transaction (SPEC.md section 13.3) --------------------------------
+
+/** Options of one switch call. */
+export interface SwitchOptions {
+  redactor?: EventRedactor;
+}
+
+/** The report of one committed switch. */
+export interface SwitchReport {
+  transitionId: string;
+  sessionId: string;
+  attachmentId: string;
+  oldGeneration: number;
+  newGeneration: number;
+  /** The environment the switched generation runs on. */
+  environmentId: string;
+  /** Source bindings the transaction invalidated. */
+  invalidatedResourceIds: string[];
+  /** Candidate bindings the transaction adopted, by unchanged identity. */
+  adoptedResourceIds: string[];
+  /** Source cleanup the switch left behind (SPEC.md section 13.4). */
+  cleanup: CleanupObligation[];
+}
+
+/** The persisted transition data, as the switch reads it. */
+interface SwitchData extends TransitionData {
+  sourceGeneration?: number;
+  switchedAt?: string;
+  newGeneration?: number;
+  invalidatedResourceIds?: string[];
+  adoptedResourceIds?: string[];
+  cleanup?: CleanupObligation[];
+}
+
+/**
+ * Commit one replacement atomically (SPEC.md section 13.3).
+ *
+ * The transaction verifies the source generation, the mutation
+ * fencing token recorded at the checkpoint, and the validated
+ * destination record before anything moves. It then records, in one
+ * store transaction: the incremented attachment generation bound to
+ * the destination environment, the retirement of the candidate
+ * attachment record, the invalidation of every source-generation
+ * binding, the adoption of the candidate bindings under the new
+ * generation, the fence release, the handoff outcome with its durable
+ * event, and the source cleanup obligations.
+ *
+ * Nothing else moves: unrelated attachments keep their generations,
+ * and the workspace head is untouched — accepting a proposal is a
+ * separate, explicit operation. A repeated call after a lost response
+ * finds the transition already switched and returns the committed
+ * result without committing anything twice.
+ */
+export function switchReplacement(
+  store: ControlStore,
+  transitionId: string,
+  options: SwitchOptions = {},
+): SwitchReport {
+  const current = store.getTransition(transitionId);
+  if (current === null) {
+    throw invalidRequestError(`Transition ${transitionId} does not exist.`, {
+      transitionId,
+    });
+  }
+  if (current.phase === "switched") {
+    // The response was lost, not the commit: return what committed.
+    return recordedSwitch(current);
+  }
+  if (current.phase !== "validated") {
+    throw invalidRequestError(
+      `Transition ${transitionId} is ${current.phase}; only a validated transition switches.`,
+      { transitionId, phase: current.phase },
+    );
+  }
+  const { sessionId, attachmentId } = current;
+  const data = current.data as SwitchData;
+  const stream =
+    options.redactor === undefined
+      ? new SessionEventStream(store, sessionId)
+      : new SessionEventStream(store, sessionId, options.redactor);
+
+  const source = requireSwitchedSource(store, current, data);
+  requireRecordedFence(store, current, data);
+  const candidate = requireLiveCandidate(store, current, data);
+  requireRecordedValidation(current, data);
+
+  const sourceGeneration = source.generation;
+  const newGeneration = sourceGeneration + 1;
+  const now = new Date().toISOString();
+  const reason =
+    `Replacement ${transitionId} switched generation ${sourceGeneration} to ${newGeneration}.`;
+  const cleanup: CleanupObligation[] = [
+    {
+      id: `cleanup-${randomUUID()}`,
+      kind: "release",
+      targetId: source.environmentId ?? attachmentId,
+      detail: "Release the replaced source environment after the switch.",
+      createdAt: now,
+    },
+  ];
+
+  const invalidatedResourceIds: string[] = [];
+  const adoptedResourceIds: string[] = [];
+  try {
+    store.transaction(() => {
+      const switched = store.casAttachment(
+        attachmentId,
+        { status: "replacing", generation: sourceGeneration },
+        {
+          sessionId: source.sessionId,
+          attachmentId,
+          name: source.name,
+          generation: newGeneration,
+          status: "active",
+          environmentId: candidate.environmentId!,
+          ...(candidate.providerId !== undefined ? { providerId: candidate.providerId } : {}),
+          capabilityIds: candidate.capabilityIds,
+          ...(candidate.leaseExpiresAt !== undefined
+            ? { leaseExpiresAt: candidate.leaseExpiresAt }
+            : {}),
+          ...(source.extensions !== undefined ? { extensions: source.extensions } : {}),
+        },
+      );
+      if (switched === null) {
+        throw staleHandleError(
+          {
+            kind: "attachment-state",
+            value: { status: "replacing", generation: sourceGeneration },
+          },
+          {
+            kind: "attachment-state",
+            value: { status: source.status, generation: source.generation },
+          },
+        );
+      }
+      // The candidate record retires; its environment lives on under
+      // the switched attachment. The extension records where it went.
+      const retired = store.casAttachment(
+        candidate.attachmentId,
+        { status: "active", generation: candidate.generation },
+        {
+          ...candidate,
+          status: "released",
+          extensions: {
+            ...candidate.extensions,
+            "portable.runtime.merged-into": attachmentId,
+            "portable.runtime.merged-generation": newGeneration,
+          },
+        },
+      );
+      if (retired === null) {
+        throw staleHandleError(
+          {
+            kind: "attachment-state",
+            value: { status: "active", generation: candidate.generation },
+          },
+          {
+            kind: "attachment-state",
+            value: { status: candidate.status, generation: candidate.generation },
+          },
+        );
+      }
+
+      // Every source-generation handle dies here, native and
+      // superseded alike: the candidate bindings are the live ones.
+      for (const entry of data.inventory ?? []) {
+        const updated = store.markResourceBindingInvalidated(entry.resourceId, reason, now);
+        if (updated !== null) {
+          invalidatedResourceIds.push(entry.resourceId);
+          stream.append("resource.invalidated", updated.id, {
+            resourceId: updated.id,
+            reason,
+            ownerGeneration: sourceGeneration,
+            attachmentId,
+          });
+        }
+      }
+
+      // Candidate bindings keep their identities and move to the new
+      // generation: callers hold these handles across the switch.
+      for (const binding of store.transferResourceBindings(
+        sessionId,
+        candidate.attachmentId,
+        candidate.generation,
+        attachmentId,
+        newGeneration,
+      )) {
+        adoptedResourceIds.push(binding.id);
+      }
+
+      // The fence drops with the commit: a managed writer may lease
+      // the switched generation afresh.
+      store.releaseMutationLease(sessionId, attachmentId, data.fencingToken!);
+
+      for (const obligation of cleanup) {
+        stream.append("cleanup.pending", obligation.id, {
+          cleanupId: obligation.id,
+          kind: obligation.kind,
+          targetId: obligation.targetId,
+          ...(obligation.detail !== undefined ? { detail: obligation.detail } : {}),
+        });
+      }
+
+      const moved = store.casTransition(transitionId, { phase: "validated" }, {
+        ...current,
+        phase: "switched",
+        data: {
+          ...current.data,
+          switchedAt: now,
+          newGeneration,
+          invalidatedResourceIds,
+          adoptedResourceIds,
+          cleanup,
+        },
+        updatedAt: now,
+      });
+      if (moved === null) {
+        throw staleHandleError(
+          { kind: "transition-phase", value: "validated" },
+          { kind: "transition-phase", value: current.phase },
+        );
+      }
+      stream.append("handoff.updated", transitionId, {
+        transitionId,
+        phase: "switched",
+        outcome: "completed",
+        oldGeneration: sourceGeneration,
+        newGeneration,
+        detail: `Attachment ${attachmentId} switched to environment ${String(candidate.environmentId)}.`,
+      });
+    });
+  } catch (error) {
+    if (error instanceof StoreError) {
+      // The store refused mid-transaction; all of it rolled back.
+      throw error.toPortableError();
+    }
+    throw error;
+  }
+
+  return {
+    transitionId,
+    sessionId,
+    attachmentId,
+    oldGeneration: sourceGeneration,
+    newGeneration,
+    environmentId: candidate.environmentId ?? "",
+    invalidatedResourceIds,
+    adoptedResourceIds,
+    cleanup,
+  };
+}
+
+/** The quiesced source of one switch, at the recorded generation. */
+function requireSwitchedSource(
+  store: ControlStore,
+  transition: TransitionRecord,
+  data: SwitchData,
+): AttachmentSummary {
+  const source = store.getAttachment(transition.attachmentId);
+  if (source === null || source.sessionId !== transition.sessionId) {
+    throw staleHandleError(
+      { kind: "attachment", value: transition.attachmentId },
+      { kind: "attachment", value: null },
+    );
+  }
+  if (
+    data.sourceGeneration === undefined ||
+    source.generation !== data.sourceGeneration ||
+    source.status !== "replacing"
+  ) {
+    throw staleHandleError(
+      {
+        kind: "attachment-state",
+        value: { status: "replacing", generation: data.sourceGeneration },
+      },
+      {
+        kind: "attachment-state",
+        value: { status: source.status, generation: source.generation },
+      },
+    );
+  }
+  return source;
+}
+
+/**
+ * The mutation fence of one switch.
+ *
+ * The lease row must still name this transition with the token the
+ * checkpoint recorded. A released or superseded row means the fence
+ * was given up: no switch may commit over that history.
+ */
+function requireRecordedFence(
+  store: ControlStore,
+  transition: TransitionRecord,
+  data: SwitchData,
+): void {
+  const lease = store.getMutationLease(transition.sessionId, transition.attachmentId);
+  if (
+    data.fencingToken === undefined ||
+    lease === null ||
+    lease.releasedAt !== undefined ||
+    lease.holder !== `replacement:${transition.id}` ||
+    lease.fencingToken !== data.fencingToken
+  ) {
+    throw staleHandleError(
+      { kind: "fencing-token", value: data.fencingToken ?? 0 },
+      { kind: "fencing-token", value: lease?.fencingToken ?? 0 },
+    );
+  }
+}
+
+/** The candidate attachment of one switch, still live. */
+function requireLiveCandidate(
+  store: ControlStore,
+  transition: TransitionRecord,
+  data: SwitchData,
+): AttachmentSummary {
+  if (data.candidateAttachmentId === undefined || data.environmentId === undefined) {
+    throw handoffBlockedError(
+      `Transition ${transition.id} carries no provisioned destination to switch to.`,
+      { transitionId: transition.id, reason: "destination-absent" },
+    );
+  }
+  const candidate = store.getAttachment(data.candidateAttachmentId);
+  if (candidate === null || candidate.sessionId !== transition.sessionId) {
+    throw staleHandleError(
+      { kind: "attachment", value: data.candidateAttachmentId },
+      { kind: "attachment", value: null },
+    );
+  }
+  if (candidate.status !== "active") {
+    throw staleHandleError(
+      { kind: "attachment-status", value: "active" },
+      { kind: "attachment-status", value: candidate.status },
+    );
+  }
+  if (candidate.environmentId === undefined) {
+    throw providerUnavailableError(
+      `The candidate attachment ${candidate.attachmentId} reports no environment.`,
+      { attachmentId: candidate.attachmentId },
+    );
+  }
+  return candidate;
+}
+
+/** The validated destination state of one switch. */
+function requireRecordedValidation(
+  transition: TransitionRecord,
+  data: SwitchData,
+): void {
+  const validation = data.validation;
+  if (
+    validation === undefined ||
+    !validation.manifest ||
+    !validation.satisfies ||
+    !validation.revisionIntegrity ||
+    !validation.requiredResources
+  ) {
+    throw handoffBlockedError(
+      `The destination of transition ${transition.id} never validated; the switch refuses.`,
+      { transitionId: transition.id, reason: "destination-not-validated" },
+    );
+  }
+}
+
+/** The report of a transition that already switched. */
+function recordedSwitch(transition: TransitionRecord): SwitchReport {
+  const data = transition.data as SwitchData;
+  return {
+    transitionId: transition.id,
+    sessionId: transition.sessionId,
+    attachmentId: transition.attachmentId,
+    oldGeneration: data.sourceGeneration ?? 0,
+    newGeneration: data.newGeneration ?? 0,
+    environmentId: data.environmentId ?? "",
+    invalidatedResourceIds: data.invalidatedResourceIds ?? [],
+    adoptedResourceIds: data.adoptedResourceIds ?? [],
+    cleanup: data.cleanup ?? [],
+  };
 }

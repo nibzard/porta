@@ -448,13 +448,15 @@ export type {
   ReconstructionStepOutcome,
 } from "./runtime/reconstruction.js";
 
-// Runtime: replacement planning, preparation, checkpointing, and
-// destination preparation (SPEC.md sections 13.1 and 13.2).
+// Runtime: replacement planning, preparation, checkpointing,
+// destination preparation, and the switch transaction (SPEC.md
+// sections 13.1 to 13.3).
 export {
   checkpointReplacement,
   planReplace,
   prepareDestination,
   prepareReplacement,
+  switchReplacement,
   verifyWorkingCopyIntegrity,
 } from "./runtime/replacement.js";
 export type {
@@ -470,6 +472,8 @@ export type {
   DestinationValidation,
   PrepareOptions,
   PreparationReport,
+  SwitchOptions,
+  SwitchReport,
 } from "./runtime/replacement.js";
 
 // Runtime: attachment release, session close, and session reopen.

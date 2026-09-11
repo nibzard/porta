@@ -984,3 +984,302 @@ test("working-copy integrity refuses any content that drifted from the revision"
     rmSync(copyRoot, { recursive: true, force: true });
   }
 });
+
+// -- Switch transaction (SPEC.md section 13.3) --------------------------------
+
+import { switchReplacement } from "./replacement.js";
+
+/** Run the full pipeline to a validated destination transition. */
+async function validatedTransition(
+  parts: Fixture,
+  adapter: FakeEnvironmentAdapter,
+  copyRoot: string,
+): Promise<{ transitionId: string; candidateAttachmentId: string; environmentId: string }> {
+  const prepared = await prepareReplacement(parts.store, request(parts));
+  checkpointReplacement(parts.store, prepared.transitionId);
+  const destination = await prepareDestination(
+    parts.store,
+    prepared.transitionId,
+    destinationOptions(parts, adapter, copyRoot),
+  );
+  assert.equal(destination.state, "validated");
+  return {
+    transitionId: prepared.transitionId,
+    candidateAttachmentId: destination.candidateAttachmentId,
+    environmentId: destination.environmentId,
+  };
+}
+
+test("the switch commits generation, bindings, and obligations together", async () => {
+  const parts = await fixture();
+  const copyRoot = mkdtempSync(join(tmpdir(), "porta-sw-1-"));
+  try {
+    const adapter = new FakeEnvironmentAdapter();
+    const { transitionId, candidateAttachmentId, environmentId } = await validatedTransition(
+      parts,
+      adapter,
+      copyRoot,
+    );
+
+    // An unrelated attachment and the workspace head must not move.
+    parts.store.insertAttachment({
+      sessionId: parts.sessionId,
+      attachmentId: "att-bystander",
+      name: "bystander",
+      generation: 3,
+      status: "active",
+      capabilityIds: ["exec.process@1"],
+    });
+    const headBefore = parts.store.getWorkspaceHead(parts.workspaceId);
+
+    const report = switchReplacement(parts.store, transitionId);
+    assert.equal(report.oldGeneration, 1);
+    assert.equal(report.newGeneration, 2);
+    assert.equal(report.environmentId, environmentId);
+    assert.equal(report.cleanup.length, 1);
+    assert.equal(report.cleanup[0]!.kind, "release");
+
+    // The target attachment continues at generation 2 on the new
+    // environment, under its own name.
+    const switched = parts.store.getAttachment(parts.attachmentId)!;
+    assert.equal(switched.status, "active");
+    assert.equal(switched.generation, 2);
+    assert.equal(switched.environmentId, environmentId);
+    assert.equal(switched.name, "worker");
+
+    // The candidate record retired and records where it went.
+    const candidate = parts.store.getAttachment(candidateAttachmentId)!;
+    assert.equal(candidate.status, "released");
+    assert.equal(candidate.extensions?.["portable.runtime.merged-into"], parts.attachmentId);
+
+    // Every source-generation handle died; the candidates live on,
+    // by unchanged identity, under generation 2.
+    for (const id of [parts.ids.reconstruct, parts.ids.reattach, parts.ids.native, parts.ids.none]) {
+      assert.equal(parts.store.getResourceBinding(parts.sessionId, id)!.status, "invalidated");
+    }
+    assert.equal(report.invalidatedResourceIds.length, 4);
+    const adopted = report.adoptedResourceIds;
+    assert.equal(adopted.length, 2);
+    for (const resourceId of adopted) {
+      const binding = parts.store.getResourceBinding(parts.sessionId, resourceId)!;
+      assert.equal(binding.status, "bound");
+      assert.equal(binding.owner.attachmentId, parts.attachmentId);
+      assert.equal(binding.owner.generation, 2);
+    }
+
+    // The fence dropped with the commit: a writer may lease afresh.
+    const lease = parts.store.getMutationLease(parts.sessionId, parts.attachmentId);
+    assert.notEqual(lease?.releasedAt, undefined);
+    parts.store.acquireMutationLease(parts.sessionId, parts.attachmentId, "writer-next", 60_000);
+
+    // The transition and its journal carry the outcome.
+    const transition = parts.store.getTransition(transitionId)!;
+    assert.equal(transition.phase, "switched");
+    const events = parts.store
+      .listEvents(parts.sessionId, 0)
+      .filter((event) => event.subjectId === transitionId);
+    const switchedEvent = events.find(
+      (event) => event.type === "handoff.updated" && event.data.phase === "switched",
+    )!;
+    assert.equal(switchedEvent.data.phase, "switched");
+    assert.equal(switchedEvent.data.outcome, "completed");
+    assert.equal(switchedEvent.data.oldGeneration, 1);
+    assert.equal(switchedEvent.data.newGeneration, 2);
+    assert.ok(
+      parts.store
+        .listEvents(parts.sessionId, 0)
+        .some((event) => event.type === "cleanup.pending"),
+      "the cleanup obligation is journaled",
+    );
+
+    // Nothing else moved.
+    const bystander = parts.store.getAttachment("att-bystander")!;
+    assert.equal(bystander.generation, 3);
+    assert.equal(bystander.status, "active");
+    assert.equal(parts.store.getWorkspaceHead(parts.workspaceId), headBefore);
+
+    // A repeated call returns the committed result, not a second switch.
+    const repeated = switchReplacement(parts.store, transitionId);
+    assert.equal(repeated.newGeneration, 2);
+    assert.deepEqual(repeated.adoptedResourceIds, adopted);
+    assert.equal(parts.store.getAttachment(parts.attachmentId)!.generation, 2);
+    assert.equal(
+      parts.store.getResourceBinding(parts.sessionId, adopted[0]!)!.owner.generation,
+      2,
+    );
+  } finally {
+    parts.cleanup();
+    rmSync(copyRoot, { recursive: true, force: true });
+  }
+});
+
+test("the switch validates generation, fence, and destination state", async () => {
+  const parts = await fixture();
+  const copyRoot = mkdtempSync(join(tmpdir(), "porta-sw-2-"));
+  try {
+    // A stale source generation refuses before anything moves.
+    const staleAdapter = new FakeEnvironmentAdapter();
+    const stale = await validatedTransition(parts, staleAdapter, copyRoot);
+    const stored = parts.store.getAttachment(parts.attachmentId)!;
+    parts.store.casAttachment(
+      parts.attachmentId,
+      { status: "replacing", generation: 1 },
+      { ...stored, generation: 2 },
+    );
+    const staleRefusal = await refuse(() =>
+      Promise.resolve(switchReplacement(parts.store, stale.transitionId)),
+    );
+    assert.equal(staleRefusal?.code, "StaleHandle");
+    parts.store.casAttachment(
+      parts.attachmentId,
+      { status: "replacing", generation: 2 },
+      { ...stored, generation: 1 },
+    );
+
+    // A released or superseded fence refuses: the checkpoint's proof
+    // of quiescence is gone.
+    const fenceStore = ControlStore.inMemory();
+    const fenceParts = await seedOn(fenceStore);
+    const fenceRoot = mkdtempSync(join(tmpdir(), "porta-sw-2b-"));
+    const fence = await validatedTransition(
+      fenceParts,
+      new FakeEnvironmentAdapter(),
+      fenceRoot,
+    );
+    const token = fenceStore.getTransition(fence.transitionId)!.data.fencingToken as number;
+    fenceStore.releaseMutationLease(fenceParts.sessionId, fenceParts.attachmentId, token);
+    const releasedRefusal = await refuse(() =>
+      Promise.resolve(switchReplacement(fenceStore, fence.transitionId)),
+    );
+    assert.equal(releasedRefusal?.code, "StaleHandle");
+    // A writer who re-leased after the release is just as refusing.
+    fenceStore.acquireMutationLease(
+      fenceParts.sessionId,
+      fenceParts.attachmentId,
+      "writer-x",
+      60_000,
+    );
+    const supersededRefusal = await refuse(() =>
+      Promise.resolve(switchReplacement(fenceStore, fence.transitionId)),
+    );
+    assert.equal(supersededRefusal?.code, "StaleHandle");
+    rmSync(fenceRoot, { recursive: true, force: true });
+
+    // A transition that never validated refuses.
+    const earlyStore = ControlStore.inMemory();
+    const earlyParts = await seedOn(earlyStore);
+    try {
+      const early = await prepareReplacement(earlyStore, request(earlyParts));
+      checkpointReplacement(earlyStore, early.transitionId);
+      const earlyRefusal = await refuse(() =>
+        Promise.resolve(switchReplacement(earlyStore, early.transitionId)),
+      );
+      assert.equal(earlyRefusal?.code, "InvalidRequest");
+    } finally {
+      earlyParts.cleanup();
+    }
+
+    // A fabricated validated phase without the validation record
+    // refuses: the destination state must be proven, not asserted.
+    const fabricatedStore = ControlStore.inMemory();
+    const fabricatedParts = await seedOn(fabricatedStore);
+    try {
+      const fabricated = await prepareReplacement(fabricatedStore, request(fabricatedParts));
+      checkpointReplacement(fabricatedStore, fabricated.transitionId);
+      // A live candidate exists, but no validation record backs it.
+      fabricatedStore.insertAttachment({
+        sessionId: fabricatedParts.sessionId,
+        attachmentId: "att-fake-candidate",
+        name: "fake-candidate",
+        generation: 1,
+        status: "active",
+        capabilityIds: ["exec.process@1"],
+        environmentId: "env-fake",
+      });
+      const record = fabricatedStore.getTransition(fabricated.transitionId)!;
+      fabricatedStore.casTransition(fabricated.transitionId, { phase: "checkpointed" }, {
+        ...record,
+        phase: "validated",
+        data: {
+          ...record.data,
+          candidateAttachmentId: "att-fake-candidate",
+          environmentId: "env-fake",
+        },
+        updatedAt: new Date().toISOString(),
+      });
+      const fabricatedRefusal = await refuse(() =>
+        Promise.resolve(switchReplacement(fabricatedStore, fabricated.transitionId)),
+      );
+      assert.equal(fabricatedRefusal?.code, "HandoffBlocked");
+      assert.equal(
+        (fabricatedRefusal?.details as { reason?: string }).reason,
+        "destination-not-validated",
+      );
+    } finally {
+      fabricatedParts.cleanup();
+    }
+
+    // A dead candidate refuses.
+    const deadAdapter = new FakeEnvironmentAdapter();
+    const deadRoot = mkdtempSync(join(tmpdir(), "porta-sw-2c-"));
+    const deadParts = await seedOn(ControlStore.inMemory());
+    const dead = await validatedTransition(deadParts, deadAdapter, deadRoot);
+    const candidate = deadParts.store.getAttachment(dead.candidateAttachmentId)!;
+    deadParts.store.casAttachment(
+      dead.candidateAttachmentId,
+      { status: "active", generation: candidate.generation },
+      { ...candidate, status: "unavailable" },
+    );
+    const deadRefusal = await refuse(() =>
+      Promise.resolve(switchReplacement(deadParts.store, dead.transitionId)),
+    );
+    assert.equal(deadRefusal?.code, "StaleHandle");
+    rmSync(deadRoot, { recursive: true, force: true });
+  } finally {
+    parts.cleanup();
+    rmSync(copyRoot, { recursive: true, force: true });
+  }
+});
+
+test("a store refusal mid-switch rolls the whole transaction back", async () => {
+  const parts = await fixture();
+  const copyRoot = mkdtempSync(join(tmpdir(), "porta-sw-3-"));
+  try {
+    const adapter = new FakeEnvironmentAdapter();
+    const { transitionId } = await validatedTransition(parts, adapter, copyRoot);
+    const eventsBefore = parts.store.listEvents(parts.sessionId, 0).length;
+
+    // Poison the inventory with a binding that does not exist: the
+    // invalidation sweep throws inside the transaction.
+    const record = parts.store.getTransition(transitionId)!;
+    const inventory = record.data.inventory as unknown[];
+    parts.store.casTransition(transitionId, { phase: "validated" }, {
+      ...record,
+      data: {
+        ...record.data,
+        inventory: [...inventory, { resourceId: "res-ghost", type: "socket", capability: "exec.process@1", recovery: "native" }],
+      },
+      updatedAt: new Date().toISOString(),
+    });
+    const refused = await refuse(() =>
+      Promise.resolve(switchReplacement(parts.store, transitionId)),
+    );
+    assert.equal(refused?.code, "InvalidRequest");
+
+    // Nothing committed: the attachment, the bindings, the fence, the
+    // phase, and the journal all stand exactly as before.
+    const source = parts.store.getAttachment(parts.attachmentId)!;
+    assert.equal(source.status, "replacing");
+    assert.equal(source.generation, 1);
+    for (const id of [parts.ids.reconstruct, parts.ids.reattach, parts.ids.native, parts.ids.none]) {
+      assert.equal(parts.store.getResourceBinding(parts.sessionId, id)!.status, "bound");
+    }
+    const lease = parts.store.getMutationLease(parts.sessionId, parts.attachmentId)!;
+    assert.equal(lease.releasedAt, undefined);
+    assert.equal(parts.store.getTransition(transitionId)!.phase, "validated");
+    assert.equal(parts.store.listEvents(parts.sessionId, 0).length, eventsBefore);
+  } finally {
+    parts.cleanup();
+    rmSync(copyRoot, { recursive: true, force: true });
+  }
+});
