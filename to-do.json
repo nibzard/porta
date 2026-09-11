@@ -179,7 +179,7 @@
       "id": "T008",
       "title": "Implement trusted policy evaluation",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Accept authenticated authority from the embedding context and enforce all version-one policy dimensions.",
       "depends_on": [
         "T002",
