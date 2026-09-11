@@ -274,15 +274,20 @@ function reserveSlot(
         status: "acquiring",
         capabilityIds: [],
       });
-      store.insertAcquisition(sessionId, options.requestKey, {
-        acquisitionId,
-        state: "pending",
-        extensions: {
-          [REQUEST_KEY]: options.request,
-          [INPUT_HASH_KEY]: inputHash,
-          [ATTACHMENT_KEY]: attachmentId,
+      store.insertAcquisition(
+        sessionId,
+        options.requestKey,
+        {
+          acquisitionId,
+          state: "pending",
+          extensions: {
+            [REQUEST_KEY]: options.request,
+            [INPUT_HASH_KEY]: inputHash,
+            [ATTACHMENT_KEY]: attachmentId,
+          },
         },
-      });
+        attachmentId,
+      );
       return {
         slot: {
           acquisitionId,
@@ -626,6 +631,7 @@ function markUnresolved(context: FlowContext): void {
             targetId: context.slot.acquisitionId,
             detail,
             createdAt: nowUtcTimestamp(),
+            extensions: obligationExtensionsOf(context.slot),
           });
         }
       },
@@ -687,6 +693,7 @@ async function markFailed(context: FlowContext, cause: unknown): Promise<never> 
             targetId,
             detail,
             createdAt: nowUtcTimestamp(),
+            extensions: obligationExtensionsOf(context.slot),
           });
         },
       );
@@ -799,6 +806,23 @@ function extensionsOf(slot: AcquisitionSlot): Record<string, unknown> {
     [INPUT_HASH_KEY]: slot.inputHash,
     [ATTACHMENT_KEY]: slot.attachmentId,
   };
+}
+
+/** Tag an obligation with exactly the records it may touch. */
+function obligationExtensionsOf(slot: AcquisitionSlot): Record<string, unknown> {
+  return {
+    [ATTACHMENT_KEY]: slot.attachmentId,
+    "portable.runtime.acquisition-id": slot.acquisitionId,
+  };
+}
+
+/**
+ * The request an acquisition record stores, for flows that need to talk
+ * to the adapter again behind the same durable identity.
+ */
+export function storedRequestOf(record: AcquisitionStatus): EnvironmentRequest | undefined {
+  const request = (record.extensions ?? {})[REQUEST_KEY];
+  return isEnvironmentRequest(request) ? request : undefined;
 }
 
 // -- Helpers -----------------------------------------------------------------

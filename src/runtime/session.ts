@@ -16,6 +16,11 @@ import type {
 import type { ControlStore } from "../store/control-store.js";
 import { attachEnvironment, reconcileAcquisition } from "./acquisition.js";
 import type { AttachOptions, ReconcileOptions } from "./acquisition.js";
+import {
+  renewAttachment as renewAttachmentFlow,
+  runCleanup as runCleanupFlow,
+} from "./lifecycle.js";
+import type { CleanupOptions, CleanupReport, RenewOptions, RenewOutcome } from "./lifecycle.js";
 import type { AttachmentSummary } from "../schema/session.js";
 
 /**
@@ -153,6 +158,28 @@ export class ManagedSession {
     options: ReconcileOptions,
   ): Promise<AttachmentSummary> {
     return reconcileAcquisition(this.store, this.id, requestKey, options);
+  }
+
+  /**
+   * Renew the environment lease of one attachment.
+   *
+   * A refusal or an expired lease marks the attachment unavailable and
+   * records a release obligation: runtime authority expiring proves
+   * nothing about the provider side (SPEC.md section 8).
+   */
+  async renewAttachment(attachmentId: string, options: RenewOptions): Promise<RenewOutcome> {
+    return renewAttachmentFlow(this.store, this.id, this.record().policyRef, attachmentId, options);
+  }
+
+  /**
+   * Run one cleanup pass over the session's pending obligations.
+   *
+   * Each retry releases exactly the environment its obligation names.
+   * Obligations survive restart and stay visible until the provider
+   * confirms the release.
+   */
+  async runCleanup(options: CleanupOptions): Promise<CleanupReport> {
+    return runCleanupFlow(this.store, this.id, this.record().policyRef, options);
   }
 }
 

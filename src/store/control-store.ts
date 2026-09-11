@@ -557,14 +557,21 @@ export class ControlStore {
    *
    * `requestKey` enforces the one-logical-request rule: a second insert
    * with the same key in one session fails with a unique error.
+   * `attachmentId` links the identity to the attachment it serves, so
+   * later flows can find it without the request key.
    */
-  insertAcquisition(sessionId: string, requestKey: string | null, record: AcquisitionStatus): void {
+  insertAcquisition(
+    sessionId: string,
+    requestKey: string | null,
+    record: AcquisitionStatus,
+    attachmentId?: string,
+  ): void {
     assertValid(acquisitionStatusSchema, record);
     this.run(
       "INSERT INTO acquisitions (id, session_id, attachment_id, request_key, state, updated_at, record_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
       record.acquisitionId,
       sessionId,
-      null,
+      attachmentId ?? null,
       requestKey,
       record.state,
       nowUtcTimestamp(),
@@ -575,6 +582,19 @@ export class ControlStore {
   getAcquisition(acquisitionId: string): AcquisitionStatus | null {
     return ControlStore.parse<AcquisitionStatus>(
       this.get("SELECT record_json FROM acquisitions WHERE id = ?", acquisitionId),
+      acquisitionStatusSchema,
+      "acquisition",
+    );
+  }
+
+  /** The acquisition identity that serves one attachment. */
+  getAcquisitionForAttachment(sessionId: string, attachmentId: string): AcquisitionStatus | null {
+    return ControlStore.parse<AcquisitionStatus>(
+      this.get(
+        "SELECT record_json FROM acquisitions WHERE session_id = ? AND attachment_id = ?",
+        sessionId,
+        attachmentId,
+      ),
       acquisitionStatusSchema,
       "acquisition",
     );

@@ -147,6 +147,20 @@ export {
 } from "./runtime/acquisition.js";
 export type { AttachOptions, ReconcileOptions } from "./runtime/acquisition.js";
 
+// Runtime: lease renewal and allocation cleanup.
+export {
+  checkAttachmentAcceptsOperations,
+  renewAttachment,
+  runCleanup,
+} from "./runtime/lifecycle.js";
+export type {
+  CleanupOptions,
+  CleanupOutcome,
+  CleanupReport,
+  RenewOptions,
+  RenewOutcome,
+} from "./runtime/lifecycle.js";
+
 // Records and schemas.
 export * from "./schema/error.js";
 export * from "./schema/event.js";
