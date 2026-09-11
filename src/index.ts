@@ -278,6 +278,51 @@ export type {
   ResourceFlowOptions,
 } from "./runtime/resources.js";
 
+// Runtime: the exec.process@1 capability contract.
+export {
+  PROCESS_ATTRIBUTE_KEYS,
+  PROCESS_CAPABILITY_ID,
+  PROCESS_OPERATIONS,
+  checkProcessAttributes,
+  decodeProcessStdin,
+  mergeProcessEnvironment,
+  processCapabilityDescriptor,
+  processInspectInputSchema,
+  processInspectResultSchema,
+  processRunInputSchema,
+  processRunResultSchema,
+  processStartInputSchema,
+  processStartResultSchema,
+  processTerminateInputSchema,
+  processTerminateResultSchema,
+  resolveProcessCwd,
+  shellInvocation,
+  validateProcessInput,
+  validateProcessInspectInput,
+  validateProcessRunInput,
+  validateProcessStartInput,
+  validateProcessTerminateInput,
+} from "./runtime/process-capability.js";
+export type {
+  ProcessAttributeDeclarations,
+  ProcessInput,
+  ProcessInspectInput,
+  ProcessInspectResult,
+  ProcessLaunchInput,
+  ProcessOperation,
+  ProcessOutputLimits,
+  ProcessRunInput,
+  ProcessRunResult,
+  ProcessStartInput,
+  ProcessStartResult,
+  ProcessState,
+  ProcessStdinEncoding,
+  ProcessStreamCapture,
+  ProcessTerminateInput,
+  ProcessTerminateResult,
+  WorkingCopyBound,
+} from "./runtime/process-capability.js";
+
 // Records and schemas.
 export * from "./schema/error.js";
 export * from "./schema/event.js";

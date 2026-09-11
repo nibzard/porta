@@ -627,7 +627,7 @@
       "id": "T026",
       "title": "Implement the native process capability contract",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Define validated run, start, inspect, and terminate requests and results.",
       "depends_on": [
         "T002",
