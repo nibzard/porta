@@ -229,7 +229,7 @@
       "id": "T010",
       "title": "Implement capability discovery and matching",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Validate descriptors and match semantic requirements against configured environment offers.",
       "depends_on": [
         "T002",

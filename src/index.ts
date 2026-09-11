@@ -29,6 +29,7 @@ export * from "./schema/defs.js";
 export {
   ValidationError,
   assertValid,
+  checkJsonSchemaCompiles,
   jsonRoundTrip,
   validateAgainstSchema,
 } from "./schema/validate.js";
@@ -76,6 +77,23 @@ export {
   requireExtensions,
 } from "./core/compatibility.js";
 export type { ParsedCapabilityId } from "./core/compatibility.js";
+
+// Capability discovery and matching.
+export {
+  checkTargetSatisfies,
+  manifestTarget,
+  matchEnvironment,
+  offerTarget,
+  validateCapabilityDescriptors,
+  validateManifest,
+} from "./core/matching.js";
+export type {
+  MatchFailure,
+  MatchOptions,
+  MatchResult,
+  MatchTarget,
+  RequirementMatcher,
+} from "./core/matching.js";
 
 // Time helpers.
 export { isUtcTimestamp, nowUtcTimestamp } from "./core/time.js";

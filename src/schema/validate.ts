@@ -230,3 +230,39 @@ export function jsonRoundTrip(schema: object, value: unknown): unknown {
   assertValid(schema, parsed);
   return parsed;
 }
+
+/**
+ * Check that a value is a compilable JSON Schema draft 2020-12 schema.
+ *
+ * Returns an empty list when the schema compiles. Capability descriptors
+ * use this to prove their operation input and output schemas are real
+ * schemas, not arbitrary objects (SPEC.md section 6.2).
+ */
+export function checkJsonSchemaCompiles(schema: unknown): ValidationIssue[] {
+  if (schema === null || typeof schema !== "object" || Array.isArray(schema)) {
+    return [
+      {
+        instancePath: "",
+        schemaPath: "",
+        keyword: "type",
+        message: "The value is not a schema object.",
+        params: { type: "object" },
+      },
+    ];
+  }
+  try {
+    ajv.compile(schema);
+    return [];
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return [
+      {
+        instancePath: "",
+        schemaPath: "",
+        keyword: "schema",
+        message,
+        params: {},
+      },
+    ];
+  }
+}
