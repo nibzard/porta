@@ -155,7 +155,7 @@
       "id": "T007",
       "title": "Implement session creation and inspection",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Create durable session identities and describe their workspace, policy, attachments, and resources.",
       "depends_on": [
         "T004",

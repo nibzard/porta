@@ -351,6 +351,13 @@ export class ControlStore {
     );
   }
 
+  /** Identifiers of every persisted session, ordered by creation. */
+  listSessionIds(): string[] {
+    return this.all("SELECT id FROM sessions ORDER BY created_at, id").map(
+      (row) => row.id as string,
+    );
+  }
+
   /**
    * Move a session between statuses under an expectation.
    *
@@ -598,6 +605,19 @@ export class ControlStore {
       record_json: JSON.stringify(record),
     });
     return result === null ? null : (result as AcquisitionStatus);
+  }
+
+  /**
+   * Acquisition identities whose outcome is not resolved.
+   *
+   * Covers `pending` and `unknown` states: allocations that may or may not
+   * exist at the provider and must not be retried blindly (SPEC.md 5.2).
+   */
+  listUnresolvedAcquisitions(sessionId: string): string[] {
+    return this.all(
+      "SELECT id FROM acquisitions WHERE session_id = ? AND state IN ('pending', 'unknown') ORDER BY id",
+      sessionId,
+    ).map((row) => row.id as string);
   }
 
   // -- Operations -----------------------------------------------------------

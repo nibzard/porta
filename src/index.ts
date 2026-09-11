@@ -89,6 +89,9 @@ export {
 } from "./store/event-stream.js";
 export type { EventBatch } from "./store/event-stream.js";
 
+// Runtime: session identity and inspection.
+export { ManagedSession, PortableRuntime } from "./runtime/session.js";
+
 // Records and schemas.
 export * from "./schema/error.js";
 export * from "./schema/event.js";
