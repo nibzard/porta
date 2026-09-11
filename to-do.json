@@ -132,7 +132,7 @@
       "id": "T006",
       "title": "Implement the durable event stream",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Write events with state mutations and expose replay by session sequence.",
       "depends_on": [
         "T004"

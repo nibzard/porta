@@ -80,9 +80,19 @@ export type { ParsedCapabilityId } from "./core/compatibility.js";
 // Time helpers.
 export { isUtcTimestamp, nowUtcTimestamp } from "./core/time.js";
 
+// Journal stream (durability helpers over the control store).
+export {
+  EventDeduplicator,
+  SessionEventStream,
+  uniqueEventKey,
+  validateStoredEvent,
+} from "./store/event-stream.js";
+export type { EventBatch } from "./store/event-stream.js";
+
 // Records and schemas.
 export * from "./schema/error.js";
 export * from "./schema/event.js";
+export * from "./schema/event-payload.js";
 export * from "./schema/session.js";
 export * from "./schema/capability.js";
 export * from "./schema/adapter.js";

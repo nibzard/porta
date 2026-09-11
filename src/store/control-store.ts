@@ -448,12 +448,20 @@ export class ControlStore {
     });
   }
 
-  listEvents(sessionId: string, afterSequence: number): PortableEvent[] {
-    const rows = this.all(
-      "SELECT record_json FROM events WHERE session_id = ? AND sequence > ? ORDER BY sequence",
-      sessionId,
-      afterSequence,
-    );
+  listEvents(sessionId: string, afterSequence: number, limit?: number): PortableEvent[] {
+    const rows =
+      limit === undefined
+        ? this.all(
+            "SELECT record_json FROM events WHERE session_id = ? AND sequence > ? ORDER BY sequence",
+            sessionId,
+            afterSequence,
+          )
+        : this.all(
+            "SELECT record_json FROM events WHERE session_id = ? AND sequence > ? ORDER BY sequence LIMIT ?",
+            sessionId,
+            afterSequence,
+            limit,
+          );
     return rows.map((row) => {
       const parsed = JSON.parse(row.record_json as string) as unknown;
       assertValid(portableEventSchema, parsed);
