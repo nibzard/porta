@@ -5,6 +5,7 @@ import {
   integrityFailureError,
   invalidRequestError,
   requestConflictError,
+  staleHandleError,
   unsupportedOperationError,
   workspaceConflictError,
   workspaceUnstableError,
@@ -15,8 +16,13 @@ import type { WorkspaceRevision } from "../schema/workspace.js";
 import { assertValid } from "../schema/validate.js";
 import type { PolicyAuthority } from "../core/policy.js";
 import { checkRawTransfer } from "../core/secrets.js";
-import { checkpointRequestSchema } from "../schema/workspace.js";
-import type { CheckpointRequest, WorkingCopyRecord } from "../schema/workspace.js";
+import { checkpointRequestSchema, proposalRequestSchema } from "../schema/workspace.js";
+import type {
+  CheckpointRequest,
+  ProposalRecord,
+  ProposalRequest,
+  WorkingCopyRecord,
+} from "../schema/workspace.js";
 import type { BlobLimits, BlobRef, BlobStore } from "../store/blob-store.js";
 import { StoreError } from "../store/control-store.js";
 import type { ControlStore } from "../store/control-store.js";
@@ -89,6 +95,7 @@ export interface CheckpointOutcome {
 const DEFAULT_LOCK_FILE = ".portable-bridge.lock";
 const DEFAULT_STALE_LOCK_MS = 300_000;
 const IMPORT_EXTENSION = "portable.runtime.import";
+const PROPOSAL_EXTENSION = "portable.runtime.proposal";
 
 /**
  * Import one local directory as a workspace revision (SPEC.md 11.4).
@@ -266,6 +273,331 @@ export function checkpointWorkspace(
     throw error;
   }
   return { revision, created: true, fileCount, totalBytes, exclusions: effectiveExclusions };
+}
+
+// -- Proposals ----------------------------------------------------------------
+
+/** Options for one proposal call: the same shape as a checkpoint. */
+export type ProposeOptions = CheckpointOptions;
+
+/** The outcome of one proposal call. */
+export interface ProposalOutcome {
+  proposal: ProposalRecord;
+  /** The candidate revision; it is not the head until acceptance. */
+  candidate: WorkspaceRevision;
+  /** `false` when a repeated request key returned the recorded proposal. */
+  created: boolean;
+  /** Number of file entries in the candidate tree. */
+  fileCount: number;
+  /** Combined size of the candidate files in bytes. */
+  totalBytes: number;
+  /** Effective exclusion list recorded with the proposal provenance. */
+  exclusions: string[];
+}
+
+/** The outcome of one acceptance call. */
+export interface AcceptOutcome {
+  proposal: ProposalRecord;
+  /** The revision that became the head. */
+  revisionId: string;
+  /** The head before acceptance, when this call performed it. */
+  previousHeadRevisionId?: string;
+  /** `true` when the proposal was already accepted before this call. */
+  alreadyAccepted: boolean;
+}
+
+/**
+ * Offer one private working copy's content as a proposal (SPEC.md 11.3).
+ *
+ * The call reads a registered `proposal`-mode copy under the same
+ * stability and lock rules as a bridge checkpoint, and records a
+ * candidate revision that does not move the head. The attachment named
+ * in the request must be current at propose time, and acceptance
+ * checks the generation again: a proposal from a replaced generation
+ * never accepts workspace changes.
+ */
+export function proposeWorkspaceChange(
+  store: ControlStore,
+  sessionId: string,
+  blobs: BlobStore,
+  request: ProposalRequest,
+  options: ProposeOptions = {},
+): ProposalOutcome {
+  assertValid(proposalRequestSchema, request);
+  const session = requireOpenSession(store, sessionId);
+  const copy = store.getWorkingCopy(request.copyId);
+  if (copy === null) {
+    throw invalidRequestError(`Working copy ${request.copyId} does not exist.`, {
+      copyId: request.copyId,
+    });
+  }
+  if (copy.sessionId !== sessionId) {
+    throw invalidRequestError(
+      `Working copy ${request.copyId} belongs to another session.`,
+      { copyId: request.copyId, sessionId },
+    );
+  }
+  if (copy.mode !== "proposal") {
+    throw invalidRequestError(
+      `Working copy ${request.copyId} is a read-only snapshot; it cannot propose.`,
+      { copyId: request.copyId, reason: "read-only-copy" },
+    );
+  }
+  if (request.attachment.sessionId !== sessionId) {
+    throw invalidRequestError(
+      "The proposal names an attachment of another session.",
+      { attachmentId: request.attachment.attachmentId, sessionId },
+    );
+  }
+
+  const exclusions = [...new Set(request.exclusions ?? [])].sort();
+  for (const exclusion of exclusions) {
+    const problem = validateWorkspacePath(exclusion);
+    if (problem !== null) {
+      throw problem;
+    }
+  }
+  const stability = options.stability;
+  const inputHash = hashOf({
+    copyId: request.copyId,
+    rootPath: copy.rootPath,
+    baseRevisionId: copy.baseRevisionId,
+    exclusions,
+    stability: stability === undefined ? null : stability.kind,
+    attachmentId: request.attachment.attachmentId,
+    attachmentGeneration: request.attachment.generation,
+    operationIds: request.operationIds ?? [],
+  });
+
+  // A repeated key returns the recorded proposal; changed input conflicts.
+  const recorded = store.getProposalByKey(sessionId, request.requestKey);
+  if (recorded !== null) {
+    if (recorded.inputHash !== inputHash) {
+      throw requestConflictError(
+        request.requestKey,
+        "The request key was reused with different proposal input.",
+        { inputHash, recordedInputHash: recorded.inputHash },
+      );
+    }
+    const candidate = store.getRevision(recorded.candidateRevisionId);
+    if (candidate === null) {
+      throw integrityFailureError(
+        `candidate revision of ${recorded.id}`,
+        recorded.candidateRevisionId,
+        "absent",
+      );
+    }
+    return {
+      proposal: recorded,
+      candidate,
+      created: false,
+      fileCount: 0,
+      totalBytes: 0,
+      exclusions,
+    };
+  }
+
+  // A fresh proposal must name the current generation of its
+  // attachment; a repeated key first returns what it recorded.
+  requireCurrentAttachment(store, request.attachment);
+
+  // The copy is a live directory: without a stability guarantee the
+  // runtime refuses to claim the candidate is one consistent state.
+  if (stability === undefined) {
+    throw workspaceUnstableError(
+      "The proposal has no stability guarantee: no lock is declared and no snapshot exists.",
+      { rootPath: copy.rootPath, requestKey: request.requestKey },
+    );
+  }
+  const base = store.getRevision(copy.baseRevisionId);
+  if (base === null || base.workspaceId !== session.workspaceId) {
+    throw invalidRequestError(
+      `The copy's base revision ${copy.baseRevisionId} is outside this workspace.`,
+      { baseRevisionId: copy.baseRevisionId, workspaceId: session.workspaceId },
+    );
+  }
+
+  const lockFileName = options.lockFileName ?? DEFAULT_LOCK_FILE;
+  acquireBridgeLock(copy.rootPath, lockFileName, options.staleLockMs ?? DEFAULT_STALE_LOCK_MS);
+  const effectiveExclusions = [...new Set([...exclusions, lockFileName])].sort();
+  let imported: ImportedTree;
+  try {
+    imported = buildTreeFromDirectory(copy.rootPath, blobs, { exclusions: effectiveExclusions });
+    checkImportLimits(imported.blobRefs, options.limits);
+  } finally {
+    rmSync(join(copy.rootPath, lockFileName), { force: true });
+  }
+
+  const proposalId = `pr-${randomUUID()}`;
+  const operationIds = [...(request.operationIds ?? [])];
+  const candidate: WorkspaceRevision = {
+    id: `rev-${randomUUID()}`,
+    workspaceId: session.workspaceId,
+    parentId: copy.baseRevisionId,
+    rootHash: imported.rootHash,
+    createdAt: nowUtcTimestamp(),
+    extensions: {
+      [PROPOSAL_EXTENSION]: {
+        proposalId,
+        requestKey: request.requestKey,
+        copyId: request.copyId,
+        attachment: {
+          attachmentId: request.attachment.attachmentId,
+          generation: request.attachment.generation,
+        },
+        operationIds,
+        exclusions: effectiveExclusions,
+      },
+    },
+  };
+  const fileCount = imported.entries.filter((entry) => entry.kind === "file").length;
+  const totalBytes = imported.blobRefs.reduce((sum, ref) => sum + ref.sizeBytes, 0);
+  const proposal: ProposalRecord = {
+    id: proposalId,
+    sessionId,
+    requestKey: request.requestKey,
+    copyId: request.copyId,
+    baseRevisionId: copy.baseRevisionId,
+    candidateRevisionId: candidate.id,
+    source: request.attachment,
+    operationIds,
+    inputHash,
+    status: "open",
+    createdAt: candidate.createdAt,
+    ...(request.extensions !== undefined ? { extensions: request.extensions } : {}),
+  };
+
+  const stream = new SessionEventStream(store, sessionId, options.redactor);
+  try {
+    store.transaction(() => {
+      blobs.publishRevision(candidate, imported.blobRefs);
+      store.insertRevisionTree(candidate.id, imported.rootHash, canonicalTreeJson(imported.entries));
+      store.insertProposal(session.workspaceId, proposal);
+      stream.append("workspace.proposed", proposalId, {
+        proposalId,
+        baseRevisionId: proposal.baseRevisionId,
+        candidateRevisionId: candidate.id,
+        ...(operationIds.length > 0 ? { operationIds } : {}),
+      });
+    });
+  } catch (error) {
+    if (error instanceof StoreError) {
+      throw error.toPortableError();
+    }
+    throw error;
+  }
+  return {
+    proposal,
+    candidate,
+    created: true,
+    fileCount,
+    totalBytes,
+    exclusions: effectiveExclusions,
+  };
+}
+
+/**
+ * Accept one proposal and move the workspace head (SPEC.md sections 4, 11.3).
+ *
+ * Acceptance compares the current head with the proposal's base
+ * revision in one transaction. A mismatch throws `WorkspaceConflict`
+ * and changes nothing: version one never merges automatically. The
+ * attachment generation is checked again here, so a proposal from a
+ * replaced generation cannot accept workspace changes.
+ */
+export function acceptProposal(
+  store: ControlStore,
+  sessionId: string,
+  proposalId: string,
+): AcceptOutcome {
+  const session = requireOpenSession(store, sessionId);
+  const proposal = store.getProposal(proposalId);
+  if (proposal === null) {
+    throw invalidRequestError(`Proposal ${proposalId} does not exist.`, { proposalId });
+  }
+  if (proposal.sessionId !== sessionId) {
+    throw invalidRequestError(`Proposal ${proposalId} belongs to another session.`, {
+      proposalId,
+      sessionId,
+    });
+  }
+  if (proposal.status === "accepted") {
+    return {
+      proposal,
+      revisionId: proposal.candidateRevisionId,
+      alreadyAccepted: true,
+    };
+  }
+  requireCurrentAttachment(store, proposal.source);
+  if (store.getRevision(proposal.candidateRevisionId) === null) {
+    throw integrityFailureError(
+      `candidate revision of ${proposal.id}`,
+      proposal.candidateRevisionId,
+      "absent",
+    );
+  }
+
+  const stream = new SessionEventStream(store, sessionId);
+  try {
+    return store.transaction(() => {
+      const claimed = store.casProposalStatus(proposalId, "open", "accepted");
+      if (claimed === null) {
+        throw requestConflictError(
+          proposal.requestKey,
+          "The proposal was accepted by another caller.",
+          { proposalId },
+        );
+      }
+      if (!store.casWorkspaceHead(session.workspaceId, proposal.baseRevisionId, proposal.candidateRevisionId)) {
+        const moved = store.getWorkspaceHead(session.workspaceId);
+        throw workspaceConflictError(
+          proposal.baseRevisionId,
+          moved === null ? "none" : moved,
+        );
+      }
+      stream.append("workspace.accepted", proposalId, {
+        proposalId,
+        revisionId: proposal.candidateRevisionId,
+        previousHeadRevisionId: proposal.baseRevisionId,
+      });
+      return {
+        proposal: claimed,
+        revisionId: proposal.candidateRevisionId,
+        previousHeadRevisionId: proposal.baseRevisionId,
+        alreadyAccepted: false,
+      };
+    });
+  } catch (error) {
+    if (error instanceof StoreError) {
+      throw error.toPortableError();
+    }
+    throw error;
+  }
+}
+
+/**
+ * Require one attachment reference to name the current generation.
+ *
+ * A replaced or missing attachment makes every handle that names its
+ * old generation stale (SPEC.md section 4).
+ */
+function requireCurrentAttachment(
+  store: ControlStore,
+  reference: { attachmentId: string; generation: number },
+): void {
+  const attachment = store.getAttachment(reference.attachmentId);
+  if (attachment === null) {
+    throw staleHandleError(
+      { kind: "attachment-generation", value: reference.generation },
+      { kind: "attachment-generation", value: "absent" },
+    );
+  }
+  if (attachment.generation !== reference.generation) {
+    throw staleHandleError(
+      { kind: "attachment-generation", value: reference.generation },
+      { kind: "attachment-generation", value: attachment.generation },
+    );
+  }
 }
 
 // -- Internals ----------------------------------------------------------------

@@ -19,14 +19,13 @@ import type { OperationRecord } from "../schema/operation.js";
 import { cleanupObligationSchema } from "../schema/handoff.js";
 import type { CleanupObligation } from "../schema/handoff.js";
 import {
-  workspaceProposalSchema,
+  proposalRecordSchema,
   workspaceRevisionSchema,
-} from "../schema/workspace.js";
-import {
   workingCopyRecordSchema,
 } from "../schema/workspace.js";
 import type {
-  WorkspaceProposal,
+  ProposalRecord,
+  ProposalStatus,
   WorkingCopyRecord,
   WorkspaceRevision,
 } from "../schema/workspace.js";
@@ -1195,14 +1194,23 @@ export class ControlStore {
 
   /** One working copy by its identifier. */
   getWorkingCopy(copyId: string): WorkingCopyRecord | null {
-    return ControlStore.parse<WorkingCopyRecord>(
-      this.get(
-        "SELECT id, session_id, base_revision_id, root_path, mode, created_at FROM working_copies WHERE id = ?",
-        copyId,
-      ),
-      workingCopyRecordSchema,
-      "working copy",
+    const row = this.get(
+      "SELECT id, session_id, base_revision_id, root_path, mode, created_at FROM working_copies WHERE id = ?",
+      copyId,
     );
+    if (row === undefined) {
+      return null;
+    }
+    const record: WorkingCopyRecord = {
+      id: row.id as string,
+      sessionId: row.session_id as string,
+      baseRevisionId: row.base_revision_id as string,
+      rootPath: row.root_path as string,
+      mode: row.mode as WorkingCopyRecord["mode"],
+      createdAt: row.created_at as string,
+    };
+    assertValid(workingCopyRecordSchema, record);
+    return record;
   }
 
   /**
@@ -1249,6 +1257,91 @@ export class ControlStore {
     }));
   }
 
+  // -- Proposals ------------------------------------------------------------
+
+  /** Persist one proposal record. */
+  insertProposal(workspaceId: string, record: ProposalRecord): void {
+    assertValid(proposalRecordSchema, record);
+    this.run(
+      "INSERT INTO proposals (id, workspace_id, base_revision_id, candidate_revision_id, source_attachment_id, created_at, request_key, copy_id, input_hash, status, record_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      record.id,
+      workspaceId,
+      record.baseRevisionId,
+      record.candidateRevisionId,
+      record.source.attachmentId,
+      record.createdAt,
+      record.requestKey,
+      record.copyId,
+      record.inputHash,
+      record.status,
+      JSON.stringify(record),
+    );
+  }
+
+  /** One proposal by its identifier. */
+  getProposal(proposalId: string): ProposalRecord | null {
+    return ControlStore.parse<ProposalRecord>(
+      this.get("SELECT record_json FROM proposals WHERE id = ?", proposalId),
+      proposalRecordSchema,
+      "proposal",
+    );
+  }
+
+  /**
+   * One proposal of one session by the request key that created it.
+   *
+   * Proposals are keyed by workspace, and one workspace belongs to
+   * exactly one session, so the session names the workspace.
+   */
+  getProposalByKey(sessionId: string, requestKey: string): ProposalRecord | null {
+    const session = this.getSession(sessionId);
+    if (session === null) {
+      return null;
+    }
+    return ControlStore.parse<ProposalRecord>(
+      this.get(
+        "SELECT record_json FROM proposals WHERE workspace_id = ? AND request_key = ?",
+        session.workspaceId,
+        requestKey,
+      ),
+      proposalRecordSchema,
+      "proposal",
+    );
+  }
+
+  /**
+   * Move one proposal between statuses under an expectation.
+   *
+   * Returns the updated record, or null when the status did not match
+   * the expectation: another caller changed it first.
+   */
+  casProposalStatus(
+    proposalId: string,
+    expected: ProposalStatus,
+    next: ProposalStatus,
+  ): ProposalRecord | null {
+    return this.transaction(() => {
+      const row = this.get(
+        "UPDATE proposals SET status = ? WHERE id = ? AND status = ? RETURNING record_json",
+        next,
+        proposalId,
+        expected,
+      );
+      if (row === undefined) {
+        return null;
+      }
+      const record = JSON.parse(row.record_json as string) as ProposalRecord;
+      record.status = next;
+      assertValid(proposalRecordSchema, record);
+      this.run(
+        "UPDATE proposals SET record_json = ? WHERE id = ?",
+        JSON.stringify(record),
+        proposalId,
+      );
+      return record;
+    });
+  }
+
   getRevision(revisionId: string): WorkspaceRevision | null {
     return ControlStore.parse<WorkspaceRevision>(
       this.get("SELECT record_json FROM revisions WHERE id = ?", revisionId),
@@ -1286,30 +1379,6 @@ export class ControlStore {
       );
       return true;
     });
-  }
-
-  // -- Proposals ------------------------------------------------------------
-
-  insertProposal(workspaceId: string, record: WorkspaceProposal): void {
-    assertValid(workspaceProposalSchema, record);
-    this.run(
-      "INSERT INTO proposals (id, workspace_id, base_revision_id, candidate_revision_id, source_attachment_id, created_at, record_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      record.id,
-      workspaceId,
-      record.baseRevisionId,
-      record.candidateRevisionId,
-      record.source.attachmentId,
-      nowUtcTimestamp(),
-      JSON.stringify(record),
-    );
-  }
-
-  getProposal(proposalId: string): WorkspaceProposal | null {
-    return ControlStore.parse<WorkspaceProposal>(
-      this.get("SELECT record_json FROM proposals WHERE id = ?", proposalId),
-      workspaceProposalSchema,
-      "proposal",
-    );
   }
 }
 

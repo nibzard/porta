@@ -21,13 +21,22 @@ import {
   runCleanup as runCleanupFlow,
 } from "./lifecycle.js";
 import type { CleanupOptions, CleanupReport, RenewOptions, RenewOutcome } from "./lifecycle.js";
-import { checkpointWorkspace, materializeRevision } from "./workspace.js";
+import {
+  acceptProposal,
+  checkpointWorkspace,
+  materializeRevision,
+  proposeWorkspaceChange,
+} from "./workspace.js";
 import type {
+  AcceptOutcome,
   CheckpointOptions,
   CheckpointOutcome,
   MaterializeFlowOptions,
   MaterializedCopy,
+  ProposalOutcome,
+  ProposeOptions,
 } from "./workspace.js";
+import type { ProposalRequest } from "../schema/workspace.js";
 import type { BlobStore } from "../store/blob-store.js";
 import type { CheckpointRequest } from "../schema/workspace.js";
 import type { AttachmentSummary } from "../schema/session.js";
@@ -211,6 +220,25 @@ export class ManagedSession {
     options: MaterializeFlowOptions,
   ): Promise<MaterializedCopy> {
     return materializeRevision(this.store, this.id, blobs, revisionId, destination, options);
+  }
+
+  /**
+   * Offer one private working copy's content as a proposal.
+   *
+   * The candidate revision this call records is not the head until
+   * `accept` compares the current head with the proposal's base.
+   */
+  async propose(
+    blobs: BlobStore,
+    request: ProposalRequest,
+    options: ProposeOptions = {},
+  ): Promise<ProposalOutcome> {
+    return proposeWorkspaceChange(this.store, this.id, blobs, request, options);
+  }
+
+  /** Accept one proposal and move the workspace head atomically. */
+  async accept(proposalId: string): Promise<AcceptOutcome> {
+    return acceptProposal(this.store, this.id, proposalId);
   }
 
   /**

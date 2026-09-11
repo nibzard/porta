@@ -298,13 +298,25 @@ test("proposals persist with their source attachment", () => {
   store.createSession(makeSession());
   store.insertProposal("ws-1", {
     id: "prop-1",
+    sessionId: "sess-1",
+    requestKey: "propose-1",
+    copyId: "wc-1",
     baseRevisionId: "rev-1",
     candidateRevisionId: "rev-2",
     source: { sessionId: "sess-1", attachmentId: "att-1", generation: 1 },
     operationIds: ["op-1"],
+    inputHash: "ab".repeat(32),
+    status: "open",
+    createdAt: "2026-01-01T00:00:00Z",
   });
   assert.equal(store.getProposal("prop-1")?.source.generation, 1);
   assert.equal(store.getProposal("missing"), null);
+  assert.equal(store.getProposalByKey("sess-1", "propose-1")?.id, "prop-1");
+  assert.equal(store.getProposalByKey("sess-1", "other"), null);
+  // The status moves only under its expectation.
+  assert.equal(store.casProposalStatus("prop-1", "open", "accepted")?.status, "accepted");
+  assert.equal(store.casProposalStatus("prop-1", "open", "accepted"), null);
+  assert.equal(store.getProposal("prop-1")?.status, "accepted");
 });
 
 test("a thrown body rolls the whole transaction back", () => {

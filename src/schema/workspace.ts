@@ -104,6 +104,102 @@ export const workingCopyRecordSchema = {
   },
 } as const;
 
+/**
+ * Durable record of one proposal (SPEC.md sections 4 and 11.3).
+ *
+ * A proposal is a candidate revision offered by one private working
+ * copy through its attachment. It becomes authoritative only through
+ * `acceptProposal`, which compares the current head with the base
+ * revision in one transaction.
+ */
+export type ProposalStatus = "open" | "accepted";
+
+export interface ProposalRecord {
+  id: Identifier;
+  sessionId: Identifier;
+  /** Deduplication key of the proposing call. */
+  requestKey: string;
+  /** The private working copy the candidate was read from. */
+  copyId: Identifier;
+  baseRevisionId: Identifier;
+  candidateRevisionId: Identifier;
+  /** The attachment whose generation produced the candidate. */
+  source: AttachmentRef;
+  /** Operations recorded as provenance of the candidate. */
+  operationIds: Identifier[];
+  /** Deduplication hash of the proposing call's identity. */
+  inputHash: string;
+  status: ProposalStatus;
+  createdAt: UtcTimestamp;
+  extensions?: Extensions;
+}
+
+export const proposalRecordSchema = {
+  $id: "https://portable.dev/schema/proposal-record.json",
+  $defs: DEFS,
+  type: "object",
+  required: [
+    "id",
+    "sessionId",
+    "requestKey",
+    "copyId",
+    "baseRevisionId",
+    "candidateRevisionId",
+    "source",
+    "operationIds",
+    "inputHash",
+    "status",
+    "createdAt",
+  ],
+  additionalProperties: false,
+  properties: {
+    id: { $ref: "#/$defs/identifier" },
+    sessionId: { $ref: "#/$defs/identifier" },
+    requestKey: { $ref: "#/$defs/requestKey" },
+    copyId: { $ref: "#/$defs/identifier" },
+    baseRevisionId: { $ref: "#/$defs/identifier" },
+    candidateRevisionId: { $ref: "#/$defs/identifier" },
+    source: { $ref: "https://portable.dev/schema/attachment-ref.json" },
+    operationIds: { type: "array", items: { $ref: "#/$defs/identifier" } },
+    inputHash: { $ref: "#/$defs/digest" },
+    status: { enum: ["open", "accepted"] },
+    createdAt: { $ref: "#/$defs/timestamp" },
+    extensions: { $ref: "#/$defs/extensions" },
+  },
+} as const;
+
+/**
+ * Request for `Session.propose()` (SPEC.md sections 11.3 and 11.5).
+ *
+ * `attachment` names the attachment whose environment owns the copy.
+ * Its generation is checked again at acceptance: a proposal from a
+ * replaced generation cannot accept workspace changes.
+ */
+export interface ProposalRequest {
+  requestKey: string;
+  copyId: Identifier;
+  attachment: AttachmentRef;
+  operationIds?: Identifier[];
+  exclusions?: string[];
+  extensions?: Extensions;
+}
+
+export const proposalRequestSchema = {
+  $id: "https://portable.dev/schema/proposal-request.json",
+  $defs: DEFS,
+  type: "object",
+  required: ["requestKey", "copyId", "attachment"],
+  additionalProperties: false,
+  properties: {
+    requestKey: { $ref: "#/$defs/requestKey" },
+    copyId: { $ref: "#/$defs/identifier" },
+    attachment: { $ref: "https://portable.dev/schema/attachment-ref.json" },
+    operationIds: { type: "array", items: { $ref: "#/$defs/identifier" } },
+    exclusions: { type: "array", items: { type: "string", minLength: 1, maxLength: 512 } },
+    extensions: { $ref: "#/$defs/extensions" },
+  },
+} as const;
+
 /** Source of a checkpoint: a managed copy or the local bridge. */
 export type CheckpointSource =
   | { kind: "attachment"; attachment: AttachmentRef }

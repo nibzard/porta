@@ -164,6 +164,20 @@ export const REVISION_TREES: Migration = {
   ],
 };
 
+/** Workspace proposal lifecycle (SPEC.md sections 4 and 11.3). */
+export const WORKSPACE_PROPOSALS: Migration = {
+  id: 5,
+  name: "workspace-proposals",
+  statements: [
+    `ALTER TABLE proposals ADD COLUMN request_key TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE proposals ADD COLUMN copy_id TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE proposals ADD COLUMN input_hash TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE proposals ADD COLUMN status TEXT NOT NULL DEFAULT 'open'`,
+    `CREATE UNIQUE INDEX idx_proposals_request_key ON proposals(workspace_id, request_key) WHERE request_key <> ''`,
+    `CREATE INDEX idx_proposals_workspace ON proposals(workspace_id, status)`,
+  ],
+};
+
 /** Durable mutation leases with fencing tokens (SPEC.md sections 5.2, 8.1). */
 export const MUTATION_LEASES: Migration = {
   id: 2,
@@ -188,6 +202,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MUTATION_LEASES,
   BRIDGE_IMPORTS,
   REVISION_TREES,
+  WORKSPACE_PROPOSALS,
 ];
 
 /** Tables with compare-and-swap support and their writable columns. */

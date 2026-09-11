@@ -429,7 +429,7 @@
       "id": "T018",
       "title": "Implement workspace proposals and acceptance",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Create candidate revisions and accept them through an atomic expected-head check.",
       "depends_on": [
         "T005",
