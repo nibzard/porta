@@ -211,6 +211,14 @@ export type {
 export { exportRevision, recoverBridgeExport } from "./runtime/export.js";
 export type { ExportFlowOptions, ExportOutcome, ExportRequest } from "./runtime/export.js";
 
+// Runtime: portable state bundle export (SPEC.md section 19).
+export { exportBundle } from "./runtime/bundle.js";
+export type {
+  BundleExportOptions,
+  BundleExportReport,
+  BundleExportRequest,
+} from "./runtime/bundle.js";
+
 // Runtime: lease renewal and allocation cleanup.
 export {
   checkAttachmentAcceptsOperations,

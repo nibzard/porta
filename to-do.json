@@ -1156,7 +1156,7 @@
     "id": "T046",
     "title": "Implement bundle export",
     "priority": 3,
-    "status": "todo",
+    "status": "done",
     "details": "Export validated workspace state, journal entries, resource references, and state dispositions.",
     "depends_on": [
       "T006",
