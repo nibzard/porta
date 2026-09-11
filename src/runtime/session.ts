@@ -43,6 +43,13 @@ import type {
 } from "./outcomes.js";
 import { cancelOperation as cancelOperationFlow, waitForOperation } from "./cancellation.js";
 import type { CancelTransport, WaitOutcome } from "./cancellation.js";
+import {
+  readArtifact,
+  readOutputStream,
+  recordOutputChunk,
+  recordResultArtifact,
+} from "./output.js";
+import type { ArtifactInput, ChunkInput, OutputOptions } from "./output.js";
 import type {
   AcceptOutcome,
   CheckpointOptions,
@@ -56,7 +63,12 @@ import type { ProposalRequest } from "../schema/workspace.js";
 import type { ExportFlowOptions, ExportOutcome, ExportRequest } from "./export.js";
 import type { BlobStore } from "../store/blob-store.js";
 import type { CheckpointRequest } from "../schema/workspace.js";
-import type { InvocationRequest, OperationRecord } from "../schema/operation.js";
+import type {
+  ArtifactRecord,
+  InvocationRequest,
+  OperationRecord,
+  OutputChunk,
+} from "../schema/operation.js";
 import type { CancellationResult } from "../schema/adapter.js";
 import type { AttachmentSummary } from "../schema/session.js";
 
@@ -361,6 +373,52 @@ export class ManagedSession {
     transport: CancelTransport,
   ): Promise<{ operation: OperationRecord; result: CancellationResult }> {
     return cancelOperationFlow(this.store, this.id, operationId, transport);
+  }
+
+  /**
+   * Record one chunk of one operation's output.
+   *
+   * Standard output and standard error stay separate, and each stream
+   * numbers its own chunks in durable order (SPEC.md section 9.3).
+   */
+  async output(
+    operationId: string,
+    chunk: ChunkInput,
+    options?: OutputOptions,
+  ): Promise<OutputChunk> {
+    return recordOutputChunk(this.store, this.id, operationId, chunk, options ?? {});
+  }
+
+  /** Read one output stream of one operation after a sequence. */
+  async readOutput(
+    operationId: string,
+    stream: "stdout" | "stderr",
+    afterSequence = 0,
+    limit?: number,
+  ): Promise<OutputChunk[]> {
+    return readOutputStream(this.store, this.id, operationId, stream, afterSequence, limit);
+  }
+
+  /**
+   * Record one content-addressed artifact of one operation.
+   *
+   * The bytes land in the blob store and the record carries digest,
+   * size, media type, and a credential-free retrieval location.
+   */
+  async artifact(
+    blobs: BlobStore,
+    operationId: string,
+    input: ArtifactInput,
+  ): Promise<ArtifactRecord> {
+    return recordResultArtifact(this.store, blobs, this.id, operationId, input);
+  }
+
+  /** Read one artifact of this session with its verified bytes. */
+  async readArtifactBlob(
+    blobs: BlobStore,
+    digest: string,
+  ): Promise<{ record: ArtifactRecord; data: Uint8Array }> {
+    return readArtifact(this.store, blobs, this.id, digest);
   }
 
   /** Complete or restore one interrupted export of a destination. */

@@ -255,6 +255,15 @@ export type {
   WaitOutcome,
 } from "./runtime/cancellation.js";
 
+// Runtime: streamed output and result artifacts.
+export {
+  readArtifact,
+  readOutputStream,
+  recordOutputChunk,
+  recordResultArtifact,
+} from "./runtime/output.js";
+export type { ArtifactInput, ChunkInput, OutputOptions } from "./runtime/output.js";
+
 // Records and schemas.
 export * from "./schema/error.js";
 export * from "./schema/event.js";

@@ -197,12 +197,39 @@ export const MUTATION_LEASES: Migration = {
   ],
 };
 
+export const STREAMED_OUTPUT: Migration = {
+  id: 6,
+  name: "streamed-output",
+  statements: [
+    `CREATE TABLE output_chunks (
+      operation_id TEXT NOT NULL REFERENCES operations(id),
+      session_id TEXT NOT NULL REFERENCES sessions(id),
+      stream TEXT NOT NULL CHECK (stream IN ('stdout', 'stderr')),
+      sequence INTEGER NOT NULL CHECK (sequence >= 1),
+      byte_length INTEGER NOT NULL CHECK (byte_length >= 0),
+      truncated INTEGER NOT NULL CHECK (truncated IN (0, 1)),
+      occurred_at TEXT NOT NULL,
+      record_json TEXT NOT NULL,
+      PRIMARY KEY (operation_id, stream, sequence)
+    )`,
+    `CREATE TABLE artifacts (
+      session_id TEXT NOT NULL REFERENCES sessions(id),
+      digest TEXT NOT NULL,
+      operation_id TEXT,
+      created_at TEXT NOT NULL,
+      record_json TEXT NOT NULL,
+      PRIMARY KEY (session_id, digest)
+    )`,
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   INITIAL_SCHEMA,
   MUTATION_LEASES,
   BRIDGE_IMPORTS,
   REVISION_TREES,
   WORKSPACE_PROPOSALS,
+  STREAMED_OUTPUT,
 ];
 
 /** Tables with compare-and-swap support and their writable columns. */

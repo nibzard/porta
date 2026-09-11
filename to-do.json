@@ -576,7 +576,7 @@
       "id": "T024",
       "title": "Implement streamed output and artifact records",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Persist ordered output streams and content-addressed result artifacts.",
       "depends_on": [
         "T006",

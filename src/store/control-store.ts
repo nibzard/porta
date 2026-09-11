@@ -14,8 +14,8 @@ import type {
 } from "../schema/session.js";
 import { acquisitionStatusSchema } from "../schema/adapter.js";
 import type { AcquisitionStatus } from "../schema/adapter.js";
-import { operationRecordSchema } from "../schema/operation.js";
-import type { OperationRecord } from "../schema/operation.js";
+import { operationRecordSchema, outputChunkSchema, artifactRecordSchema } from "../schema/operation.js";
+import type { ArtifactRecord, OperationRecord, OutputChunk } from "../schema/operation.js";
 import { cleanupObligationSchema } from "../schema/handoff.js";
 import type { CleanupObligation } from "../schema/handoff.js";
 import {
@@ -707,6 +707,122 @@ export class ControlStore {
       record_json: JSON.stringify(record),
     });
     return result === null ? null : (result as OperationRecord);
+  }
+
+  // -- Streamed output and artifacts ------------------------------------------
+
+  /**
+   * Append one output chunk with its sequence assigned.
+   *
+   * The sequence is the next number of the chunk's own stream within
+   * the operation, assigned inside the same transaction as the insert,
+   * so order within a stream is preserved no matter who appends
+   * (SPEC.md section 9.3). Callers pass the record without a sequence
+   * and receive the stored record with it.
+   */
+  appendOutputChunk(record: Omit<OutputChunk, "sequence">): OutputChunk {
+    const owner = this.get(
+      "SELECT session_id FROM operations WHERE id = ?",
+      record.operationId,
+    );
+    if (owner === undefined) {
+      throw new StoreError("not-found", `Operation ${record.operationId} does not exist.`);
+    }
+    const sequence = this.nextOutputSequence(record.operationId, record.stream);
+    const stored: OutputChunk = { ...record, sequence };
+    assertValid(outputChunkSchema, stored);
+    this.run(
+      "INSERT INTO output_chunks (operation_id, session_id, stream, sequence, byte_length, truncated, occurred_at, record_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      stored.operationId,
+      owner.session_id as string,
+      stored.stream,
+      stored.sequence,
+      Buffer.from(stored.dataBase64, "base64").byteLength,
+      stored.truncated ? 1 : 0,
+      nowUtcTimestamp(),
+      JSON.stringify(stored),
+    );
+    return stored;
+  }
+
+  /** The sequence the next chunk of one stream takes. */
+  nextOutputSequence(operationId: string, stream: string): number {
+    const row = this.get(
+      "SELECT MAX(sequence) AS highest FROM output_chunks WHERE operation_id = ? AND stream = ?",
+      operationId,
+      stream,
+    );
+    const highest = row === undefined ? undefined : (row.highest as number | null);
+    return highest === null || highest === undefined ? 1 : highest + 1;
+  }
+
+  /** Every chunk of one stream after a sequence, in sequence order. */
+  listOutputChunks(
+    operationId: string,
+    stream: string,
+    afterSequence = 0,
+    limit?: number,
+  ): OutputChunk[] {
+    const rows =
+      limit === undefined
+        ? this.all(
+            "SELECT record_json FROM output_chunks WHERE operation_id = ? AND stream = ? AND sequence > ? ORDER BY sequence",
+            operationId,
+            stream,
+            afterSequence,
+          )
+        : this.all(
+            "SELECT record_json FROM output_chunks WHERE operation_id = ? AND stream = ? AND sequence > ? ORDER BY sequence LIMIT ?",
+            operationId,
+            stream,
+            afterSequence,
+            limit,
+          );
+    return rows.map((row) => {
+      const parsed = JSON.parse(row.record_json as string) as unknown;
+      assertValid(outputChunkSchema, parsed);
+      return parsed as OutputChunk;
+    });
+  }
+
+  /**
+   * Record one content-addressed artifact of a session.
+   *
+   * The artifact is keyed by digest within the session; the same bytes
+   * recorded again return the existing record unchanged.
+   */
+  insertArtifact(sessionId: string, record: ArtifactRecord, operationId?: string): ArtifactRecord {
+    assertValid(artifactRecordSchema, record);
+    this.run(
+      `INSERT INTO artifacts (session_id, digest, operation_id, created_at, record_json)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(session_id, digest) DO NOTHING`,
+      sessionId,
+      record.digest,
+      operationId ?? null,
+      nowUtcTimestamp(),
+      JSON.stringify(record),
+    );
+    const stored = this.getArtifact(sessionId, record.digest);
+    if (stored === null) {
+      throw new StoreError("invalid", `Artifact ${record.digest} did not persist.`);
+    }
+    return stored;
+  }
+
+  /** One artifact record of a session, when it exists. */
+  getArtifact(sessionId: string, digest: string): ArtifactRecord | null {
+    const row = this.get(
+      "SELECT record_json FROM artifacts WHERE session_id = ? AND digest = ?",
+      sessionId,
+      digest,
+    );
+    if (row === undefined) {
+      return null;
+    }
+    const parsed = JSON.parse(row.record_json as string) as unknown;
+    assertValid(artifactRecordSchema, parsed);
+    return parsed as ArtifactRecord;
   }
 
   // -- Transitions ----------------------------------------------------------
