@@ -477,7 +477,7 @@
       "id": "T020",
       "title": "Implement the workspace capability",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Expose list, read, write, delete, and stat against authorized working copies.",
       "depends_on": [
         "T008",

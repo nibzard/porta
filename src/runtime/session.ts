@@ -28,6 +28,7 @@ import {
   proposeWorkspaceChange,
 } from "./workspace.js";
 import { exportRevision, recoverBridgeExport } from "./export.js";
+import { WorkspaceFiles } from "./workspace-capability.js";
 import type {
   AcceptOutcome,
   CheckpointOptions,
@@ -251,6 +252,16 @@ export class ManagedSession {
    */
   async export(blobs: BlobStore, request: ExportRequest, options: ExportFlowOptions): Promise<ExportOutcome> {
     return exportRevision(this.store, this.id, blobs, request, options);
+  }
+
+  /**
+   * The `fs.workspace@1` operations bound to this session's copies.
+   *
+   * The returned instance holds no durable state; every call
+   * authorizes against the session and its registered copies.
+   */
+  files(): WorkspaceFiles {
+    return new WorkspaceFiles(this.store, this.id);
   }
 
   /** Complete or restore one interrupted export of a destination. */

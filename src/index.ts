@@ -186,6 +186,26 @@ export type {
   SourceStability,
 } from "./runtime/workspace.js";
 
+// Runtime: the fs.workspace@1 capability over authorized copies.
+export {
+  WORKSPACE_CAPABILITY_ID,
+  WorkspaceFiles,
+  workspaceCapabilityDescriptor,
+} from "./runtime/workspace-capability.js";
+export type {
+  WorkspaceDeleteInput,
+  WorkspaceDeleteResult,
+  WorkspaceEncoding,
+  WorkspaceListInput,
+  WorkspaceListedEntry,
+  WorkspaceReadInput,
+  WorkspaceReadResult,
+  WorkspaceStatInput,
+  WorkspaceStatResult,
+  WorkspaceWriteInput,
+  WorkspaceWriteResult,
+} from "./runtime/workspace-capability.js";
+
 // Runtime: local export and bridge crash recovery.
 export { exportRevision, recoverBridgeExport } from "./runtime/export.js";
 export type { ExportFlowOptions, ExportOutcome, ExportRequest } from "./runtime/export.js";
