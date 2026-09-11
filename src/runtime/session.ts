@@ -14,6 +14,9 @@ import type {
   SessionRecord,
 } from "../schema/session.js";
 import type { ControlStore } from "../store/control-store.js";
+import { attachEnvironment, reconcileAcquisition } from "./acquisition.js";
+import type { AttachOptions, ReconcileOptions } from "./acquisition.js";
+import type { AttachmentSummary } from "../schema/session.js";
 
 /**
  * Session identity and inspection (SPEC.md sections 5.1 and 15).
@@ -85,6 +88,11 @@ export class ManagedSession {
     this.id = id;
   }
 
+  /** The underlying control store, for runtime internals and tests. */
+  get controlStore(): ControlStore {
+    return this.store;
+  }
+
   /** The durable session record. */
   record(): SessionRecord {
     const session = this.store.getSession(this.id);
@@ -119,6 +127,32 @@ export class ManagedSession {
     };
     // Public results stay JSON-serializable and schema-valid.
     return jsonRoundTrip(sessionDescriptionSchema, description) as SessionDescription;
+  }
+
+  /**
+   * Attach one environment through the durable acquisition protocol.
+   *
+   * The request key names the logical request: a repeated key recovers
+   * the same acquisition, and a conflicting request under it is
+   * rejected. A lost acquisition response reconciles by identity before
+   * any new allocation (SPEC.md section 5.2).
+   */
+  async attach(options: AttachOptions): Promise<AttachmentSummary> {
+    return attachEnvironment(this.store, this.id, this.record().policyRef, options);
+  }
+
+  /**
+   * Reconcile one acquisition by its request key.
+   *
+   * The pass asks the adapter for the truth behind the durable identity
+   * and activates, fails, or reports the allocation as unresolved. It
+   * never allocates.
+   */
+  async reconcileAttachment(
+    requestKey: string,
+    options: ReconcileOptions,
+  ): Promise<AttachmentSummary> {
+    return reconcileAcquisition(this.store, this.id, requestKey, options);
   }
 }
 

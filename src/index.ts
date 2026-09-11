@@ -140,6 +140,13 @@ export type { EventBatch, EventRedactor } from "./store/event-stream.js";
 // Runtime: session identity and inspection.
 export { ManagedSession, PortableRuntime } from "./runtime/session.js";
 
+// Runtime: durable acquisition and reconciliation.
+export {
+  attachEnvironment,
+  reconcileAcquisition,
+} from "./runtime/acquisition.js";
+export type { AttachOptions, ReconcileOptions } from "./runtime/acquisition.js";
+
 // Records and schemas.
 export * from "./schema/error.js";
 export * from "./schema/event.js";

@@ -277,7 +277,7 @@
       "id": "T012",
       "title": "Implement durable acquisition and reconciliation",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Persist acquisition identities, validate acquired environments, and activate attachments.",
       "depends_on": [
         "T005",
