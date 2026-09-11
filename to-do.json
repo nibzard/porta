@@ -941,7 +941,7 @@
     "id": "T038",
     "title": "Implement replacement preparation and checkpointing",
     "priority": 2,
-    "status": "todo",
+    "status": "done",
     "details": "Quiesce the source, block admissions, and persist the selected revision and transition inventory.",
     "depends_on": [
       "T005",

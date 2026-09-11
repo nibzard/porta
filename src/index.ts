@@ -448,6 +448,23 @@ export type {
   ReconstructionStepOutcome,
 } from "./runtime/reconstruction.js";
 
+// Runtime: replacement planning, preparation, and checkpointing
+// (SPEC.md sections 13.1 and 13.2).
+export {
+  checkpointReplacement,
+  planReplace,
+  prepareReplacement,
+} from "./runtime/replacement.js";
+export type {
+  ActiveOperationState,
+  CheckpointConsistency,
+  ReplacementCheckpointOptions,
+  CheckpointReport,
+  DeclaredSnapshot,
+  PrepareOptions,
+  PreparationReport,
+} from "./runtime/replacement.js";
+
 // Runtime: attachment release, session close, and session reopen.
 export {
   closeSession,
