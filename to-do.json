@@ -1454,7 +1454,7 @@
     "id": "T058",
     "title": "Add replacement failure and resource conformance cases",
     "priority": 2,
-    "status": "todo",
+    "status": "done",
     "details": "Inject failures across all replacement phases and verify attachment and resource authority.",
     "depends_on": [
       "T045",

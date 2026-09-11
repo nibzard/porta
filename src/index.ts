@@ -692,3 +692,7 @@ export { processOperationCases } from "./conformance/cases/process-operations.js
 
 // Conformance: the lightweight Python case pack (SPEC.md section 21).
 export { pythonCases } from "./conformance/cases/python.js";
+
+// Conformance: the replacement failure and resource case pack
+// (SPEC.md section 21).
+export { replacementResourceCases } from "./conformance/cases/replacement-resources.js";
