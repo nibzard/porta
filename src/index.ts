@@ -449,9 +449,10 @@ export type {
 } from "./runtime/reconstruction.js";
 
 // Runtime: replacement planning, preparation, checkpointing,
-// destination preparation, and the switch transaction (SPEC.md
-// sections 13.1 to 13.3).
+// destination preparation, the switch transaction, and abort with
+// forward recovery (SPEC.md sections 13.1 to 13.4).
 export {
+  abortReplacement,
   checkpointReplacement,
   planReplace,
   prepareDestination,
@@ -460,6 +461,8 @@ export {
   verifyWorkingCopyIntegrity,
 } from "./runtime/replacement.js";
 export type {
+  AbortOptions,
+  AbortReport,
   ActiveOperationState,
   CandidateBinding,
   CheckpointConsistency,
@@ -472,6 +475,7 @@ export type {
   DestinationValidation,
   PrepareOptions,
   PreparationReport,
+  SurvivingEffect,
   SwitchOptions,
   SwitchReport,
 } from "./runtime/replacement.js";

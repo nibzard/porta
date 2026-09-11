@@ -1283,3 +1283,296 @@ test("a store refusal mid-switch rolls the whole transaction back", async () => 
     rmSync(copyRoot, { recursive: true, force: true });
   }
 });
+
+// -- Abort and forward recovery (SPEC.md section 13.4) -------------------------
+
+import { abortReplacement } from "./replacement.js";
+import { runCleanup } from "./lifecycle.js";
+
+/** Seed a source attachment through the adapter, so it owns an acquisition. */
+async function adapterSource(
+  parts: Fixture,
+  adapter: FakeEnvironmentAdapter,
+  requestKey: string,
+): Promise<{ attachmentId: string; ids: Fixture["ids"] }> {
+  const attached = await attachEnvironment(parts.store, parts.sessionId, "policy://test", {
+    adapter,
+    request: { name: "src-worker", requires: {} },
+    requestKey,
+    principal: "tester",
+    authority: AUTHORITY.authority,
+  });
+  const input = {
+    owner: { sessionId: parts.sessionId, attachmentId: attached.attachmentId, generation: 1 },
+    capability: "exec.process@1",
+    lifetime: "attachment" as const,
+  };
+  const bind = async (type: string, recovery: BindResourceInput["recovery"]) =>
+    (
+      await bindResource(
+        parts.store,
+        parts.sessionId,
+        { ...input, type, recovery },
+        okTransport,
+        AUTHORITY,
+      )
+    ).ref.id;
+  const ids: Fixture["ids"] = {
+    reconstruct: await bind("process.group", "reconstruct"),
+    reattach: await bind("browser.session", "reattach"),
+    native: await bind("interpreter.heap", "native"),
+    none: await bind("socket", "none"),
+  };
+  return { attachmentId: attached.attachmentId, ids };
+}
+
+test("an abort before the switch restores the source and cleans up the candidate", async () => {
+  const parts = await fixture();
+  const copyRoot = mkdtempSync(join(tmpdir(), "porta-ab-1-"));
+  try {
+    const adapter = new FakeEnvironmentAdapter();
+    const { transitionId, candidateAttachmentId, environmentId } = await validatedTransition(
+      parts,
+      adapter,
+      copyRoot,
+    );
+
+    const report = abortReplacement(parts.store, transitionId);
+    assert.equal(report.sourceGeneration, 1);
+    assert.equal(report.releasedCandidateAttachmentId, candidateAttachmentId);
+    assert.equal(report.releasedEnvironmentId, environmentId);
+
+    // The source returned to authority at its unchanged generation,
+    // and every source binding survived untouched.
+    const source = parts.store.getAttachment(parts.attachmentId)!;
+    assert.equal(source.status, "active");
+    assert.equal(source.generation, 1);
+    for (const id of [parts.ids.reconstruct, parts.ids.reattach, parts.ids.native, parts.ids.none]) {
+      const binding = parts.store.getResourceBinding(parts.sessionId, id)!;
+      assert.equal(binding.status, "bound");
+      assert.equal(binding.owner.generation, 1);
+    }
+
+    // The candidate record retired under the transition's name, and
+    // its bindings died with it.
+    const candidate = parts.store.getAttachment(candidateAttachmentId)!;
+    assert.equal(candidate.status, "released");
+    assert.equal(candidate.extensions?.["portable.runtime.aborted-by"], transitionId);
+    assert.equal(report.invalidatedResourceIds.length, 2);
+    for (const resourceId of report.invalidatedResourceIds) {
+      assert.equal(parts.store.getResourceBinding(parts.sessionId, resourceId)!.status, "invalidated");
+    }
+
+    // The fence dropped: a managed writer may lease the source afresh.
+    parts.store.acquireMutationLease(parts.sessionId, parts.attachmentId, "writer-back", 60_000);
+
+    // The failure report lists what survived and what needs rebuilding.
+    assert.deepEqual(
+      report.survivingEffects.map((effect) => effect.kind).sort(),
+      ["environment", "recipe", "working-copy"],
+    );
+    assert.deepEqual(report.rebuildResourceIds, [parts.ids.reattach]);
+
+    // The obligation journaled; the transition and its event closed.
+    assert.equal(report.cleanup.length, 1);
+    assert.equal(report.cleanup[0]!.kind, "release");
+    assert.equal(parts.store.listCleanup(parts.sessionId, "pending").length, 1);
+    const transition = parts.store.getTransition(transitionId)!;
+    assert.equal(transition.phase, "aborted");
+    const abortedEvent = parts.store
+      .listEvents(parts.sessionId, 0)
+      .find(
+        (event) =>
+          event.type === "handoff.updated" &&
+          event.subjectId === transitionId &&
+          (event.data as { phase?: string }).phase === "aborted",
+      )!;
+    assert.equal((abortedEvent.data as { outcome?: string }).outcome, "aborted");
+
+    // A repeated call replays the recorded abort; nothing moves twice.
+    const repeated = abortReplacement(parts.store, transitionId);
+    assert.deepEqual(repeated.invalidatedResourceIds, report.invalidatedResourceIds);
+    assert.equal(parts.store.listCleanup(parts.sessionId, "pending").length, 1);
+    assert.equal(parts.store.getAttachment(parts.attachmentId)!.status, "active");
+
+    // Forward recovery needs a new transition: the aborted one is done.
+    const resumed = await refuse(() =>
+      prepareDestination(
+        parts.store,
+        transitionId,
+        destinationOptions(parts, new FakeEnvironmentAdapter(), copyRoot),
+      ),
+    );
+    assert.equal(resumed?.code, "InvalidRequest");
+  } finally {
+    parts.cleanup();
+    rmSync(copyRoot, { recursive: true, force: true });
+  }
+});
+
+test("an abort before destination acquisition changes nothing beyond the fence", async () => {
+  const parts = await fixture();
+  try {
+    const prepared = await prepareReplacement(parts.store, request(parts));
+    const report = abortReplacement(parts.store, prepared.transitionId);
+    assert.equal(report.sourceGeneration, 1);
+    assert.equal(report.releasedCandidateAttachmentId, undefined);
+    assert.deepEqual(report.survivingEffects, []);
+    assert.deepEqual(report.rebuildResourceIds, []);
+    assert.deepEqual(report.cleanup, []);
+    assert.equal(parts.store.getAttachment(parts.attachmentId)!.status, "active");
+    assert.deepEqual(
+      parts.store.listEvents(parts.sessionId, 0).filter(
+        (event) => event.type === "cleanup.pending",
+      ),
+      [],
+    );
+    // No checkpoint ran, so no fence was ever raised.
+    assert.equal(parts.store.getMutationLease(parts.sessionId, parts.attachmentId), null);
+
+    // A failed preparation aborts too, and reports the environment it
+    // allocated as the one surviving effect; the failed run is not one.
+    const failParts = await seedOn(ControlStore.inMemory());
+    const failAdapter = new FakeEnvironmentAdapter();
+    failAdapter.queueInvoke({
+      kind: "fail",
+      error: providerUnavailableError("The environment provider failed."),
+    });
+    const failRoot = mkdtempSync(join(tmpdir(), "porta-ab-2-"));
+    try {
+      const failed = await prepareReplacement(failParts.store, request(failParts));
+      checkpointReplacement(failParts.store, failed.transitionId);
+      const destination = await prepareDestination(
+        failParts.store,
+        failed.transitionId,
+        destinationOptions(failParts, failAdapter, failRoot),
+      );
+      assert.equal(destination.state, "failed");
+      const abort = abortReplacement(failParts.store, failed.transitionId);
+      assert.deepEqual(
+        abort.survivingEffects.map((effect) => effect.kind),
+        ["environment", "working-copy"],
+      );
+      assert.equal(failParts.store.getAttachment(failParts.attachmentId)!.status, "active");
+      for (const id of [
+        failParts.ids.reconstruct,
+        failParts.ids.reattach,
+        failParts.ids.native,
+        failParts.ids.none,
+      ]) {
+        assert.equal(failParts.store.getResourceBinding(failParts.sessionId, id)!.status, "bound");
+      }
+    } finally {
+      failParts.cleanup();
+      rmSync(failRoot, { recursive: true, force: true });
+    }
+  } finally {
+    parts.cleanup();
+  }
+});
+
+test("a committed switch never turns back and its cleanup retries independently", async () => {
+  const parts = await fixture();
+  const copyRoot = mkdtempSync(join(tmpdir(), "porta-ab-3-"));
+  try {
+    const adapter = new FakeEnvironmentAdapter();
+    // The source goes through the adapter, so the switch obligation
+    // can name its acquisition and a cleanup pass can act on it.
+    const source = await adapterSource(parts, adapter, "attach-src-1");
+    const prepared = await prepareReplacement(
+      parts.store,
+      request(parts, {
+        source: { sessionId: parts.sessionId, attachmentId: source.attachmentId, generation: 1 },
+        reconstruct: [
+          {
+            id: "recipe-worker",
+            inputRevisionId: parts.revisionId,
+            requiredCapabilities: ["exec.process@1"],
+            steps: [
+              { capability: "exec.process@1", operation: "run", input: { command: "npm", args: ["ci"] } },
+            ],
+            outputs: [`process.group ${source.ids.reconstruct}`],
+            failureConditions: ["ProviderUnavailable"],
+          },
+        ],
+      }),
+    );
+    checkpointReplacement(parts.store, prepared.transitionId);
+    const destination = await prepareDestination(
+      parts.store,
+      prepared.transitionId,
+      destinationOptions(parts, adapter, copyRoot),
+    );
+    assert.equal(destination.state, "validated");
+    const switched = switchReplacement(parts.store, prepared.transitionId);
+
+    // Recovery never crosses the switch: the abort refuses, and the
+    // old generation stays dead where the switch left it.
+    const refusal = await refuse(() =>
+      Promise.resolve(abortReplacement(parts.store, prepared.transitionId)),
+    );
+    assert.equal(refusal?.code, "HandoffBlocked");
+    assert.equal((refusal?.details as { reason?: string }).reason, "switch-committed");
+    const target = parts.store.getAttachment(source.attachmentId)!;
+    assert.equal(target.status, "active");
+    assert.equal(target.generation, 2);
+    assert.equal(target.environmentId, destination.environmentId);
+    for (const id of [source.ids.reconstruct, source.ids.reattach, source.ids.native, source.ids.none]) {
+      assert.equal(parts.store.getResourceBinding(parts.sessionId, id)!.status, "invalidated");
+    }
+
+    // The source obligation names its acquisition, so cleanup works
+    // mechanically and never touches the switched attachment.
+    const acquisitionId = switched.cleanup[0]!.extensions?.["portable.runtime.acquisition-id"];
+    assert.equal(typeof acquisitionId, "string");
+    const pass = await runCleanup(parts.store, parts.sessionId, "policy://test", {
+      adapter,
+      principal: "tester",
+    });
+    assert.deepEqual(
+      pass.outcomes.map((outcome) => outcome.outcome),
+      ["satisfied"],
+    );
+    assert.equal(pass.remaining, 0);
+    assert.equal(parts.store.getAcquisition(acquisitionId as string)!.state, "released");
+    const after = parts.store.getAttachment(source.attachmentId)!;
+    assert.equal(after.status, "active");
+    assert.equal(after.generation, 2);
+    assert.equal(after.environmentId, destination.environmentId);
+    // The merged candidate stays retired through the cleanup pass.
+    assert.equal(parts.store.getAttachment(destination.candidateAttachmentId)!.status, "released");
+  } finally {
+    parts.cleanup();
+    rmSync(copyRoot, { recursive: true, force: true });
+  }
+});
+
+test("an abort refuses when the fence moved or the transition is unknown", async () => {
+  const parts = await fixture();
+  const copyRoot = mkdtempSync(join(tmpdir(), "porta-ab-4-"));
+  try {
+    const adapter = new FakeEnvironmentAdapter();
+    const { transitionId } = await validatedTransition(parts, adapter, copyRoot);
+
+    // A superseded fence refuses: the proof of quiescence is gone.
+    const record = parts.store.getTransition(transitionId)!;
+    const token = record.data.fencingToken as number;
+    parts.store.releaseMutationLease(parts.sessionId, parts.attachmentId, token);
+    parts.store.acquireMutationLease(parts.sessionId, parts.attachmentId, "writer-x", 60_000);
+    const refused = await refuse(() =>
+      Promise.resolve(abortReplacement(parts.store, transitionId)),
+    );
+    assert.equal(refused?.code, "StaleHandle");
+    assert.equal(parts.store.getAttachment(parts.attachmentId)!.status, "replacing");
+    assert.equal(parts.store.getTransition(transitionId)!.phase, "validated");
+
+    // An unknown transition refuses outright.
+    const missing = await refuse(() =>
+      Promise.resolve(abortReplacement(parts.store, "tr-none")),
+    );
+    assert.equal(missing?.code, "InvalidRequest");
+  } finally {
+    parts.cleanup();
+    rmSync(copyRoot, { recursive: true, force: true });
+  }
+});

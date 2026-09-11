@@ -1540,6 +1540,10 @@ export function switchReplacement(
   const now = new Date().toISOString();
   const reason =
     `Replacement ${transitionId} switched generation ${sourceGeneration} to ${newGeneration}.`;
+  // The obligation names the source's acquisition, never the attachment:
+  // after the switch the attachment record belongs to the destination,
+  // and a cleanup pass must not touch it (SPEC.md section 13.4).
+  const sourceAcquisition = store.getAcquisitionForAttachment(sessionId, attachmentId);
   const cleanup: CleanupObligation[] = [
     {
       id: `cleanup-${randomUUID()}`,
@@ -1547,6 +1551,13 @@ export function switchReplacement(
       targetId: source.environmentId ?? attachmentId,
       detail: "Release the replaced source environment after the switch.",
       createdAt: now,
+      ...(sourceAcquisition !== null
+        ? {
+            extensions: {
+              "portable.runtime.acquisition-id": sourceAcquisition.acquisitionId,
+            },
+          }
+        : {}),
     },
   ];
 
@@ -1644,6 +1655,7 @@ export function switchReplacement(
       store.releaseMutationLease(sessionId, attachmentId, data.fencingToken!);
 
       for (const obligation of cleanup) {
+        store.insertCleanup(sessionId, obligation);
         stream.append("cleanup.pending", obligation.id, {
           cleanupId: obligation.id,
           kind: obligation.kind,
@@ -1827,5 +1839,402 @@ function recordedSwitch(transition: TransitionRecord): SwitchReport {
     invalidatedResourceIds: data.invalidatedResourceIds ?? [],
     adoptedResourceIds: data.adoptedResourceIds ?? [],
     cleanup: data.cleanup ?? [],
+  };
+}
+// -- Abort and forward recovery (SPEC.md section 13.4) -------------------------
+
+/** Options of one abort call. */
+export interface AbortOptions {
+  redactor?: EventRedactor;
+}
+
+/**
+ * One reconstruction effect that landed before an abort and survives
+ * it (SPEC.md section 13.4).
+ *
+ * There is no transaction across arbitrary external systems, so an
+ * aborted replacement may leave effects behind. The report lists
+ * them instead of hiding them.
+ */
+export interface SurvivingEffect {
+  kind: "environment" | "working-copy" | "recipe";
+  /** The durable identity of the effect. */
+  ref: string;
+  detail: string;
+}
+
+/** The report of one aborted replacement transition. */
+export interface AbortReport {
+  transitionId: string;
+  sessionId: string;
+  attachmentId: string;
+  /** The generation the source keeps; an abort never advances it. */
+  sourceGeneration: number;
+  /** The candidate attachment record the abort released, when one existed. */
+  releasedCandidateAttachmentId?: string;
+  /** The environment the released candidate ran on. */
+  releasedEnvironmentId?: string;
+  /** Candidate bindings the abort invalidated. */
+  invalidatedResourceIds: string[];
+  /** Reconstruction effects that landed before the abort. */
+  survivingEffects: SurvivingEffect[];
+  /**
+   * Source services that may need rebuilding: a reattach recovery can
+   * move the provider-side state to the candidate, so the retained
+   * source binding does not prove the service still sits there.
+   */
+  rebuildResourceIds: string[];
+  /** Cleanup obligations the abort recorded. */
+  cleanup: CleanupObligation[];
+}
+
+/** The persisted transition data, as the abort reads it back. */
+interface AbortData extends TransitionData {
+  sourceGeneration?: number;
+  abortedAt?: string;
+  abort?: {
+    releasedCandidateAttachmentId?: string;
+    releasedEnvironmentId?: string;
+    invalidatedResourceIds: string[];
+    survivingEffects: SurvivingEffect[];
+    rebuildResourceIds: string[];
+    cleanup: CleanupObligation[];
+  };
+}
+
+/** Phases an abort may still act on: everything before the switch. */
+const ABORTABLE = new Set([
+  "blocked",
+  "prepared",
+  "checkpointed",
+  "provisioning",
+  "provisioned",
+  "materializing",
+  "materialized",
+  "reconstructing",
+  "reconstructed",
+  "validating",
+  "validated",
+  "failed",
+]);
+
+/**
+ * Abort one replacement transition (SPEC.md section 13.4).
+ *
+ * An abort returns the source to authority exactly as the
+ * replacement found it: the attachment reactivates at its unchanged
+ * generation and every source binding stays bound, because no switch
+ * ever invalidated them. The candidate side is the abort's work: the
+ * candidate attachment record releases, its bindings invalidate, and
+ * a cleanup obligation journals the provider-side release so it
+ * retries independently.
+ *
+ * A committed switch is the boundary recovery never crosses. An
+ * abort of a switched transition refuses: the old generation must
+ * not reactivate, and a failed destination needs a new transition.
+ * A repeated call over an aborted transition returns the recorded
+ * report without doing anything twice.
+ */
+export function abortReplacement(
+  store: ControlStore,
+  transitionId: string,
+  options: AbortOptions = {},
+): AbortReport {
+  const current = store.getTransition(transitionId);
+  if (current === null) {
+    throw invalidRequestError(`Transition ${transitionId} does not exist.`, {
+      transitionId,
+    });
+  }
+  if (current.phase === "aborted") {
+    // The response was lost, not the abort: return what happened.
+    return recordedAbort(current);
+  }
+  if (current.phase === "switched") {
+    throw handoffBlockedError(
+      `Transition ${transitionId} committed its switch; the old generation must not reactivate.`,
+      {
+        transitionId,
+        reason: "switch-committed",
+        newGeneration: (current.data as SwitchData).newGeneration,
+      },
+    );
+  }
+  if (!ABORTABLE.has(current.phase)) {
+    throw invalidRequestError(
+      `Transition ${transitionId} is ${current.phase}; this phase aborts nothing.`,
+      { transitionId, phase: current.phase },
+    );
+  }
+  const { sessionId, attachmentId } = current;
+  const data = current.data as AbortData;
+  const stream =
+    options.redactor === undefined
+      ? new SessionEventStream(store, sessionId)
+      : new SessionEventStream(store, sessionId, options.redactor);
+
+  const source = requireAbortableSource(store, current, data);
+  if (data.fencingToken !== undefined) {
+    requireRecordedFence(store, current, data as SwitchData);
+  }
+
+  const now = new Date().toISOString();
+  const reason = `Replacement ${transitionId} aborted before the switch.`;
+  // Effects that landed before this call survive the abort; the
+  // report lists them instead of pretending they rolled back.
+  const survivingEffects: SurvivingEffect[] = [];
+  if (data.environmentId !== undefined) {
+    survivingEffects.push({
+      kind: "environment",
+      ref: data.environmentId,
+      detail: "The candidate environment was allocated; its release retries through cleanup.",
+    });
+  }
+  if (data.copyId !== undefined) {
+    survivingEffects.push({
+      kind: "working-copy",
+      ref: data.copyId,
+      detail: "The materialized working copy stays on disk until cleaned up.",
+    });
+  }
+  for (const run of data.reconstruction ?? []) {
+    if (run.outcome === "completed") {
+      survivingEffects.push({
+        kind: "recipe",
+        ref: run.recipeId,
+        detail: "The reconstruction recipe completed; its effects persist outside the control store.",
+      });
+    }
+  }
+  const rebuildResourceIds = (data.inventory ?? [])
+    .filter((entry) => entry.recovery === "reattach")
+    .map((entry) => entry.resourceId);
+
+  const invalidatedResourceIds: string[] = [];
+  const cleanup: CleanupObligation[] = [];
+  const candidate =
+    data.candidateAttachmentId === undefined
+      ? null
+      : store.getAttachment(data.candidateAttachmentId);
+  if (candidate !== null && candidate.sessionId === sessionId) {
+    // The obligation names the candidate's acquisition when one
+    // exists, so a cleanup pass can release the provider side
+    // mechanically; it never names the reactivated source.
+    const acquisition = store.getAcquisitionForAttachment(sessionId, candidate.attachmentId);
+    cleanup.push({
+      id: `cleanup-${randomUUID()}`,
+      kind: "release",
+      targetId: candidate.environmentId ?? candidate.attachmentId,
+      detail: "Release the aborted candidate environment.",
+      createdAt: now,
+      ...(acquisition !== null
+        ? {
+            extensions: {
+              "portable.runtime.acquisition-id": acquisition.acquisitionId,
+            },
+          }
+        : {
+            extensions: { "portable.runtime.attachment-id": candidate.attachmentId },
+          }),
+    });
+  }
+
+  try {
+    store.transaction(() => {
+      // The source returns to authority at its unchanged generation.
+      const reactivated = store.casAttachment(
+        attachmentId,
+        { status: "replacing", generation: source.generation },
+        { ...source, status: "active" },
+      );
+      if (reactivated === null) {
+        throw staleHandleError(
+          {
+            kind: "attachment-state",
+            value: { status: "replacing", generation: source.generation },
+          },
+          {
+            kind: "attachment-state",
+            value: { status: source.status, generation: source.generation },
+          },
+        );
+      }
+
+      // The candidate record retires under this transition's name.
+      if (candidate !== null && candidate.sessionId === sessionId && candidate.status === "active") {
+        const retired = store.casAttachment(
+          candidate.attachmentId,
+          { status: "active", generation: candidate.generation },
+          {
+            ...candidate,
+            status: "released",
+            extensions: {
+              ...candidate.extensions,
+              "portable.runtime.aborted-by": transitionId,
+            },
+          },
+        );
+        if (retired === null) {
+          throw staleHandleError(
+            { kind: "attachment-status", value: "active" },
+            { kind: "attachment-status", value: candidate.status },
+          );
+        }
+      }
+
+      // Candidate bindings die with the candidate: the source kept
+      // its own bindings the whole time.
+      if (candidate !== null && candidate.sessionId === sessionId) {
+        for (const binding of store.listResourceBindingsForOwner(
+          sessionId,
+          candidate.attachmentId,
+          candidate.generation,
+          true,
+        )) {
+          const updated = store.markResourceBindingInvalidated(binding.id, reason, now);
+          if (updated !== null) {
+            invalidatedResourceIds.push(updated.id);
+            stream.append("resource.invalidated", updated.id, {
+              resourceId: updated.id,
+              reason,
+              ownerGeneration: candidate.generation,
+              attachmentId: candidate.attachmentId,
+            });
+          }
+        }
+      }
+
+      // The fence the checkpoint raised drops with the abort.
+      if (data.fencingToken !== undefined) {
+        store.releaseMutationLease(sessionId, attachmentId, data.fencingToken);
+      }
+
+      for (const obligation of cleanup) {
+        store.insertCleanup(sessionId, obligation);
+        stream.append("cleanup.pending", obligation.id, {
+          cleanupId: obligation.id,
+          kind: obligation.kind,
+          targetId: obligation.targetId,
+          ...(obligation.detail !== undefined ? { detail: obligation.detail } : {}),
+        });
+      }
+
+      const moved = store.casTransition(transitionId, { phase: current.phase }, {
+        ...current,
+        phase: "aborted",
+        data: {
+          ...current.data,
+          abortedAt: now,
+          abort: {
+            ...(candidate !== null && candidate.sessionId === sessionId
+              ? {
+                  releasedCandidateAttachmentId: candidate.attachmentId,
+                  releasedEnvironmentId: candidate.environmentId,
+                }
+              : {}),
+            invalidatedResourceIds,
+            survivingEffects,
+            rebuildResourceIds,
+            cleanup,
+          },
+        },
+        updatedAt: now,
+      });
+      if (moved === null) {
+        throw staleHandleError(
+          { kind: "transition-phase", value: current.phase },
+          { kind: "transition-phase", value: current.phase },
+        );
+      }
+      stream.append("handoff.updated", transitionId, {
+        transitionId,
+        phase: "aborted",
+        outcome: "aborted",
+        oldGeneration: source.generation,
+        detail: `Attachment ${attachmentId} returned to generation ${source.generation} without a switch.`,
+      });
+    });
+  } catch (error) {
+    if (error instanceof StoreError) {
+      // The store refused mid-transaction; all of it rolled back.
+      throw error.toPortableError();
+    }
+    throw error;
+  }
+
+  return {
+    transitionId,
+    sessionId,
+    attachmentId,
+    sourceGeneration: source.generation,
+    ...(candidate !== null && candidate.sessionId === sessionId
+      ? {
+          releasedCandidateAttachmentId: candidate.attachmentId,
+          releasedEnvironmentId: candidate.environmentId,
+        }
+      : {}),
+    invalidatedResourceIds,
+    survivingEffects,
+    rebuildResourceIds,
+    cleanup,
+  };
+}
+
+/**
+ * The quiesced source of one abort, at its recorded generation.
+ *
+ * Anything other than a fenced, quiesced attachment means the
+ * transition no longer describes reality; the abort refuses rather
+ * than reactivate an attachment it cannot account for.
+ */
+function requireAbortableSource(
+  store: ControlStore,
+  transition: TransitionRecord,
+  data: AbortData,
+): AttachmentSummary {
+  const source = store.getAttachment(transition.attachmentId);
+  if (source === null || source.sessionId !== transition.sessionId) {
+    throw staleHandleError(
+      { kind: "attachment", value: transition.attachmentId },
+      { kind: "attachment", value: null },
+    );
+  }
+  if (
+    source.status !== "replacing" ||
+    (data.sourceGeneration !== undefined && source.generation !== data.sourceGeneration)
+  ) {
+    throw staleHandleError(
+      {
+        kind: "attachment-state",
+        value: { status: "replacing", generation: data.sourceGeneration },
+      },
+      {
+        kind: "attachment-state",
+        value: { status: source.status, generation: source.generation },
+      },
+    );
+  }
+  return source;
+}
+
+/** The report of a transition that already aborted. */
+function recordedAbort(transition: TransitionRecord): AbortReport {
+  const data = transition.data as AbortData;
+  const recorded = data.abort;
+  return {
+    transitionId: transition.id,
+    sessionId: transition.sessionId,
+    attachmentId: transition.attachmentId,
+    sourceGeneration: data.sourceGeneration ?? 0,
+    ...(recorded?.releasedCandidateAttachmentId !== undefined
+      ? { releasedCandidateAttachmentId: recorded.releasedCandidateAttachmentId }
+      : {}),
+    ...(recorded?.releasedEnvironmentId !== undefined
+      ? { releasedEnvironmentId: recorded.releasedEnvironmentId }
+      : {}),
+    invalidatedResourceIds: recorded?.invalidatedResourceIds ?? [],
+    survivingEffects: recorded?.survivingEffects ?? [],
+    rebuildResourceIds: recorded?.rebuildResourceIds ?? [],
+    cleanup: recorded?.cleanup ?? [],
   };
 }

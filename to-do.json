@@ -1023,7 +1023,7 @@
     "id": "T041",
     "title": "Implement replacement abort and forward recovery",
     "priority": 2,
-    "status": "todo",
+    "status": "done",
     "details": "Resume or abort durable transitions and preserve the committed authority boundary.",
     "depends_on": [
       "T013",
