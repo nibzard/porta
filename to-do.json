@@ -60,7 +60,7 @@
       "id": "T003",
       "title": "Implement structured errors and compatibility rules",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Implement error codes, retry classifications, version checks, and extension handling.",
       "depends_on": [
         "T002"

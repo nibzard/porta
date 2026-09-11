@@ -34,6 +34,49 @@ export {
 } from "./schema/validate.js";
 export type { ValidationIssue } from "./schema/validate.js";
 
+// Errors and compatibility.
+export {
+  ALL_ERROR_CODES,
+  ERROR_TAXONOMY,
+  ambiguousEnvironmentError,
+  cleanupPendingError,
+  failureCategory,
+  handoffBlockedError,
+  integrityFailureError,
+  invalidRequestError,
+  invalidRequestFromValidation,
+  isProviderFailure,
+  isSafeRetry,
+  leaseExpiredError,
+  operationUnknownError,
+  policyDeniedError,
+  portableError,
+  providerUnavailableError,
+  requestConflictError,
+  requirementUnsatisfiedError,
+  sanitizeError,
+  scrubStringValue,
+  scrubValue,
+  serializeError,
+  staleHandleError,
+  toPortableError,
+  unsupportedOperationError,
+  workspaceConflictError,
+  workspaceUnstableError,
+} from "./core/errors.js";
+export type { ErrorSpec, FailureCategory, PortableErrorOptions } from "./core/errors.js";
+export {
+  capabilityIdSatisfies,
+  checkUnknownConstraints,
+  checkUnknownRequirements,
+  isDomainNamespaced,
+  missingRequiredExtensions,
+  parseCapabilityId,
+  recognizedExtensions,
+  requireExtensions,
+} from "./core/compatibility.js";
+export type { ParsedCapabilityId } from "./core/compatibility.js";
+
 // Time helpers.
 export { isUtcTimestamp, nowUtcTimestamp } from "./core/time.js";
 
