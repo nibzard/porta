@@ -1185,7 +1185,7 @@
     "id": "T047",
     "title": "Implement bundle validation and import",
     "priority": 3,
-    "status": "todo",
+    "status": "done",
     "details": "Validate bundles before creating a new session and materializing approved state.",
     "depends_on": [
       "T008",

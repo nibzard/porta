@@ -219,6 +219,15 @@ export type {
   BundleExportRequest,
 } from "./runtime/bundle.js";
 
+// Runtime: portable state bundle validation and import (SPEC.md
+// sections 19 and 20).
+export { importBundle } from "./runtime/bundle-import.js";
+export type {
+  BundleImportOptions,
+  BundleImportReport,
+  BundleImportRequest,
+} from "./runtime/bundle-import.js";
+
 // Runtime: lease renewal and allocation cleanup.
 export {
   checkAttachmentAcceptsOperations,
