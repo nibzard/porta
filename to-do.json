@@ -813,7 +813,7 @@
       "id": "T033",
       "title": "Select remote compute and browser providers",
       "priority": 2,
-      "status": "todo",
+      "status": "done",
       "details": "Evaluate provider contracts and select one remote Linux provider and one independent browser provider.",
       "depends_on": [
         "T010",
