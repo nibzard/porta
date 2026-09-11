@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { PolicyAuthority } from "../core/policy.js";
+import { providerUnavailableError } from "../core/errors.js";
 import { BlobStore } from "../store/blob-store.js";
 import { ControlStore } from "../store/control-store.js";
 import { StoreError } from "../store/control-store.js";
@@ -54,6 +55,8 @@ const AUTHORITY: ResourceFlowOptions = {
   authority: PolicyAuthority.fromPolicy({
     schemaVersion: 1,
     operations: ["exec.process@1"],
+    // The destination materializes a local working copy.
+    transferDestinations: ["local"],
   }),
 };
 
@@ -693,5 +696,291 @@ test("managed writers stop or declare a consistent snapshot before checkpointing
     assert.equal(unprepared?.code, "InvalidRequest");
   } finally {
     parts.cleanup();
+  }
+});
+
+// -- Destination preparation (SPEC.md section 13.2, phases 3 to 5) ------------
+
+import { prepareDestination, verifyWorkingCopyIntegrity } from "./replacement.js";
+import { attachEnvironment } from "./acquisition.js";
+import { FakeEnvironmentAdapter } from "../adapters/test-adapter.js";
+
+/** Options of one destination preparation call over the fixture. */
+function destinationOptions(
+  parts: Fixture,
+  adapter: FakeEnvironmentAdapter,
+  copyRoot: string,
+): Parameters<typeof prepareDestination>[2] {
+  return {
+    adapter,
+    leaseOf: (environmentId) => Promise.resolve(adapter.lease(environmentId)),
+    bind: okTransport,
+    blobs: parts.blobs,
+    copyRoot,
+    principal: "tester",
+    authority: AUTHORITY.authority,
+  };
+}
+
+test("destination preparation validates the candidate and leaves source authority alone", async () => {
+  const parts = await fixture();
+  const copyRoot = mkdtempSync(join(tmpdir(), "porta-dest-"));
+  try {
+    const adapter = new FakeEnvironmentAdapter();
+    const prepared = await prepareReplacement(parts.store, request(parts));
+    checkpointReplacement(parts.store, prepared.transitionId);
+
+    const report = await prepareDestination(
+      parts.store,
+      prepared.transitionId,
+      destinationOptions(parts, adapter, copyRoot),
+    );
+    assert.equal(report.state, "validated");
+    assert.ok(report.candidateAttachmentId !== parts.attachmentId);
+    assert.ok(report.environmentId.length > 0);
+    assert.deepEqual(report.validation, {
+      manifest: true,
+      satisfies: true,
+      revisionIntegrity: true,
+      requiredResources: true,
+    });
+
+    // The declared recipe ran to completion and is recorded.
+    assert.deepEqual(
+      report.reconstruction.map((run) => [run.recipeId, run.outcome]),
+      [["recipe-worker", "completed"]],
+    );
+
+    // Reconstructable and reattachable state hold candidate bindings
+    // under the candidate attachment; native state holds none.
+    assert.deepEqual(
+      report.candidates.map((candidate) => candidate.ofResourceId).sort(),
+      [parts.ids.reconstruct, parts.ids.reattach].sort(),
+    );
+    for (const candidate of report.candidates) {
+      const binding = parts.store.getResourceBinding(parts.sessionId, candidate.resourceId)!;
+      assert.equal(binding.owner.attachmentId, report.candidateAttachmentId);
+      assert.equal(binding.owner.generation, 1);
+      assert.equal(binding.status, "bound");
+      assert.equal(binding.recovery, candidate.recovery);
+    }
+
+    // Source authority is unchanged: the source attachment stays
+    // quiesced at its generation, and every source binding stays bound.
+    const source = parts.store.getAttachment(parts.attachmentId)!;
+    assert.equal(source.status, "replacing");
+    assert.equal(source.generation, 1);
+    for (const id of [parts.ids.reconstruct, parts.ids.reattach, parts.ids.native, parts.ids.none]) {
+      assert.equal(parts.store.getResourceBinding(parts.sessionId, id)!.status, "bound");
+    }
+    // The transfer revision is still the durable record; no new one.
+    assert.equal(
+      parts.store.getWorkingCopy(report.copyId)!.baseRevisionId,
+      parts.revisionId,
+    );
+    assert.equal(parts.store.getTransition(prepared.transitionId)!.phase, "validated");
+    // The recipe step settled durably under its deterministic identity.
+    assert.equal(
+      parts.store.getOperationByRequestKey(parts.sessionId, "recipe-worker:step-0")!.status,
+      "completed",
+    );
+
+    // A repeated call over a validated transition returns the record.
+    const again = await prepareDestination(
+      parts.store,
+      prepared.transitionId,
+      destinationOptions(parts, adapter, copyRoot),
+    );
+    assert.equal(again.state, "validated");
+    assert.equal(again.candidateAttachmentId, report.candidateAttachmentId);
+    assert.equal(again.copyId, report.copyId);
+
+    // Only the source and the one candidate exist; nothing doubled.
+    assert.equal(parts.store.listAttachments(parts.sessionId).length, 2);
+  } finally {
+    parts.cleanup();
+    rmSync(copyRoot, { recursive: true, force: true });
+  }
+});
+
+test("an interrupted preparation reconciles one acquisition and adopts recorded steps", async () => {
+  const parts = await fixture();
+  const copyRoot = mkdtempSync(join(tmpdir(), "porta-dest-2-"));
+  try {
+    const adapter = new FakeEnvironmentAdapter();
+    const prepared = await prepareReplacement(parts.store, request(parts));
+    const transitionId = prepared.transitionId;
+    checkpointReplacement(parts.store, transitionId);
+
+    // Simulate a crash after the acquire landed but before the
+    // transition recorded it: the acquisition exists under the
+    // transition's own request identity, the phase never moved past
+    // provisioning, and nothing was recorded.
+    const acquired = await attachEnvironment(parts.store, parts.sessionId, "policy://test", {
+      adapter,
+      request: { name: `worker_${transitionId}`.slice(0, 63), requires: {} },
+      requestKey: `replace:${transitionId}`,
+      principal: "tester",
+      authority: AUTHORITY.authority,
+    });
+    const record = parts.store.getTransition(transitionId)!;
+    parts.store.casTransition(transitionId, { phase: "checkpointed" }, {
+      ...record,
+      phase: "provisioning",
+      updatedAt: new Date().toISOString(),
+    });
+
+    // The resumed call adopts that acquisition; it allocates nothing.
+    const resumed = await prepareDestination(
+      parts.store,
+      transitionId,
+      destinationOptions(parts, adapter, copyRoot),
+    );
+    assert.equal(resumed.state, "validated");
+    assert.equal(resumed.candidateAttachmentId, acquired.attachmentId);
+    assert.equal(parts.store.listAttachments(parts.sessionId).length, 2);
+
+    // Simulate a crash mid-recipe: the step settled, the run never
+    // recorded. The rerun adopts the recorded operation instead of
+    // dispatching again, so a queued failure directive is never spent.
+    adapter.queueInvoke({
+      kind: "fail",
+      error: providerUnavailableError("The environment provider failed."),
+    });
+    const settled = parts.store.getTransition(transitionId)!;
+    const { reconstruction: _drop, ...carried } = settled.data as Record<string, unknown>;
+    void _drop;
+    parts.store.casTransition(transitionId, { phase: "validated" }, {
+      ...settled,
+      phase: "materialized",
+      data: carried,
+      updatedAt: new Date().toISOString(),
+    });
+    const rerun = await prepareDestination(
+      parts.store,
+      transitionId,
+      destinationOptions(parts, adapter, copyRoot),
+    );
+    assert.equal(rerun.state, "validated");
+    assert.deepEqual(
+      rerun.reconstruction.map((run) => run.outcome),
+      ["completed"],
+    );
+    assert.equal(adapter.queues.invoke.length, 1, "the queued failure was never dispatched");
+    assert.equal(parts.store.listAttachments(parts.sessionId).length, 2);
+  } finally {
+    parts.cleanup();
+    rmSync(copyRoot, { recursive: true, force: true });
+  }
+});
+
+test("a failing recipe fails the transition and never touches the source", async () => {
+  const parts = await fixture();
+  const copyRoot = mkdtempSync(join(tmpdir(), "porta-dest-3-"));
+  try {
+    const adapter = new FakeEnvironmentAdapter();
+    adapter.queueInvoke({
+      kind: "fail",
+      error: providerUnavailableError("The environment provider failed."),
+    });
+    const prepared = await prepareReplacement(parts.store, request(parts));
+    checkpointReplacement(parts.store, prepared.transitionId);
+
+    const report = await prepareDestination(
+      parts.store,
+      prepared.transitionId,
+      destinationOptions(parts, adapter, copyRoot),
+    );
+    assert.equal(report.state, "failed");
+    // The report carries the refusal; the transition records the root
+    // cause beside the failed run.
+    assert.equal(report.error?.code, "HandoffBlocked");
+    assert.equal(
+      (report.error?.details as { reason?: string }).reason,
+      "ProviderUnavailable",
+    );
+    assert.equal(report.reconstruction[0]!.failureCondition, "ProviderUnavailable");
+    const transition = parts.store.getTransition(prepared.transitionId)!;
+    assert.equal(transition.phase, "failed");
+    assert.equal((transition.data.error as { code?: string }).code, "ProviderUnavailable");
+    // The source stays exactly as the checkpoint left it.
+    assert.equal(parts.store.getAttachment(parts.attachmentId)!.status, "replacing");
+    for (const id of [parts.ids.reconstruct, parts.ids.reattach, parts.ids.native, parts.ids.none]) {
+      assert.equal(parts.store.getResourceBinding(parts.sessionId, id)!.status, "bound");
+    }
+    // The failed step is not lost: it settled durably.
+    assert.equal(
+      parts.store.getOperationByRequestKey(parts.sessionId, "recipe-worker:step-0")!.status,
+      "failed",
+    );
+
+    // A transition that never checkpointed refuses outright.
+    const fresh = await fixture();
+    try {
+      const other = await prepareReplacement(fresh.store, request(fresh));
+      const refused = await refuse(() =>
+        prepareDestination(
+          fresh.store,
+          other.transitionId,
+          destinationOptions(fresh, new FakeEnvironmentAdapter(), copyRoot),
+        ),
+      );
+      assert.equal(refused?.code, "InvalidRequest");
+    } finally {
+      fresh.cleanup();
+    }
+  } finally {
+    parts.cleanup();
+    rmSync(copyRoot, { recursive: true, force: true });
+  }
+});
+
+test("working-copy integrity refuses any content that drifted from the revision", async () => {
+  const parts = await fixture();
+  const copyRoot = mkdtempSync(join(tmpdir(), "porta-dest-4-"));
+  try {
+    const adapter = new FakeEnvironmentAdapter();
+    const prepared = await prepareReplacement(parts.store, request(parts));
+    checkpointReplacement(parts.store, prepared.transitionId);
+    const report = await prepareDestination(
+      parts.store,
+      prepared.transitionId,
+      destinationOptions(parts, adapter, copyRoot),
+    );
+    assert.equal(report.state, "validated");
+
+    // The pristine copy verifies and returns the revision root.
+    const root = verifyWorkingCopyIntegrity(parts.store, parts.blobs, copyRoot, parts.revisionId);
+    assert.equal(root.length > 0, true);
+
+    // A file that appeared refuses.
+    writeFileSync(join(copyRoot, "evil.txt"), "tampered");
+    const appeared = await refuse(() =>
+      Promise.resolve(
+        verifyWorkingCopyIntegrity(parts.store, parts.blobs, copyRoot, parts.revisionId),
+      ),
+    );
+    assert.equal(appeared?.code, "IntegrityFailure");
+
+    // A file that changed refuses too.
+    rmSync(join(copyRoot, "evil.txt"));
+    writeFileSync(join(copyRoot, "app.txt"), "drifted");
+    const changed = await refuse(() =>
+      Promise.resolve(
+        verifyWorkingCopyIntegrity(parts.store, parts.blobs, copyRoot, parts.revisionId),
+      ),
+    );
+    assert.equal(changed?.code, "IntegrityFailure");
+
+    // An absent revision refuses as an integrity failure, not a crash.
+    const absent = await refuse(() =>
+      Promise.resolve(
+        verifyWorkingCopyIntegrity(parts.store, parts.blobs, copyRoot, "rev-none"),
+      ),
+    );
+    assert.equal(absent?.code, "IntegrityFailure");
+  } finally {
+    parts.cleanup();
+    rmSync(copyRoot, { recursive: true, force: true });
   }
 });

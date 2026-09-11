@@ -448,19 +448,26 @@ export type {
   ReconstructionStepOutcome,
 } from "./runtime/reconstruction.js";
 
-// Runtime: replacement planning, preparation, and checkpointing
-// (SPEC.md sections 13.1 and 13.2).
+// Runtime: replacement planning, preparation, checkpointing, and
+// destination preparation (SPEC.md sections 13.1 and 13.2).
 export {
   checkpointReplacement,
   planReplace,
+  prepareDestination,
   prepareReplacement,
+  verifyWorkingCopyIntegrity,
 } from "./runtime/replacement.js";
 export type {
   ActiveOperationState,
+  CandidateBinding,
   CheckpointConsistency,
   ReplacementCheckpointOptions,
   CheckpointReport,
   DeclaredSnapshot,
+  DestinationOptions,
+  DestinationReconstruction,
+  DestinationReport,
+  DestinationValidation,
   PrepareOptions,
   PreparationReport,
 } from "./runtime/replacement.js";

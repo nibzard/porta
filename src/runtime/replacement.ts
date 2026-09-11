@@ -1,33 +1,58 @@
 import {
   handoffBlockedError,
+  integrityFailureError,
   invalidRequestError,
+  providerUnavailableError,
   requirementUnsatisfiedError,
   sanitizeError,
   staleHandleError,
   toPortableError,
 } from "../core/errors.js";
+import { checkTargetSatisfies, manifestTarget } from "../core/matching.js";
+import type { PolicyAuthority } from "../core/policy.js";
 import type { PortableError } from "../schema/error.js";
 import { assertValid } from "../schema/validate.js";
 import { replaceRequestSchema } from "../schema/handoff.js";
 import type {
   ActiveOperationsPolicy,
+  DestinationRequest,
   ReplaceRequest,
   HandoffPlan,
+  ReconstructionRecipe,
   StateDisposition,
 } from "../schema/handoff.js";
+import { environmentManifestSchema } from "../schema/capability.js";
+import type { EnvironmentRequest } from "../schema/capability.js";
+import type {
+  AdapterOperation,
+  EnvironmentAdapter,
+  EnvironmentLease,
+} from "../schema/adapter.js";
+import type { InvocationRequest } from "../schema/operation.js";
+import type { RecoveryMode } from "../schema/resource.js";
 import type { OperationRecord, OperationStatus } from "../schema/operation.js";
 import { SessionEventStream } from "../store/event-stream.js";
 import type { EventRedactor } from "../store/event-stream.js";
+import type { BlobStore } from "../store/blob-store.js";
+import { buildTreeFromDirectory } from "../store/workspace-tree.js";
 import { StoreError } from "../store/control-store.js";
-import type { ControlStore } from "../store/control-store.js";
+import type { ControlStore, TransitionRecord } from "../store/control-store.js";
 import {
   checkReconstructionCoverage,
   checkReconstructionRecipes,
   checkStateDispositions,
   classifyResourceStates,
+  runReconstructionRecipe,
 } from "./reconstruction.js";
 import { cancelOperation, waitForOperation } from "./cancellation.js";
 import type { CancelTransport } from "./cancellation.js";
+import { attachEnvironment } from "./acquisition.js";
+import { materializeRevision } from "./workspace.js";
+import { admitInvocation } from "./admission.js";
+import { markOperationDispatched, settleOperation } from "./outcomes.js";
+import type { OperationOutcome } from "./outcomes.js";
+import { bindResource } from "./resources.js";
+import type { BindTransport } from "./resources.js";
 import { randomUUID } from "node:crypto";
 
 /**
@@ -324,6 +349,10 @@ export async function prepareReplacement(
       policy: request.activeOperations,
       workspaceRevisionId: request.workspaceRevisionId,
       plan: planSummary(plan),
+      sourceName: swapped.name,
+      destination: request.destination,
+      requiredResources: request.requiredResources,
+      reconstruct: request.reconstruct,
     },
     updatedAt: new Date().toISOString(),
   });
@@ -660,6 +689,9 @@ export function checkpointReplacement(
       capability: binding.capability,
       recovery: binding.recovery,
       status: binding.status,
+      ...(binding.providerResourceId !== undefined
+        ? { providerResourceId: binding.providerResourceId }
+        : {}),
     })),
     checkpointedAt: new Date().toISOString(),
   };
@@ -689,4 +721,728 @@ export function checkpointReplacement(
     consistency,
     inventory: inventory.length,
   };
+}
+
+// -- Destination preparation (SPEC.md section 13.2, phases 3 to 5) ------------
+
+/** Options of one destination preparation call. */
+export interface DestinationOptions {
+  /** The adapter that owns the destination environments. */
+  adapter: EnvironmentAdapter;
+  /** Reaches the acquired destination environment for work and reads. */
+  leaseOf: (environmentId: string) => Promise<EnvironmentLease>;
+  /** Carries candidate resource bindings to the destination lease. */
+  bind: BindTransport;
+  /** The content-addressed store holding the transfer revision. */
+  blobs: BlobStore;
+  /** The staging root the destination working copy materializes into. */
+  copyRoot: string;
+  /** Authenticated principal supplied by the embedding application. */
+  principal: string;
+  /** The policy authority in force for this call. */
+  authority: PolicyAuthority;
+  /** Mutation lease hold of the acquisition, in milliseconds. */
+  leaseTtlMs?: number;
+  /** Wait for the acquire response before reconciling, in milliseconds. */
+  responseTimeoutMs?: number;
+  /** Redactor applied to journal event data. */
+  redactor?: EventRedactor;
+}
+
+/** What the validation step checked (SPEC.md section 13.2, phase 5). */
+export interface DestinationValidation {
+  /** The manifest parses and passes its own schema. */
+  manifest: boolean;
+  /** Capabilities, platform, resources, and enforcement satisfy the request. */
+  satisfies: boolean;
+  /** The destination working copy hashes back to the transfer revision. */
+  revisionIntegrity: boolean;
+  /** Every required resource holds a candidate binding. */
+  requiredResources: boolean;
+}
+
+/** One reconstruction run recorded in the transition. */
+export interface DestinationReconstruction {
+  recipeId: string;
+  outcome: "completed" | "failed";
+  /** The declared condition a failure matched, when one did. */
+  failureCondition?: string;
+}
+
+/** One candidate binding, by the source resource it replaces. */
+export interface CandidateBinding {
+  ofResourceId: string;
+  resourceId: string;
+  recovery: string;
+}
+
+/** The report of one destination preparation call. */
+export interface DestinationReport {
+  transitionId: string;
+  sessionId: string;
+  sourceAttachmentId: string;
+  /** The candidate attachment the destination provisioned. */
+  candidateAttachmentId: string;
+  environmentId: string;
+  /** The working copy the revision materialized into. */
+  copyId: string;
+  copyRoot: string;
+  state: "validated" | "failed";
+  reconstruction: DestinationReconstruction[];
+  candidates: CandidateBinding[];
+  validation?: DestinationValidation;
+  error?: PortableError;
+}
+
+/** The persisted transition data, as destination preparation reads it. */
+interface TransitionData {
+  workspaceRevisionId?: string;
+  sourceName?: string;
+  destination?: DestinationRequest;
+  requiredResources?: string[];
+  reconstruct?: ReconstructionRecipe[];
+  inventory?: Array<{
+    resourceId: string;
+    type: string;
+    capability: string;
+    recovery: RecoveryMode;
+    providerResourceId?: string;
+  }>;
+  candidateAttachmentId?: string;
+  environmentId?: string;
+  copyId?: string;
+  reconstruction?: DestinationReconstruction[];
+  candidates?: CandidateBinding[];
+  validation?: DestinationValidation;
+}
+
+/**
+ * Provision, materialize, reconstruct, bind, and validate the
+ * destination of one replacement (SPEC.md section 13.2, phases 3 to
+ * 5).
+ *
+ * The acquisition runs through the ordinary durable protocol under the
+ * transition's request identity, `replace:<transitionId>`: a call
+ * interrupted at any point re-enters, reconciles the same acquisition,
+ * and never allocates a second environment. Each step checks its
+ * recorded output first, so a resumed call redoes only what never
+ * landed. Recipe steps address their operations by deterministic
+ * identity, so a rerun of a partially finished recipe adopts the
+ * recorded operations instead of dispatching duplicates.
+ *
+ * Candidate bindings are new bindings under the candidate attachment;
+ * the source keeps every binding and all authority until the switch
+ * transaction. A failure marks the transition `failed` and returns the
+ * report; releasing the candidate is the abort flow's work.
+ */
+export async function prepareDestination(
+  store: ControlStore,
+  transitionId: string,
+  options: DestinationOptions,
+): Promise<DestinationReport> {
+  const current = store.getTransition(transitionId);
+  if (current === null) {
+    throw invalidRequestError(`Transition ${transitionId} does not exist.`, {
+      transitionId,
+    });
+  }
+  const { sessionId, attachmentId } = current;
+  const session = store.getSession(sessionId);
+  if (session === null) {
+    throw invalidRequestError(`Session ${sessionId} does not exist.`, { sessionId });
+  }
+  if (current.phase === "validated") {
+    return recordedReport(store, current);
+  }
+  if (current.phase !== "checkpointed" && !RESUMABLE.has(current.phase)) {
+    throw invalidRequestError(
+      `Transition ${transitionId} is ${current.phase}; destination preparation needs a checkpointed transition.`,
+      { transitionId, phase: current.phase },
+    );
+  }
+  const stream =
+    options.redactor === undefined
+      ? new SessionEventStream(store, sessionId)
+      : new SessionEventStream(store, sessionId, options.redactor);
+  const transition: TransitionRecord = current;
+
+  try {
+    const provisioned = await provision(store, stream, transition, session.policyRef, options);
+    const materialized = materialize(store, stream, transition, options);
+    const reconstructed = await reconstruct(store, stream, transition, provisioned, options);
+    const candidates = await bindCandidates(store, transition, provisioned, options);
+    const validation = await validate(
+      store,
+      stream,
+      transition,
+      provisioned,
+      materialized,
+      candidates,
+      options,
+    );
+    transitionPhase(
+      store,
+      transitionId,
+      "validating",
+      "validated",
+      { validation },
+      stream,
+      `Destination validated: attachment ${provisioned.attachmentId}.`,
+    );
+    return {
+      transitionId,
+      sessionId,
+      sourceAttachmentId: attachmentId,
+      candidateAttachmentId: provisioned.attachmentId,
+      environmentId: provisioned.environmentId,
+      copyId: materialized.copyId,
+      copyRoot: materialized.copyRoot,
+      state: "validated",
+      reconstruction: reconstructed,
+      candidates,
+      validation,
+    };
+  } catch (error) {
+    const portable = toPortableError(error);
+    const failed = store.getTransition(transitionId);
+    if (failed !== null && failed.phase !== "failed") {
+      transitionPhase(
+        store,
+        transitionId,
+        failed.phase,
+        "failed",
+        { error: sanitizeError(portable) },
+        stream,
+        `Destination preparation failed: ${portable.code}.`,
+      );
+    }
+    const data = (failed?.data ?? {}) as TransitionData;
+    return {
+      transitionId,
+      sessionId,
+      sourceAttachmentId: attachmentId,
+      candidateAttachmentId: data.candidateAttachmentId ?? "",
+      environmentId: data.environmentId ?? "",
+      copyId: data.copyId ?? "",
+      copyRoot: workingCopyRoot(store, data.copyId) ?? options.copyRoot,
+      state: "failed",
+      reconstruction: data.reconstruction ?? [],
+      candidates: data.candidates ?? [],
+      error: portable,
+    };
+  }
+}
+
+/** Phases destination preparation resumes from. */
+const RESUMABLE = new Set([
+  "provisioning",
+  "provisioned",
+  "materializing",
+  "materialized",
+  "reconstructing",
+  "reconstructed",
+  "validating",
+]);
+
+/** What the provision step established. */
+interface Provisioned {
+  attachmentId: string;
+  environmentId: string;
+}
+
+/** Phase 3: acquire the destination under the transition identity. */
+async function provision(
+  store: ControlStore,
+  stream: SessionEventStream,
+  transition: TransitionRecord,
+  policyRef: string,
+  options: DestinationOptions,
+): Promise<Provisioned> {
+  const data = transition.data as TransitionData;
+  if (data.candidateAttachmentId !== undefined && data.environmentId !== undefined) {
+    const summary = store.getAttachment(data.candidateAttachmentId);
+    if (summary === null || summary.environmentId === undefined) {
+      throw providerUnavailableError(
+        `The recorded destination attachment ${data.candidateAttachmentId} is gone.`,
+        { attachmentId: data.candidateAttachmentId },
+      );
+    }
+    return { attachmentId: summary.attachmentId, environmentId: summary.environmentId };
+  }
+  const wanted = requireDestination(transition.id, data);
+  enterPhase(
+    store,
+    transition.id,
+    "checkpointed",
+    "provisioning",
+    {},
+    stream,
+    "Provisioning the destination.",
+  );
+  // Attachment names are unique per session and the source keeps its
+  // name until the switch, so the candidate carries a derived one.
+  const summary = await attachEnvironment(store, transition.sessionId, policyRef, {
+    adapter: options.adapter,
+    request: {
+      // Names match ^[a-z][a-z0-9_-]{0,62}$; the derived candidate
+      // name stays inside it and never collides with the source.
+      name: `${wanted.sourceName}_${transition.id}`.slice(0, 63),
+      ...wanted.destination,
+    },
+    requestKey: `replace:${transition.id}`,
+    principal: options.principal,
+    authority: options.authority,
+    ...(options.leaseTtlMs !== undefined ? { leaseTtlMs: options.leaseTtlMs } : {}),
+    ...(options.responseTimeoutMs !== undefined
+      ? { responseTimeoutMs: options.responseTimeoutMs }
+      : {}),
+    ...(options.redactor !== undefined ? { redactor: options.redactor } : {}),
+  });
+  if (summary.environmentId === undefined) {
+    throw providerUnavailableError(
+      `The destination attachment ${summary.attachmentId} reports no environment.`,
+      { attachmentId: summary.attachmentId },
+    );
+  }
+  transitionPhase(
+    store,
+    transition.id,
+    "provisioning",
+    "provisioned",
+    { candidateAttachmentId: summary.attachmentId, environmentId: summary.environmentId },
+    stream,
+    `Destination provisioned: environment ${summary.environmentId}.`,
+  );
+  return { attachmentId: summary.attachmentId, environmentId: summary.environmentId };
+}
+
+/** What the materialize step established. */
+interface Materialized {
+  copyId: string;
+  copyRoot: string;
+}
+
+/** Phase 4a: restore the transfer revision into the destination copy. */
+function materialize(
+  store: ControlStore,
+  stream: SessionEventStream,
+  transition: TransitionRecord,
+  options: DestinationOptions,
+): Materialized {
+  const data = transition.data as TransitionData;
+  const revisionId = data.workspaceRevisionId;
+  if (revisionId === undefined) {
+    throw invalidRequestError(
+      `Transition ${transition.id} carries no transfer revision.`,
+      { transitionId: transition.id },
+    );
+  }
+  if (data.copyId !== undefined) {
+    const record = store.getWorkingCopy(data.copyId);
+    if (record === null) {
+      throw integrityFailureError(`working copy ${data.copyId}`, "recorded", "absent");
+    }
+    return { copyId: record.id, copyRoot: record.rootPath };
+  }
+  enterPhase(
+    store,
+    transition.id,
+    "provisioned",
+    "materializing",
+    {},
+    stream,
+    "Materializing the transfer revision.",
+  );
+  // A crash between the file write and this call leaves the record
+  // behind; the recorded path is the output the redo looks for.
+  const existing = store.getWorkingCopyByPath(transition.sessionId, options.copyRoot);
+  const copy =
+    existing ??
+    materializeRevision(
+      store,
+      transition.sessionId,
+      options.blobs,
+      revisionId,
+      options.copyRoot,
+      {
+        authority: options.authority,
+        mode: data.destination?.workspace?.mode ?? "proposal",
+      },
+    ).record;
+  transitionPhase(
+    store,
+    transition.id,
+    "materializing",
+    "materialized",
+    { copyId: copy.id },
+    stream,
+    `Revision materialized into copy ${copy.id}.`,
+  );
+  return { copyId: copy.id, copyRoot: copy.rootPath };
+}
+
+/** Phase 4b: run the declared recipes through the destination lease. */
+async function reconstruct(
+  store: ControlStore,
+  stream: SessionEventStream,
+  transition: TransitionRecord,
+  provisioned: Provisioned,
+  options: DestinationOptions,
+): Promise<DestinationReconstruction[]> {
+  const data = transition.data as TransitionData;
+  if (data.reconstruction !== undefined) {
+    return data.reconstruction;
+  }
+  const recipes = data.reconstruct ?? [];
+  enterPhase(
+    store,
+    transition.id,
+    "materialized",
+    "reconstructing",
+    {},
+    stream,
+    `Running ${recipes.length} declared recipe(s).`,
+  );
+  const lease = await options.leaseOf(provisioned.environmentId);
+  const runs: DestinationReconstruction[] = [];
+  for (const recipe of recipes) {
+    const run = await runReconstructionRecipe(recipe, {
+      invoke: (step, operationId) =>
+        invokeStep(store, transition, provisioned, lease, step, operationId, options),
+    });
+    runs.push({
+      recipeId: recipe.id,
+      outcome: run.outcome,
+      ...(run.failureCondition !== undefined ? { failureCondition: run.failureCondition } : {}),
+    });
+    if (run.outcome === "failed") {
+      transitionPhase(
+        store,
+        transition.id,
+        "reconstructing",
+        "failed",
+        { reconstruction: runs, error: sanitizeError(run.error!) },
+        stream,
+        `Recipe ${recipe.id} failed` +
+          `${run.failureCondition !== undefined ? ` on ${run.failureCondition}` : ""}.`,
+      );
+      throw handoffBlockedError(
+        `Recipe ${recipe.id} failed; the destination cannot be validated.`,
+        { recipeId: recipe.id, reason: run.failureCondition ?? run.error?.code },
+      );
+    }
+  }
+  transitionPhase(
+    store,
+    transition.id,
+    "reconstructing",
+    "reconstructed",
+    { reconstruction: runs },
+    stream,
+    "Declared reconstruction completed.",
+  );
+  return runs;
+}
+
+/**
+ * Run one recipe step through the ordinary admission, dispatch, and
+ * settle path, under the step's deterministic identity.
+ *
+ * A step whose operation record already exists — a rerun after an
+ * interruption — adopts that record instead of dispatching again. A
+ * step still running on the record gets the provider's own answer
+ * through `inspect`.
+ */
+async function invokeStep(
+  store: ControlStore,
+  transition: TransitionRecord,
+  provisioned: Provisioned,
+  lease: EnvironmentLease,
+  step: ReconstructionRecipe["steps"][number],
+  operationId: string,
+  options: DestinationOptions,
+): Promise<AdapterOperation> {
+  const invocation: InvocationRequest = {
+    attachment: {
+      sessionId: transition.sessionId,
+      attachmentId: provisioned.attachmentId,
+      generation: 1,
+    },
+    capability: step.capability,
+    operation: step.operation,
+    input: step.input,
+    requestKey: operationId,
+  };
+  const admitted = admitInvocation(store, transition.sessionId, invocation, {
+    authority: options.authority,
+    ...(options.redactor !== undefined ? { redactor: options.redactor } : {}),
+  });
+  // The durable record owns its own id; the adapter addresses the step
+  // by its deterministic identity. A rerun adopts the record either way.
+  const record = admitted.operation;
+  if (admitted.deduplicated && record.status !== "accepted") {
+    if (record.status === "running") {
+      const inspected = await lease.inspect(operationId);
+      return {
+        operationId,
+        status: inspected.status,
+        ...(inspected.result !== undefined ? { result: inspected.result } : {}),
+        ...(inspected.error !== undefined ? { error: inspected.error } : {}),
+      };
+    }
+    return {
+      operationId,
+      status: record.status,
+      ...(record.resultRef !== undefined ? { result: record.resultRef } : {}),
+      ...(record.error !== undefined ? { error: record.error } : {}),
+    };
+  }
+  markOperationDispatched(store, transition.sessionId, record.id);
+  const answer = await lease.invoke({
+    operationId,
+    capability: step.capability,
+    operation: step.operation,
+    input: step.input,
+    environmentId: provisioned.environmentId,
+    limits: {},
+  });
+  if (answer.status !== "running") {
+    settleStep(store, transition.sessionId, record.id, answer);
+  }
+  return answer;
+}
+
+/** Settle one step outcome durably; a running answer stays running. */
+function settleStep(
+  store: ControlStore,
+  sessionId: string,
+  operationId: string,
+  answer: AdapterOperation,
+): void {
+  if (answer.status === "completed") {
+    settleOperation(store, sessionId, operationId, {
+      kind: "completed",
+      resultRef: `op:${operationId}`,
+    });
+    return;
+  }
+
+  const error =
+    answer.error ??
+    providerUnavailableError(
+      `Reconstruction step ${operationId} answered ${answer.status} without an error.`,
+      { operationId, status: answer.status },
+    );
+  const outcome: OperationOutcome =
+    answer.status === "cancelled"
+      ? { kind: "cancelled", error }
+      : answer.status === "unknown"
+        ? { kind: "unknown", error }
+        : { kind: "failed", error };
+  settleOperation(store, sessionId, operationId, outcome);
+}
+
+/** Phase 4c: create the candidate resource bindings. */
+async function bindCandidates(
+  store: ControlStore,
+  transition: TransitionRecord,
+  provisioned: Provisioned,
+  options: DestinationOptions,
+): Promise<CandidateBinding[]> {
+  const data = transition.data as TransitionData;
+  if (data.candidates !== undefined) {
+    return data.candidates;
+  }
+  const crossing = (data.inventory ?? []).filter(
+    (entry) => entry.recovery === "reconstruct" || entry.recovery === "reattach",
+  );
+  const candidates: CandidateBinding[] = [];
+  for (const entry of crossing) {
+    const description = await bindResource(
+      store,
+      transition.sessionId,
+      {
+        type: entry.type,
+        owner: {
+          sessionId: transition.sessionId,
+          attachmentId: provisioned.attachmentId,
+          generation: 1,
+        },
+        capability: entry.capability,
+        lifetime: "attachment",
+        recovery: entry.recovery,
+        ...(entry.providerResourceId !== undefined
+          ? { providerResourceId: entry.providerResourceId }
+          : {}),
+      },
+      options.bind,
+      { authority: options.authority },
+    );
+    candidates.push({
+      ofResourceId: entry.resourceId,
+      resourceId: description.ref.id,
+      recovery: entry.recovery,
+    });
+  }
+  return candidates;
+}
+
+/** Phase 5: validate the candidate against the request and revision. */
+async function validate(
+  store: ControlStore,
+  stream: SessionEventStream,
+  transition: TransitionRecord,
+  provisioned: Provisioned,
+  materialized: Materialized,
+  candidates: CandidateBinding[],
+  options: DestinationOptions,
+): Promise<DestinationValidation> {
+  // The candidates cross with the transition; the validating move is
+  // the durable record of the binding step.
+  enterPhase(
+    store,
+    transition.id,
+    "reconstructed",
+    "validating",
+    { candidates },
+    stream,
+    "Validating the destination.",
+  );
+  const data = transition.data as TransitionData;
+  const wanted = requireDestination(transition.id, data);
+  const request: EnvironmentRequest = {
+    name: `${wanted.sourceName}_${transition.id}`.slice(0, 63),
+    ...wanted.destination,
+  };
+  const lease = await options.leaseOf(provisioned.environmentId);
+  const manifest = await lease.manifest();
+
+  try {
+    assertValid(environmentManifestSchema, manifest);
+  } catch {
+    throw integrityFailureError("the destination manifest", "schema-valid", "invalid");
+  }
+  const problem = checkTargetSatisfies(request, manifestTarget(manifest));
+  if (problem !== null) {
+    throw requirementUnsatisfiedError(
+      "The destination environment does not satisfy the request.",
+      { reason: problem.message },
+    );
+  }
+  verifyWorkingCopyIntegrity(store, options.blobs, materialized.copyRoot, data.workspaceRevisionId!);
+
+  const held = new Set(candidates.map((candidate) => candidate.ofResourceId));
+  const missing = (data.requiredResources ?? []).filter((resourceId) => !held.has(resourceId));
+  if (missing.length > 0) {
+    throw requirementUnsatisfiedError(
+      "Required resources hold no candidate binding on the destination.",
+      { missing },
+    );
+  }
+  return { manifest: true, satisfies: true, revisionIntegrity: true, requiredResources: true };
+}
+
+/**
+ * Verify that one working copy still hashes to its revision
+ * (SPEC.md section 11.4).
+ *
+ * The check re-ingests the copy's content into the same
+ * content-addressed store, which is idempotent, and compares the
+ * rebuilt tree root against the recorded revision root. Any file that
+ * changed, appeared, or disappeared between materialization and this
+ * check refuses with `IntegrityFailure`.
+ */
+export function verifyWorkingCopyIntegrity(
+  store: ControlStore,
+  blobs: BlobStore,
+  copyRoot: string,
+  revisionId: string,
+): string {
+  const revision = store.getRevision(revisionId);
+  if (revision === null) {
+    throw integrityFailureError(`revision ${revisionId}`, "recorded", "absent");
+  }
+  const rebuilt = buildTreeFromDirectory(copyRoot, blobs);
+  if (rebuilt.rootHash !== revision.rootHash) {
+    throw integrityFailureError(
+      `the working copy at ${copyRoot}`,
+      revision.rootHash,
+      rebuilt.rootHash,
+    );
+  }
+  return revision.rootHash;
+}
+
+/** The destination request and source name one transition carries. */
+function requireDestination(
+  transitionId: string,
+  data: TransitionData,
+): { destination: DestinationRequest; sourceName: string } {
+  if (data.destination === undefined || data.sourceName === undefined) {
+    throw invalidRequestError(
+      `Transition ${transitionId} carries no destination request; it predates destination preparation.`,
+      { transitionId },
+    );
+  }
+  return { destination: data.destination, sourceName: data.sourceName };
+}
+
+/**
+ * Enter one phase of the destination flow.
+ *
+ * A transition already sitting in the target phase skipped this move on
+ * an earlier, interrupted call; the move is not redone. Any other phase
+ * refuses: the phase machine moves one step at a time.
+ */
+function enterPhase(
+  store: ControlStore,
+  transitionId: string,
+  from: string,
+  to: string,
+  data: Record<string, unknown>,
+  stream: SessionEventStream,
+  detail: string,
+): void {
+  const current = store.getTransition(transitionId);
+  if (current === null) {
+    throw invalidRequestError(`Transition ${transitionId} does not exist.`, {
+      transitionId,
+    });
+  }
+  if (current.phase === to) {
+    return;
+  }
+  if (current.phase !== from) {
+    throw staleHandleError(
+      { kind: "transition-phase", value: from },
+      { kind: "transition-phase", value: current.phase },
+    );
+  }
+  transitionPhase(store, transitionId, from, to, data, stream, detail);
+}
+
+/** The report of a transition that already validated. */
+function recordedReport(store: ControlStore, transition: TransitionRecord): DestinationReport {
+  const data = transition.data as TransitionData;
+  return {
+    transitionId: transition.id,
+    sessionId: transition.sessionId,
+    sourceAttachmentId: transition.attachmentId,
+    candidateAttachmentId: data.candidateAttachmentId ?? "",
+    environmentId: data.environmentId ?? "",
+    copyId: data.copyId ?? "",
+    copyRoot: workingCopyRoot(store, data.copyId) ?? "",
+    state: "validated",
+    reconstruction: data.reconstruction ?? [],
+    candidates: data.candidates ?? [],
+    ...(data.validation !== undefined ? { validation: data.validation } : {}),
+  };
+}
+
+/** The root path of one recorded working copy, when it still exists. */
+function workingCopyRoot(store: ControlStore, copyId: string | undefined): string | null {
+  if (copyId === undefined) {
+    return null;
+  }
+  return store.getWorkingCopy(copyId)?.rootPath ?? null;
 }

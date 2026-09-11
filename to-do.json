@@ -969,7 +969,7 @@
     "id": "T039",
     "title": "Implement replacement destination preparation",
     "priority": 2,
-    "status": "todo",
+    "status": "done",
     "details": "Provision, materialize, reconstruct, bind resources, and validate the candidate environment.",
     "depends_on": [
       "T012",
