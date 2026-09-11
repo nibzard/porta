@@ -323,6 +323,18 @@ export type {
   WorkingCopyBound,
 } from "./runtime/process-capability.js";
 
+// Adapter: local process execution under the host account.
+export {
+  LOCAL_PROCESS_PROVIDER_ID,
+  LocalProcessAdapter,
+  LocalProcessLease,
+} from "./adapters/local-process-adapter.js";
+export type {
+  AcquisitionRecord,
+  LocalProcessAdapterOptions,
+  ProcessRecord,
+} from "./adapters/local-process-adapter.js";
+
 // Records and schemas.
 export * from "./schema/error.js";
 export * from "./schema/event.js";

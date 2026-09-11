@@ -651,7 +651,7 @@
       "id": "T027",
       "title": "Implement the local process adapter",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Execute managed local processes and report actual host access and enforcement.",
       "depends_on": [
         "T013",
