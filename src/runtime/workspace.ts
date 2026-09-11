@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, openSync, rmSync, statSync, writeSync } from "node:fs";
+import { closeSync, openSync, readdirSync, rmSync, statSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import {
+  integrityFailureError,
   invalidRequestError,
   requestConflictError,
   unsupportedOperationError,
@@ -12,15 +13,24 @@ import { nowUtcTimestamp } from "../core/time.js";
 import type { Sha256Hex } from "../schema/defs.js";
 import type { WorkspaceRevision } from "../schema/workspace.js";
 import { assertValid } from "../schema/validate.js";
+import type { PolicyAuthority } from "../core/policy.js";
+import { checkRawTransfer } from "../core/secrets.js";
 import { checkpointRequestSchema } from "../schema/workspace.js";
-import type { CheckpointRequest } from "../schema/workspace.js";
+import type { CheckpointRequest, WorkingCopyRecord } from "../schema/workspace.js";
 import type { BlobLimits, BlobRef, BlobStore } from "../store/blob-store.js";
 import { StoreError } from "../store/control-store.js";
 import type { ControlStore } from "../store/control-store.js";
 import type { EventRedactor } from "../store/event-stream.js";
 import { SessionEventStream } from "../store/event-stream.js";
-import { buildTreeFromDirectory, validateWorkspacePath } from "../store/workspace-tree.js";
-import type { ImportedTree } from "../store/workspace-tree.js";
+import {
+  buildTreeFromDirectory,
+  canonicalTreeJson,
+  checkTreeManifest,
+  materializeTree,
+  treeRootHash,
+  validateWorkspacePath,
+} from "../store/workspace-tree.js";
+import type { ImportedTree, TreeEntry } from "../store/workspace-tree.js";
 
 /**
  * Workspace import and checkpoints over the local directory bridge
@@ -186,6 +196,16 @@ export function checkpointWorkspace(
     throw workspaceConflictError(request.expectedHead, currentHead);
   }
 
+  // A private working copy reaches the head only through an accepted
+  // proposal, never through the bridge (SPEC.md section 11.3).
+  const registeredCopy = store.getWorkingCopyByPath(sessionId, rootPath);
+  if (registeredCopy !== null) {
+    throw invalidRequestError(
+      "The source is a private working copy; it reaches the head through a proposal, not the bridge.",
+      { reason: "working-copy-source", copyId: registeredCopy.id, rootPath },
+    );
+  }
+
   const lockFileName = options.lockFileName ?? DEFAULT_LOCK_FILE;
   acquireBridgeLock(rootPath, lockFileName, options.staleLockMs ?? DEFAULT_STALE_LOCK_MS);
   // The lock file lives inside the source, so it never enters the tree.
@@ -229,6 +249,7 @@ export function checkpointWorkspace(
         );
       }
       store.insertBridgeImport(sessionId, request.requestKey, revision.id, inputHash);
+      store.insertRevisionTree(revision.id, imported.rootHash, canonicalTreeJson(imported.entries));
       stream.append("workspace.checkpointed", revision.id, {
         revisionId: revision.id,
         requestKey: request.requestKey,
@@ -328,4 +349,142 @@ function isSystemCode(error: unknown, code: string): boolean {
 function hashOf(input: Record<string, unknown>): string {
   const canonical = JSON.stringify(input, Object.keys(input).sort());
   return createHash("sha256").update(canonical, "utf8").digest("hex");
+}
+
+// -- Materialization ----------------------------------------------------------
+
+/** Input of one materialization call. */
+export interface MaterializeFlowOptions {
+  /** The policy authority that governs the transfer destination. */
+  authority: PolicyAuthority;
+  /** `read-only` writes a snapshot; `proposal` writes a private copy. */
+  mode: WorkingCopyRecord["mode"];
+}
+
+/** The outcome of one materialization call. */
+export interface MaterializedCopy {
+  record: WorkingCopyRecord;
+  /** Number of entries in the materialized tree. */
+  entryCount: number;
+  /** Digest of the verified manifest. */
+  rootHash: Sha256Hex;
+}
+
+/**
+ * Materialize one revision into a local directory (SPEC.md 11.3, 11.6).
+ *
+ * Destination policy is checked before anything is read: an
+ * unauthorized transfer never touches blob content. The stored manifest
+ * must hash to the revision's `rootHash`, and every referenced blob
+ * must be present and hash to itself, all before one file is written.
+ * A `read-only` copy lands without write permission; a `proposal` copy
+ * is private and mutable and reaches the authoritative head only
+ * through an accepted proposal.
+ */
+export function materializeRevision(
+  store: ControlStore,
+  sessionId: string,
+  blobs: BlobStore,
+  revisionId: string,
+  destination: string,
+  options: MaterializeFlowOptions,
+): MaterializedCopy {
+  const session = requireOpenSession(store, sessionId);
+  // Policy first: bytes never leave the source for a denied
+  // destination (SPEC.md section 11.6).
+  const denied = checkRawTransfer(options.authority, "local");
+  if (denied !== null) {
+    throw denied;
+  }
+  const revision = store.getRevision(revisionId);
+  if (revision === null || revision.workspaceId !== session.workspaceId) {
+    throw invalidRequestError(
+      `Revision ${revisionId} does not exist in the workspace of session ${sessionId}.`,
+      { revisionId, sessionId },
+    );
+  }
+  const tree = store.getRevisionTree(revisionId);
+  if (tree === null) {
+    throw integrityFailureError(`manifest of ${revisionId}`, "recorded", "absent");
+  }
+  let entries: TreeEntry[];
+  try {
+    entries = JSON.parse(tree.entriesJson) as TreeEntry[];
+  } catch (error) {
+    throw integrityFailureError(
+      `manifest of ${revisionId}`,
+      "parseable JSON",
+      errorMessage(error),
+    );
+  }
+  const structural = checkTreeManifest(entries);
+  if (structural !== null) {
+    throw integrityFailureError(`manifest of ${revisionId}`, "valid entries", structural.code);
+  }
+  const computed = treeRootHash(entries);
+  if (computed !== revision.rootHash || computed !== tree.rootHash) {
+    throw integrityFailureError(`manifest of ${revisionId}`, revision.rootHash, computed);
+  }
+  // Every referenced blob must verify before the first file is
+  // written: a missing or corrupt blob leaves the destination empty.
+  for (const entry of entries) {
+    if (entry.kind !== "file") {
+      continue;
+    }
+    const hash = entry.contentHash;
+    if (hash === null || !blobs.verify(hash)) {
+      throw integrityFailureError(`blob ${String(entry.contentHash)}`, String(entry.contentHash), "absent");
+    }
+  }
+  const readOnly = options.mode === "read-only";
+  if (destinationOccupied(destination)) {
+    throw invalidRequestError(
+      `The materialization destination ${destination} is not empty.`,
+      { reason: "occupied-destination", destination },
+    );
+  }
+  materializeTree(entries, destination, (digest) => blobs.get(digest), { readOnly });
+
+  const record: WorkingCopyRecord = {
+    id: `wc-${randomUUID()}`,
+    sessionId,
+    baseRevisionId: revisionId,
+    rootPath: destination,
+    mode: options.mode,
+    createdAt: nowUtcTimestamp(),
+  };
+  store.insertWorkingCopy(record);
+  return { record, entryCount: entries.length, rootHash: computed };
+}
+
+/** Load one session and require it to accept new work. */
+function requireOpenSession(store: ControlStore, sessionId: string) {
+  const session = store.getSession(sessionId);
+  if (session === null) {
+    throw invalidRequestError(`Session ${sessionId} does not exist.`, { sessionId });
+  }
+  if (session.status !== "open") {
+    throw invalidRequestError(
+      `Session ${sessionId} is ${session.status}; it accepts no new copies.`,
+      { sessionId, status: session.status },
+    );
+  }
+  return session;
+}
+
+/** Whether a destination path exists with any content in it. */
+function destinationOccupied(destination: string): boolean {
+  try {
+    return readdirSync(destination).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** One-line message of an unknown error. */
+function errorMessage(error: unknown): string {
+  if (error !== null && typeof error === "object" && "message" in error) {
+    return String((error as { message: unknown }).message);
+  }
+  return String(error);
 }

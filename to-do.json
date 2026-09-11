@@ -403,7 +403,7 @@
       "id": "T017",
       "title": "Implement materialization and private working copies",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Transfer selected revisions into read-only snapshots or isolated mutable copies.",
       "depends_on": [
         "T008",

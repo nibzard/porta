@@ -222,6 +222,12 @@ export function buildTreeFromDirectory(
   return { entries, rootHash: treeRootHash(entries), blobRefs };
 }
 
+/** Options for materializing one manifest. */
+export interface MaterializeOptions {
+  /** Write files and directories without write permission. */
+  readOnly?: boolean;
+}
+
 /**
  * Materialize one manifest into a local directory.
  *
@@ -231,11 +237,16 @@ export function buildTreeFromDirectory(
  * fails with an explicit error before that file is written. Two paths
  * that differ only by Unicode normalization collide, because the
  * target filesystem cannot be assumed to keep them apart.
+ *
+ * With `readOnly`, every written file and directory lands without
+ * write permission: the result is a snapshot, advisory on platforms
+ * that let the owner override permissions.
  */
 export function materializeTree(
   entries: readonly TreeEntry[],
   destination: string,
   readBlob: (digest: Sha256Hex) => Uint8Array | null,
+  options: MaterializeOptions = {},
 ): void {
   const problem = checkTreeManifest(entries);
   if (problem !== null) {
@@ -243,9 +254,25 @@ export function materializeTree(
   }
   rejectNormalizationCollisions(entries);
   mkdirSync(destination, { recursive: true });
-  for (const entry of [...entries].sort((a, b) => compareTreePaths(a.path, b.path))) {
+  const sorted = [...entries].sort((a, b) => compareTreePaths(a.path, b.path));
+  for (const entry of sorted) {
     materializeEntry(entry, destination, readBlob);
   }
+  if (options.readOnly === true) {
+    // Restrict permissions only after every entry exists: a directory
+    // locked before its children are written refuses them.
+    for (const entry of sorted) {
+      chmodSync(join(destination, entry.path), fileMode(entry, true));
+    }
+  }
+}
+
+/** The permission bits one entry takes. */
+function fileMode(entry: TreeEntry, readOnly: boolean): number {
+  if (entry.kind === "directory") {
+    return readOnly ? 0o555 : 0o755;
+  }
+  return readOnly ? (entry.executable ? 0o555 : 0o444) : entry.executable ? 0o755 : 0o644;
 }
 
 // -- Internals ----------------------------------------------------------------
@@ -338,6 +365,7 @@ function materializeEntry(
         throw collision(entry.path, "a non-directory already occupies it");
       }
       mkdirSync(target, { recursive: true });
+      chmodSync(target, 0o755);
       return;
     }
     if (existsSync(target)) {
@@ -355,10 +383,10 @@ function materializeEntry(
       throw integrityFailureError(`blob ${hash}`, hash, "absent");
     }
     mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, data, { mode: entry.executable ? 0o755 : 0o644 });
-    if (entry.executable) {
-      chmodSync(target, 0o755);
-    }
+    writeFileSync(target, data);
+    // Chmod after the write: the mode option of a create is masked by
+    // the process umask, and materialization states exact permissions.
+    chmodSync(target, fileMode(entry, false));
   } catch (error) {
     const code = fsErrorCode(error);
     if (code === "ENAMETOOLONG" || code === "EINVAL") {

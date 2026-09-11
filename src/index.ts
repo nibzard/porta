@@ -168,11 +168,13 @@ export {
 } from "./runtime/acquisition.js";
 export type { AttachOptions, ReconcileOptions } from "./runtime/acquisition.js";
 
-// Runtime: workspace import and checkpoints over the directory bridge.
-export { checkpointWorkspace } from "./runtime/workspace.js";
+// Runtime: workspace import, checkpoints, and materialization.
+export { checkpointWorkspace, materializeRevision } from "./runtime/workspace.js";
 export type {
   CheckpointOptions,
   CheckpointOutcome,
+  MaterializeFlowOptions,
+  MaterializedCopy,
   SourceStability,
 } from "./runtime/workspace.js";
 

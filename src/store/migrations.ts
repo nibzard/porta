@@ -142,6 +142,28 @@ export const BRIDGE_IMPORTS: Migration = {
   ],
 };
 
+/** Revision manifests and working-copy registry (SPEC.md sections 11.1 and 11.3). */
+export const REVISION_TREES: Migration = {
+  id: 4,
+  name: "revision-trees",
+  statements: [
+    `CREATE TABLE revision_trees (
+      revision_id TEXT PRIMARY KEY,
+      root_hash TEXT NOT NULL,
+      entries_json TEXT NOT NULL
+    )`,
+    `CREATE TABLE working_copies (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES sessions(id),
+      base_revision_id TEXT NOT NULL,
+      root_path TEXT NOT NULL,
+      mode TEXT NOT NULL CHECK (mode IN ('read-only', 'proposal')),
+      created_at TEXT NOT NULL
+    )`,
+    `CREATE INDEX idx_working_copies_session ON working_copies(session_id)`,
+  ],
+};
+
 /** Durable mutation leases with fencing tokens (SPEC.md sections 5.2, 8.1). */
 export const MUTATION_LEASES: Migration = {
   id: 2,
@@ -161,7 +183,12 @@ export const MUTATION_LEASES: Migration = {
   ],
 };
 
-export const MIGRATIONS: readonly Migration[] = [INITIAL_SCHEMA, MUTATION_LEASES, BRIDGE_IMPORTS];
+export const MIGRATIONS: readonly Migration[] = [
+  INITIAL_SCHEMA,
+  MUTATION_LEASES,
+  BRIDGE_IMPORTS,
+  REVISION_TREES,
+];
 
 /** Tables with compare-and-swap support and their writable columns. */
 export const CAS_TABLES = {

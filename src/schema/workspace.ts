@@ -71,6 +71,39 @@ export const workspaceProposalSchema = {
   },
 } as const;
 
+/**
+ * One materialized copy of a revision (SPEC.md sections 11.1 and 11.3).
+ *
+ * A `read-only` copy is a snapshot: its bytes are written without
+ * write permission. A `proposal` copy is private and mutable; it
+ * reaches the authoritative head only through an accepted proposal,
+ * never through the bridge.
+ */
+export interface WorkingCopyRecord {
+  id: Identifier;
+  sessionId: Identifier;
+  baseRevisionId: Identifier;
+  rootPath: string;
+  mode: WorkspaceMode;
+  createdAt: UtcTimestamp;
+}
+
+export const workingCopyRecordSchema = {
+  $id: "https://portable.dev/schema/working-copy-record.json",
+  $defs: DEFS,
+  type: "object",
+  required: ["id", "sessionId", "baseRevisionId", "rootPath", "mode", "createdAt"],
+  additionalProperties: false,
+  properties: {
+    id: { $ref: "#/$defs/identifier" },
+    sessionId: { $ref: "#/$defs/identifier" },
+    baseRevisionId: { $ref: "#/$defs/identifier" },
+    rootPath: { type: "string", minLength: 1, maxLength: 4096 },
+    mode: { enum: ["read-only", "proposal"] },
+    createdAt: { $ref: "#/$defs/timestamp" },
+  },
+} as const;
+
 /** Source of a checkpoint: a managed copy or the local bridge. */
 export type CheckpointSource =
   | { kind: "attachment"; attachment: AttachmentRef }

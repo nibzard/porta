@@ -1,5 +1,6 @@
 import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
 import { nowUtcTimestamp } from "../core/time.js";
+import { resolve } from "node:path";
 import { assertValid } from "../schema/validate.js";
 import { portableError } from "../core/errors.js";
 import type { PortableError } from "../schema/error.js";
@@ -21,7 +22,14 @@ import {
   workspaceProposalSchema,
   workspaceRevisionSchema,
 } from "../schema/workspace.js";
-import type { WorkspaceProposal, WorkspaceRevision } from "../schema/workspace.js";
+import {
+  workingCopyRecordSchema,
+} from "../schema/workspace.js";
+import type {
+  WorkspaceProposal,
+  WorkingCopyRecord,
+  WorkspaceRevision,
+} from "../schema/workspace.js";
 import { CAS_TABLES, MIGRATIONS, TABLES_WITH_UPDATED_AT } from "./migrations.js";
 
 /** Values a compare-and-swap column may carry. */
@@ -1141,6 +1149,104 @@ export class ControlStore {
       return null;
     }
     return { revisionId: row.revision_id as string, inputHash: row.input_hash as string };
+  }
+
+  /**
+   * Store the canonical tree manifest of one revision.
+   *
+   * The manifest is what later materialization reads; its stored root
+   * hash must match the revision's `rootHash` or the copy refuses to
+   * build (SPEC.md sections 11.1 and 11.3).
+   */
+  insertRevisionTree(revisionId: string, rootHash: string, entriesJson: string): void {
+    this.run(
+      "INSERT INTO revision_trees (revision_id, root_hash, entries_json) VALUES (?, ?, ?)",
+      revisionId,
+      rootHash,
+      entriesJson,
+    );
+  }
+
+  /** The stored manifest of one revision, or null when none recorded. */
+  getRevisionTree(revisionId: string): { rootHash: string; entriesJson: string } | null {
+    const row = this.get(
+      "SELECT root_hash, entries_json FROM revision_trees WHERE revision_id = ?",
+      revisionId,
+    );
+    if (row === undefined) {
+      return null;
+    }
+    return { rootHash: row.root_hash as string, entriesJson: row.entries_json as string };
+  }
+
+  /** Register one materialized copy of a revision. */
+  insertWorkingCopy(record: WorkingCopyRecord): void {
+    assertValid(workingCopyRecordSchema, record);
+    this.run(
+      "INSERT INTO working_copies (id, session_id, base_revision_id, root_path, mode, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      record.id,
+      record.sessionId,
+      record.baseRevisionId,
+      record.rootPath,
+      record.mode,
+      record.createdAt,
+    );
+  }
+
+  /** One working copy by its identifier. */
+  getWorkingCopy(copyId: string): WorkingCopyRecord | null {
+    return ControlStore.parse<WorkingCopyRecord>(
+      this.get(
+        "SELECT id, session_id, base_revision_id, root_path, mode, created_at FROM working_copies WHERE id = ?",
+        copyId,
+      ),
+      workingCopyRecordSchema,
+      "working copy",
+    );
+  }
+
+  /**
+   * The working copy of one session rooted at one path, if any.
+   *
+   * Paths compare by their resolved absolute form, so a trailing slash
+   * or a relative spelling names the same copy.
+   */
+  getWorkingCopyByPath(sessionId: string, rootPath: string): WorkingCopyRecord | null {
+    const rows = this.all(
+      "SELECT id, session_id, base_revision_id, root_path, mode, created_at FROM working_copies WHERE session_id = ?",
+      sessionId,
+    );
+    const wanted = resolve(rootPath);
+    for (const row of rows) {
+      if (resolve(row.root_path as string) === wanted) {
+        return {
+          id: row.id as string,
+          sessionId: row.session_id as string,
+          baseRevisionId: row.base_revision_id as string,
+          rootPath: row.root_path as string,
+          mode: row.mode as WorkingCopyRecord["mode"],
+          createdAt: row.created_at as string,
+        };
+      }
+    }
+    return null;
+  }
+
+  /** Every working copy of one session, oldest first. */
+  listWorkingCopies(sessionId: string): WorkingCopyRecord[] {
+    return (
+      this.all(
+        "SELECT id, session_id, base_revision_id, root_path, mode, created_at FROM working_copies WHERE session_id = ? ORDER BY created_at, id",
+        sessionId,
+      ) as Array<Record<string, unknown>>
+    ).map((row) => ({
+      id: row.id as string,
+      sessionId: row.session_id as string,
+      baseRevisionId: row.base_revision_id as string,
+      rootPath: row.root_path as string,
+      mode: row.mode as WorkingCopyRecord["mode"],
+      createdAt: row.created_at as string,
+    }));
   }
 
   getRevision(revisionId: string): WorkspaceRevision | null {

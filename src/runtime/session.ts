@@ -21,8 +21,13 @@ import {
   runCleanup as runCleanupFlow,
 } from "./lifecycle.js";
 import type { CleanupOptions, CleanupReport, RenewOptions, RenewOutcome } from "./lifecycle.js";
-import { checkpointWorkspace } from "./workspace.js";
-import type { CheckpointOptions, CheckpointOutcome } from "./workspace.js";
+import { checkpointWorkspace, materializeRevision } from "./workspace.js";
+import type {
+  CheckpointOptions,
+  CheckpointOutcome,
+  MaterializeFlowOptions,
+  MaterializedCopy,
+} from "./workspace.js";
 import type { BlobStore } from "../store/blob-store.js";
 import type { CheckpointRequest } from "../schema/workspace.js";
 import type { AttachmentSummary } from "../schema/session.js";
@@ -189,6 +194,23 @@ export class ManagedSession {
     options?: CheckpointOptions,
   ): Promise<CheckpointOutcome> {
     return checkpointWorkspace(this.store, this.id, blobs, request, options);
+  }
+
+  /**
+   * Materialize one revision into a local directory.
+   *
+   * Transfer policy is checked before any byte is read, the manifest
+   * must hash to the revision's root hash, and a `proposal` copy
+   * reaches the authoritative head only through an accepted proposal
+   * (SPEC.md sections 11.3 and 11.6).
+   */
+  async materialize(
+    blobs: BlobStore,
+    revisionId: string,
+    destination: string,
+    options: MaterializeFlowOptions,
+  ): Promise<MaterializedCopy> {
+    return materializeRevision(this.store, this.id, blobs, revisionId, destination, options);
   }
 
   /**
