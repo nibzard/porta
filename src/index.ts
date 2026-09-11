@@ -141,6 +141,23 @@ export type { EventBatch, EventRedactor } from "./store/event-stream.js";
 export { BlobStore } from "./store/blob-store.js";
 export type { BlobLimits, BlobPutResult, BlobRef } from "./store/blob-store.js";
 
+// Canonical workspace trees and paths.
+export {
+  buildTreeFromDirectory,
+  canonicalTreeJson,
+  checkTreeManifest,
+  compareTreePaths,
+  materializeTree,
+  treeRootHash,
+  validateWorkspacePath,
+} from "./store/workspace-tree.js";
+export type {
+  ImportedTree,
+  ImportOptions,
+  TreeEntry,
+  TreeEntryKind,
+} from "./store/workspace-tree.js";
+
 // Runtime: session identity and inspection.
 export { ManagedSession, PortableRuntime } from "./runtime/session.js";
 

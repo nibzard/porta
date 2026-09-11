@@ -352,7 +352,7 @@
       "id": "T015",
       "title": "Implement canonical workspace trees and paths",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Build sorted tree manifests with the exact hash encoding and portable metadata rules.",
       "depends_on": [
         "T002",
