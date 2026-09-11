@@ -21,20 +21,33 @@ export function uniqueEventKey(event: PortableEvent): string {
 }
 
 /**
+ * Removes credentials from event data before it is validated and
+ * persisted. Secret references survive; released values do not.
+ */
+export type EventRedactor = (
+  data: Record<string, unknown>,
+) => Record<string, unknown>;
+
+/**
  * Durable per-session journal stream (SPEC.md sections 9.3 and 18.1).
  *
  * Appends validate the envelope and the type-specific payload, then commit
  * the event with its sequence in one transaction. Readers resume by
  * sequence; because delivery may repeat, consumers deduplicate on the
  * event key rather than assuming exactly-once delivery.
+ *
+ * An optional redactor runs before validation on every append, so
+ * journal entries never store released credential values.
  */
 export class SessionEventStream {
   private readonly store: ControlStore;
+  private readonly redactor: EventRedactor | undefined;
   readonly sessionId: string;
 
-  constructor(store: ControlStore, sessionId: string) {
+  constructor(store: ControlStore, sessionId: string, redactor?: EventRedactor) {
     this.store = store;
     this.sessionId = sessionId;
+    this.redactor = redactor;
   }
 
   /** Append one validated event. */
@@ -43,8 +56,8 @@ export class SessionEventStream {
     subjectId: string,
     data: Record<string, unknown>,
   ): PortableEvent {
-    checkPayload(type, subjectId, data);
-    return this.store.appendEvent(this.sessionId, type, subjectId, data);
+    const clean = this.prepare(type, subjectId, data);
+    return this.store.appendEvent(this.sessionId, type, subjectId, clean);
   }
 
   /**
@@ -59,12 +72,23 @@ export class SessionEventStream {
     data: Record<string, unknown>,
     mutate: () => T,
   ): { result: T; event: PortableEvent } {
-    checkPayload(type, subjectId, data);
+    const clean = this.prepare(type, subjectId, data);
     return this.store.transaction(() => {
       const result = mutate();
-      const event = this.store.appendEvent(this.sessionId, type, subjectId, data);
+      const event = this.store.appendEvent(this.sessionId, type, subjectId, clean);
       return { result, event };
     });
+  }
+
+  /** Redact, then validate, the data of one pending event. */
+  private prepare(
+    type: EventTypeName | string,
+    subjectId: string,
+    data: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const clean = this.redactor === undefined ? data : this.redactor(data);
+    checkPayload(type, subjectId, clean);
+    return clean;
   }
 
   /** Read committed events after a sequence, in order. */

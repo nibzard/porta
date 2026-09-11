@@ -204,7 +204,7 @@
       "id": "T009",
       "title": "Implement secret reference resolution",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Resolve authorized secret references at use time and keep credentials out of public metadata.",
       "depends_on": [
         "T008"

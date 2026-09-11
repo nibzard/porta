@@ -83,6 +83,19 @@ export { isUtcTimestamp, nowUtcTimestamp } from "./core/time.js";
 // Trusted policy evaluation.
 export { PolicyAuthority } from "./core/policy.js";
 
+// Authorized secret resolution.
+export {
+  AuthorizedSecretResolver,
+  ResolvedSecret,
+  checkRawTransfer,
+  checkRetrievalLocation,
+} from "./core/secrets.js";
+export type {
+  CurrentAuthority,
+  SecretLookup,
+  SecretResolverOptions,
+} from "./core/secrets.js";
+
 // Journal stream (durability helpers over the control store).
 export {
   EventDeduplicator,
@@ -90,7 +103,7 @@ export {
   uniqueEventKey,
   validateStoredEvent,
 } from "./store/event-stream.js";
-export type { EventBatch } from "./store/event-stream.js";
+export type { EventBatch, EventRedactor } from "./store/event-stream.js";
 
 // Runtime: session identity and inspection.
 export { ManagedSession, PortableRuntime } from "./runtime/session.js";
