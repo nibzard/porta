@@ -500,7 +500,7 @@
       "id": "T021",
       "title": "Implement invocation admission and request deduplication",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Atomically admit operations and persist request keys and input hashes before dispatch.",
       "depends_on": [
         "T004",

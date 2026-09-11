@@ -858,7 +858,7 @@ function hashOf(request: EnvironmentRequest): string {
 }
 
 /** JSON with sorted keys, so equal requests hash equal. */
-function canonicalJson(value: unknown): string {
+export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) {
     return `[${value.map(canonicalJson).join(",")}]`;
   }

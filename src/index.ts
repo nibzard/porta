@@ -224,6 +224,10 @@ export type {
   RenewOutcome,
 } from "./runtime/lifecycle.js";
 
+// Runtime: invocation admission and request deduplication.
+export { admitInvocation } from "./runtime/admission.js";
+export type { AdmissionOptions, AdmissionOutcome } from "./runtime/admission.js";
+
 // Records and schemas.
 export * from "./schema/error.js";
 export * from "./schema/event.js";

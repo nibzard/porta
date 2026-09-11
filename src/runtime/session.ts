@@ -29,6 +29,8 @@ import {
 } from "./workspace.js";
 import { exportRevision, recoverBridgeExport } from "./export.js";
 import { WorkspaceFiles } from "./workspace-capability.js";
+import { admitInvocation } from "./admission.js";
+import type { AdmissionOptions, AdmissionOutcome } from "./admission.js";
 import type {
   AcceptOutcome,
   CheckpointOptions,
@@ -42,6 +44,7 @@ import type { ProposalRequest } from "../schema/workspace.js";
 import type { ExportFlowOptions, ExportOutcome, ExportRequest } from "./export.js";
 import type { BlobStore } from "../store/blob-store.js";
 import type { CheckpointRequest } from "../schema/workspace.js";
+import type { InvocationRequest } from "../schema/operation.js";
 import type { AttachmentSummary } from "../schema/session.js";
 
 /**
@@ -262,6 +265,21 @@ export class ManagedSession {
    */
   files(): WorkspaceFiles {
     return new WorkspaceFiles(this.store, this.id);
+  }
+
+  /**
+   * Admit one invocation and record its operation durably.
+   *
+   * Session, attachment, generation, policy, and lease check in one
+   * transaction with the insert. A repeated request key returns its
+   * existing operation; the same key with different input conflicts
+   * (SPEC.md sections 5.3 and 9.1).
+   */
+  async admit(
+    request: InvocationRequest,
+    options: AdmissionOptions,
+  ): Promise<AdmissionOutcome> {
+    return admitInvocation(this.store, this.id, request, options);
   }
 
   /** Complete or restore one interrupted export of a destination. */
