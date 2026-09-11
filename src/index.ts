@@ -186,6 +186,10 @@ export type {
   SourceStability,
 } from "./runtime/workspace.js";
 
+// Runtime: local export and bridge crash recovery.
+export { exportRevision, recoverBridgeExport } from "./runtime/export.js";
+export type { ExportFlowOptions, ExportOutcome, ExportRequest } from "./runtime/export.js";
+
 // Runtime: lease renewal and allocation cleanup.
 export {
   checkAttachmentAcceptsOperations,

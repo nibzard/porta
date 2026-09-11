@@ -27,6 +27,7 @@ import {
   materializeRevision,
   proposeWorkspaceChange,
 } from "./workspace.js";
+import { exportRevision, recoverBridgeExport } from "./export.js";
 import type {
   AcceptOutcome,
   CheckpointOptions,
@@ -37,6 +38,7 @@ import type {
   ProposeOptions,
 } from "./workspace.js";
 import type { ProposalRequest } from "../schema/workspace.js";
+import type { ExportFlowOptions, ExportOutcome, ExportRequest } from "./export.js";
 import type { BlobStore } from "../store/blob-store.js";
 import type { CheckpointRequest } from "../schema/workspace.js";
 import type { AttachmentSummary } from "../schema/session.js";
@@ -239,6 +241,25 @@ export class ManagedSession {
   /** Accept one proposal and move the workspace head atomically. */
   async accept(proposalId: string): Promise<AcceptOutcome> {
     return acceptProposal(this.store, this.id, proposalId);
+  }
+
+  /**
+   * Export one revision into a local directory.
+   *
+   * The destination is verified against its recorded base before any
+   * file changes, and an interrupted apply is recovered first.
+   */
+  async export(blobs: BlobStore, request: ExportRequest, options: ExportFlowOptions): Promise<ExportOutcome> {
+    return exportRevision(this.store, this.id, blobs, request, options);
+  }
+
+  /** Complete or restore one interrupted export of a destination. */
+  async recoverExport(
+    blobs: BlobStore,
+    destination: string,
+    options: ExportFlowOptions,
+  ): Promise<ExportOutcome> {
+    return recoverBridgeExport(this.store, this.id, blobs, destination, options);
   }
 
   /**

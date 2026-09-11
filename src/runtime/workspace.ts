@@ -92,8 +92,11 @@ export interface CheckpointOutcome {
   exclusions: string[];
 }
 
-const DEFAULT_LOCK_FILE = ".portable-bridge.lock";
-const DEFAULT_STALE_LOCK_MS = 300_000;
+/** Lock file the bridge writes inside a source or destination. */
+export const DEFAULT_LOCK_FILE = ".portable-bridge.lock";
+
+/** Age at which a held bridge lock is taken over, in milliseconds. */
+export const DEFAULT_STALE_LOCK_MS = 300_000;
 const IMPORT_EXTENSION = "portable.runtime.import";
 const PROPOSAL_EXTENSION = "portable.runtime.proposal";
 
@@ -634,7 +637,7 @@ function checkImportLimits(blobRefs: readonly BlobRef[], limits: BlobLimits | un
  * younger than the stale age refuses the import, and a stale lock is
  * taken over from a crashed importer.
  */
-function acquireBridgeLock(rootPath: string, lockFileName: string, staleLockMs: number): void {
+export function acquireBridgeLock(rootPath: string, lockFileName: string, staleLockMs: number): void {
   const lockPath = join(rootPath, lockFileName);
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
@@ -790,7 +793,7 @@ export function materializeRevision(
 }
 
 /** Load one session and require it to accept new work. */
-function requireOpenSession(store: ControlStore, sessionId: string) {
+export function requireOpenSession(store: ControlStore, sessionId: string) {
   const session = store.getSession(sessionId);
   if (session === null) {
     throw invalidRequestError(`Session ${sessionId} does not exist.`, { sessionId });

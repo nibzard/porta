@@ -214,12 +214,57 @@ export function buildTreeFromDirectory(
   const entries: TreeEntry[] = [];
   const blobRefs: BlobRef[] = [];
   const exclusions = new Set(options.exclusions ?? []);
-  collect(sourceRoot, "", exclusions, blobs, entries, blobRefs);
+  collect(sourceRoot, "", exclusions, (absolute) => {
+    const stored = blobs.put(readFileSync(absolute));
+    blobRefs.push({ digest: stored.digest, sizeBytes: stored.sizeBytes });
+    return stored;
+  }, entries);
   const problem = checkTreeManifest(entries);
   if (problem !== null) {
     throw problem;
   }
   return { entries, rootHash: treeRootHash(entries), blobRefs };
+}
+
+/** The outcome of hashing one directory without storing anything. */
+export interface ScannedTree {
+  /** Canonical, sorted manifest entries. */
+  entries: TreeEntry[];
+  /** Digest of the canonical manifest encoding. */
+  rootHash: Sha256Hex;
+  /** Combined size of the scanned files in bytes. */
+  totalBytes: number;
+}
+
+/**
+ * Hash one local directory into a manifest, writing nothing.
+ *
+ * The scanner serves export validation: it computes the tree a
+ * directory holds right now, so the caller can compare it with a
+ * recorded base before changing anything. It applies the same entry
+ * rules as an import, including the rejection of symbolic links and
+ * special files.
+ */
+export function scanTreeFromDirectory(
+  sourceRoot: string,
+  options: ImportOptions = {},
+): ScannedTree {
+  const entries: TreeEntry[] = [];
+  let totalBytes = 0;
+  const exclusions = new Set(options.exclusions ?? []);
+  collect(sourceRoot, "", exclusions, (absolute) => {
+    const data = readFileSync(absolute);
+    totalBytes += data.byteLength;
+    return {
+      digest: createHash("sha256").update(data).digest("hex") as Sha256Hex,
+      sizeBytes: data.byteLength,
+    };
+  }, entries);
+  const problem = checkTreeManifest(entries);
+  if (problem !== null) {
+    throw problem;
+  }
+  return { entries, rootHash: treeRootHash(entries), totalBytes };
 }
 
 /** Options for materializing one manifest. */
@@ -277,14 +322,16 @@ function fileMode(entry: TreeEntry, readOnly: boolean): number {
 
 // -- Internals ----------------------------------------------------------------
 
-/** Walk one source directory, collecting entries and storing blobs. */
+/** Hash one file into its digest and size, storing it or not. */
+type FileHasher = (absolute: string) => { digest: Sha256Hex; sizeBytes: number };
+
+/** Walk one source directory, collecting entries through one hasher. */
 function collect(
   root: string,
   relative: string,
   exclusions: ReadonlySet<string>,
-  blobs: BlobStore,
+  hashFile: FileHasher,
   entries: TreeEntry[],
-  blobRefs: BlobRef[],
 ): void {
   for (const dirent of readdirSync(join(root, relative), { withFileTypes: true })) {
     const path = relative === "" ? dirent.name : `${relative}/${dirent.name}`;
@@ -300,7 +347,7 @@ function collect(
     }
     if (dirent.isDirectory()) {
       entries.push({ path, kind: "directory", executable: false, contentHash: null });
-      collect(root, path, exclusions, blobs, entries, blobRefs);
+      collect(root, path, exclusions, hashFile, entries);
       continue;
     }
     if (!dirent.isFile()) {
@@ -311,13 +358,12 @@ function collect(
       });
     }
     const absolute = join(root, path);
-    const stored = blobs.put(readFileSync(absolute));
-    blobRefs.push({ digest: stored.digest, sizeBytes: stored.sizeBytes });
+    const hashed = hashFile(absolute);
     entries.push({
       path,
       kind: "file",
       executable: (statSync(absolute).mode & 0o111) !== 0,
-      contentHash: stored.digest,
+      contentHash: hashed.digest,
     });
   }
 }
