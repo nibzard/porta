@@ -1104,6 +1104,45 @@ export class ControlStore {
     });
   }
 
+  /**
+   * Record one completed bridge import under its request key.
+   *
+   * The pair of session and request key is unique: a second import with
+   * the same key fails with a unique violation instead of replacing
+   * the recorded revision (SPEC.md sections 5.2 and 11.4).
+   */
+  insertBridgeImport(
+    sessionId: string,
+    requestKey: string,
+    revisionId: string,
+    inputHash: string,
+  ): void {
+    this.run(
+      "INSERT INTO bridge_imports (session_id, request_key, revision_id, input_hash, created_at) VALUES (?, ?, ?, ?, ?)",
+      sessionId,
+      requestKey,
+      revisionId,
+      inputHash,
+      nowUtcTimestamp(),
+    );
+  }
+
+  /** The recorded import of one request key, or null when none ran. */
+  getBridgeImport(
+    sessionId: string,
+    requestKey: string,
+  ): { revisionId: string; inputHash: string } | null {
+    const row = this.get(
+      "SELECT revision_id, input_hash FROM bridge_imports WHERE session_id = ? AND request_key = ?",
+      sessionId,
+      requestKey,
+    );
+    if (row === undefined) {
+      return null;
+    }
+    return { revisionId: row.revision_id as string, inputHash: row.input_hash as string };
+  }
+
   getRevision(revisionId: string): WorkspaceRevision | null {
     return ControlStore.parse<WorkspaceRevision>(
       this.get("SELECT record_json FROM revisions WHERE id = ?", revisionId),

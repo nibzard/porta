@@ -377,7 +377,7 @@
       "id": "T016",
       "title": "Implement stable workspace import and checkpoints",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Create immutable revisions from locked or snapshotted sources with recorded import exclusions.",
       "depends_on": [
         "T004",

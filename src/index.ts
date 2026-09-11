@@ -168,6 +168,14 @@ export {
 } from "./runtime/acquisition.js";
 export type { AttachOptions, ReconcileOptions } from "./runtime/acquisition.js";
 
+// Runtime: workspace import and checkpoints over the directory bridge.
+export { checkpointWorkspace } from "./runtime/workspace.js";
+export type {
+  CheckpointOptions,
+  CheckpointOutcome,
+  SourceStability,
+} from "./runtime/workspace.js";
+
 // Runtime: lease renewal and allocation cleanup.
 export {
   checkAttachmentAcceptsOperations,

@@ -126,6 +126,22 @@ export const INITIAL_SCHEMA: Migration = {
   ],
 };
 
+/** Bridge import deduplication (SPEC.md sections 11.4 and 5.2). */
+export const BRIDGE_IMPORTS: Migration = {
+  id: 3,
+  name: "bridge-imports",
+  statements: [
+    `CREATE TABLE bridge_imports (
+      session_id TEXT NOT NULL REFERENCES sessions(id),
+      request_key TEXT NOT NULL,
+      revision_id TEXT NOT NULL,
+      input_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (session_id, request_key)
+    )`,
+  ],
+};
+
 /** Durable mutation leases with fencing tokens (SPEC.md sections 5.2, 8.1). */
 export const MUTATION_LEASES: Migration = {
   id: 2,
@@ -145,7 +161,7 @@ export const MUTATION_LEASES: Migration = {
   ],
 };
 
-export const MIGRATIONS: readonly Migration[] = [INITIAL_SCHEMA, MUTATION_LEASES];
+export const MIGRATIONS: readonly Migration[] = [INITIAL_SCHEMA, MUTATION_LEASES, BRIDGE_IMPORTS];
 
 /** Tables with compare-and-swap support and their writable columns. */
 export const CAS_TABLES = {

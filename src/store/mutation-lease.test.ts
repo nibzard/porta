@@ -237,7 +237,7 @@ test("migrations apply in order and rerun safely", () => {
   const store = ControlStore.open(path);
   store.close();
   const reopened = ControlStore.open(path);
-  assert.deepEqual(reopened.appliedMigrations(), [1, 2]);
+  assert.deepEqual(reopened.appliedMigrations(), [1, 2, 3]);
   reopened.close();
   rmSync(dir, { recursive: true, force: true });
 });

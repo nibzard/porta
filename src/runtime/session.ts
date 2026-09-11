@@ -21,6 +21,10 @@ import {
   runCleanup as runCleanupFlow,
 } from "./lifecycle.js";
 import type { CleanupOptions, CleanupReport, RenewOptions, RenewOutcome } from "./lifecycle.js";
+import { checkpointWorkspace } from "./workspace.js";
+import type { CheckpointOptions, CheckpointOutcome } from "./workspace.js";
+import type { BlobStore } from "../store/blob-store.js";
+import type { CheckpointRequest } from "../schema/workspace.js";
 import type { AttachmentSummary } from "../schema/session.js";
 
 /**
@@ -169,6 +173,22 @@ export class ManagedSession {
    */
   async renewAttachment(attachmentId: string, options: RenewOptions): Promise<RenewOutcome> {
     return renewAttachmentFlow(this.store, this.id, this.record().policyRef, attachmentId, options);
+  }
+
+  /**
+   * Checkpoint the local directory bridge into a workspace revision.
+   *
+   * The first import creates the workspace's first revision; later
+   * imports name the head they expect. The caller declares how the
+   * source's writers were made quiescent, and the runtime refuses an
+   * undeclared source (SPEC.md section 11.4).
+   */
+  async checkpoint(
+    blobs: BlobStore,
+    request: CheckpointRequest,
+    options?: CheckpointOptions,
+  ): Promise<CheckpointOutcome> {
+    return checkpointWorkspace(this.store, this.id, blobs, request, options);
   }
 
   /**
