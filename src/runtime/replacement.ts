@@ -55,6 +55,7 @@ import { markOperationDispatched, settleOperation } from "./outcomes.js";
 import type { OperationOutcome } from "./outcomes.js";
 import { bindResource } from "./resources.js";
 import type { BindTransport } from "./resources.js";
+import { invalidateServiceDependencies } from "./service-connections.js";
 import { randomUUID } from "node:crypto";
 
 /**
@@ -1636,6 +1637,20 @@ export function switchReplacement(
             attachmentId,
           });
         }
+      }
+
+      // Connections that depend on the replaced generation die with
+      // it, while the browser sessions that own them keep their own
+      // attachments and stay valid (SPEC.md sections 10, 14.6).
+      const sweptConnections = invalidateServiceDependencies(
+        store,
+        sessionId,
+        { attachmentId, generation: sourceGeneration },
+        "compute-generation-replaced",
+        options.redactor === undefined ? undefined : { redactor: options.redactor },
+      );
+      for (const swept of sweptConnections) {
+        invalidatedResourceIds.push(swept.ref.id);
       }
 
       // Candidate bindings keep their identities and move to the new

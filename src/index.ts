@@ -443,6 +443,32 @@ export type {
   ServiceOperation,
 } from "./runtime/service-capability.js";
 
+// Runtime: authorized service exposure and connections (SPEC.md
+// sections 10 and 14.6).
+export {
+  SERVICE_AUDIENCE_ATTACHMENT_EXTENSION,
+  SERVICE_AUDIENCE_KIND_EXTENSION,
+  SERVICE_COMPUTE_ATTACHMENT_EXTENSION,
+  SERVICE_COMPUTE_GENERATION_EXTENSION,
+  SERVICE_HOST_EXTENSION,
+  SERVICE_ID_EXTENSION,
+  SERVICE_PORT_EXTENSION,
+  SERVICE_PROTOCOL_EXTENSION,
+  SESSION_SERVICE_HOST,
+  checkConnectionStanding,
+  closeService,
+  connectService,
+  exposeService,
+  invalidateServiceDependencies,
+  serviceAudienceKey,
+} from "./runtime/service-connections.js";
+export type {
+  ClosedService,
+  ConnectedService,
+  ExposedService,
+  ServiceFlowOptions,
+} from "./runtime/service-connections.js";
+
 // Adapter: local process execution under the host account.
 export {
   LOCAL_PROCESS_PROVIDER_ID,

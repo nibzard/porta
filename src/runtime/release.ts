@@ -16,6 +16,7 @@ import { StoreError } from "../store/control-store.js";
 import type { ControlStore } from "../store/control-store.js";
 import { storedRequestOf } from "./acquisition.js";
 import { invalidateOwnedResources } from "./resources.js";
+import { invalidateServiceDependencies } from "./service-connections.js";
 
 /**
  * Attachment release, session close, and session reopen (SPEC.md
@@ -521,6 +522,18 @@ function confirmRelease(
       current.generation,
       "attachment-released",
       facts.redactor === undefined ? undefined : { redactor: facts.redactor },
+    );
+    // Connections served by the released generation die with it; the
+    // browser sessions that own them keep their own attachments
+    // (SPEC.md section 14.6).
+    invalidated = invalidated.concat(
+      invalidateServiceDependencies(
+        store,
+        sessionId,
+        { attachmentId, generation: current.generation },
+        "compute-generation-released",
+        facts.redactor === undefined ? undefined : { redactor: facts.redactor },
+      ),
     );
   });
   return {

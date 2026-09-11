@@ -906,6 +906,23 @@ export class ControlStore {
   }
 
   /**
+   * Every binding of one session, oldest first.
+   *
+   * Dependency sweeps read this list to find bindings no owner query
+   * reaches: a service connection is owned by its consumer but dies
+   * with the serving compute generation (SPEC.md section 14.6).
+   */
+  listResourceBindings(sessionId: string): ResourceBindingRecord[] {
+    const rows = this.all(
+      "SELECT record_json FROM resource_bindings WHERE session_id = ? ORDER BY bound_at, id",
+      sessionId,
+    );
+    return rows.map(
+      (row) => JSON.parse(row.record_json as string) as ResourceBindingRecord,
+    );
+  }
+
+  /**
    * Every binding one attachment generation owns, bound ones first.
    *
    * Replacement and release sweeps read this list to invalidate exactly

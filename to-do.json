@@ -1101,7 +1101,7 @@
     "id": "T044",
     "title": "Implement authorized service connections",
     "priority": 2,
-    "status": "todo",
+    "status": "done",
     "details": "Expose application ports and bind an authorized browser consumer to the service.",
     "depends_on": [
       "T008",
