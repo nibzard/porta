@@ -84,7 +84,7 @@
       "id": "T004",
       "title": "Implement the durable control store",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Add a local transactional database, migrations, durable records, and atomic compare-and-swap operations.",
       "depends_on": [
         "T002",
