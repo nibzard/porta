@@ -20,7 +20,7 @@
  *   schemas, and validation.
  */
 
-export { VERSION } from "./version.js";
+export { SPEC_VERSION, VERSION } from "./version.js";
 
 // Scalar contract types and shared schema definitions.
 export * from "./schema/defs.js";
@@ -664,3 +664,17 @@ export * from "./schema/workspace.js";
 export * from "./schema/handoff.js";
 export * from "./schema/bundle.js";
 export * from "./schema/library.js";
+export * from "./schema/conformance.js";
+
+// Conformance: the reusable runner over loaded adapters (SPEC.md
+// section 21).
+export { runConformance } from "./conformance/runner.js";
+export type {
+  ConformanceCase,
+  ConformanceCaseAnswer,
+  ConformanceContext,
+  ConformanceEffects,
+  ConformanceOptions,
+  ConformanceSuite,
+  ConformanceTestAuthority,
+} from "./conformance/runner.js";

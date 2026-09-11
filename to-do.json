@@ -1332,7 +1332,7 @@
     "id": "T053",
     "title": "Implement the reusable conformance runner",
     "priority": 2,
-    "status": "todo",
+    "status": "done",
     "details": "Load adapters and execute capability profiles with machine-readable reports.",
     "depends_on": [
       "T002",
