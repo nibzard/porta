@@ -328,7 +328,7 @@
       "id": "T014",
       "title": "Implement content-addressed blob storage",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Store and retrieve durable SHA-256 blobs with integrity and size checks.",
       "depends_on": [
         "T004",

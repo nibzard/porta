@@ -137,6 +137,10 @@ export {
 } from "./store/event-stream.js";
 export type { EventBatch, EventRedactor } from "./store/event-stream.js";
 
+// Content-addressed blob storage and publication checks.
+export { BlobStore } from "./store/blob-store.js";
+export type { BlobLimits, BlobPutResult, BlobRef } from "./store/blob-store.js";
+
 // Runtime: session identity and inspection.
 export { ManagedSession, PortableRuntime } from "./runtime/session.js";
 
