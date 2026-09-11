@@ -469,6 +469,17 @@ export type {
   ServiceFlowOptions,
 } from "./runtime/service-connections.js";
 
+// Runtime: browser continuity across compute replacement (SPEC.md
+// sections 10, 13, and 14.6).
+export { reconnectBrowserService } from "./runtime/browser-continuity.js";
+export type {
+  BrowserContinuityTransport,
+  BrowserProviderObservation,
+  BrowserReconnection,
+  ReconnectBrowserInput,
+  ReconnectOptions,
+} from "./runtime/browser-continuity.js";
+
 // Adapter: local process execution under the host account.
 export {
   LOCAL_PROCESS_PROVIDER_ID,

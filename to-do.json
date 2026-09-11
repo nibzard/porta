@@ -1130,7 +1130,7 @@
     "id": "T045",
     "title": "Integrate browser continuity with compute replacement",
     "priority": 2,
-    "status": "todo",
+    "status": "done",
     "details": "Reconstruct the application server and create a new service binding after compute replacement.",
     "depends_on": [
       "T041",
