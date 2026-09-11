@@ -363,6 +363,24 @@ export type {
   RevocationTarget,
 } from "./runtime/revocation.js";
 
+// Runtime: attachment release, session close, and session reopen.
+export {
+  closeSession,
+  releaseAttachment,
+  reopenSession,
+} from "./runtime/release.js";
+export type {
+  CloseEntry,
+  CloseOptions,
+  CloseReport,
+  InFlightOperation,
+  ReleaseOptions,
+  ReleaseOutcome,
+  ReopenAttachmentState,
+  ReopenOptions,
+  ReopenReport,
+} from "./runtime/release.js";
+
 // Records and schemas.
 export * from "./schema/error.js";
 export * from "./schema/event.js";

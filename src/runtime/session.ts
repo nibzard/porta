@@ -69,6 +69,19 @@ import {
 } from "./provenance.js";
 import { commitPolicyRevocation as commitPolicyRevocationFlow } from "./revocation.js";
 import type { RevocationOptions, RevocationOutcome } from "./revocation.js";
+import {
+  closeSession as closeSessionFlow,
+  releaseAttachment as releaseAttachmentFlow,
+  reopenSession as reopenSessionFlow,
+} from "./release.js";
+import type {
+  CloseOptions,
+  CloseReport,
+  ReleaseOptions,
+  ReleaseOutcome,
+  ReopenOptions,
+  ReopenReport,
+} from "./release.js";
 import type { PolicyRevocationInput } from "../schema/policy.js";
 import type {
   ProvenanceEnvironmentOptions,
@@ -102,7 +115,7 @@ import type {
   OutputChunk,
 } from "../schema/operation.js";
 import type { CancellationResult } from "../schema/adapter.js";
-import type { AttachmentSummary } from "../schema/session.js";
+import type { AttachmentRef, AttachmentSummary } from "../schema/session.js";
 
 /**
  * Session identity and inspection (SPEC.md sections 5.1 and 15).
@@ -581,6 +594,53 @@ export class ManagedSession {
     options: RevocationOptions = {},
   ): Promise<RevocationOutcome> {
     return commitPolicyRevocationFlow(this.store, this.id, input, options);
+  }
+
+  /**
+   * Release one attachment (SPEC.md sections 8 and 15).
+   *
+   * The provider must confirm; a confirmed release invalidates every
+   * handle the attachment owned. An unconfirmed release records a
+   * cleanup obligation and leaves the attachment blocked from new
+   * work. A repeated release never reaches the provider.
+   */
+  async release(
+    attachment: AttachmentRef,
+    requestKey: string,
+    options: ReleaseOptions,
+  ): Promise<ReleaseOutcome> {
+    return releaseAttachmentFlow(
+      this.store,
+      this.id,
+      this.record().policyRef,
+      attachment,
+      requestKey,
+      options,
+    );
+  }
+
+  /**
+   * Close the session (SPEC.md sections 5.3 and 15).
+   *
+   * The session refuses new work from the first commit onward, then
+   * releases every attachment. It stays `closing` until each release
+   * succeeds or its unresolved allocation is recorded as a cleanup
+   * obligation; only then does it become `closed`.
+   */
+  async close(options: CloseOptions): Promise<CloseReport> {
+    return closeSessionFlow(this.store, this.id, options);
+  }
+
+  /**
+   * Reopen the session (SPEC.md sections 5.1 and 17).
+   *
+   * Reopening restores durable records: it reconciles lease expiries
+   * and reports in-flight operations exactly as stored. It never
+   * claims to restore a harness conversation or continue a model
+   * loop; the report says so explicitly.
+   */
+  async reopen(options: ReopenOptions = {}): Promise<ReopenReport> {
+    return reopenSessionFlow(this.store, this.id, options);
   }
 
   /**

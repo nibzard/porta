@@ -254,7 +254,7 @@ export function invalidateOwnedResources(
   attachmentId: string,
   generation: number,
   reason: string,
-  options?: ResourceFlowOptions,
+  options?: Pick<ResourceFlowOptions, "redactor">,
 ): ResourceDescription[] {
   try {
     return store.transaction(() => {
