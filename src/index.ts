@@ -428,6 +428,26 @@ export type {
   RevocationTarget,
 } from "./runtime/revocation.js";
 
+// Runtime: state classification, reconstruction recipes, and native
+// invalidation (SPEC.md section 12).
+export {
+  checkReconstructionCoverage,
+  checkReconstructionRecipes,
+  checkStateDispositions,
+  classifyResourceStates,
+  dispositionOfRecovery,
+  invalidateNativeState,
+  recipeStepOperationId,
+  runReconstructionRecipe,
+} from "./runtime/reconstruction.js";
+export type {
+  ClassifiableResource,
+  NativeInvalidationResult,
+  ReconstructTransport,
+  ReconstructionRun,
+  ReconstructionStepOutcome,
+} from "./runtime/reconstruction.js";
+
 // Runtime: attachment release, session close, and session reopen.
 export {
   closeSession,

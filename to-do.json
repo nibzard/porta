@@ -891,7 +891,7 @@
     "id": "T036",
     "title": "Implement reconstruction recipes and state classification",
     "priority": 2,
-    "status": "todo",
+    "status": "done",
     "details": "Validate state dispositions and run declared reconstruction through authorized operations.",
     "depends_on": [
       "T020",
