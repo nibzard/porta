@@ -682,3 +682,7 @@ export type {
 // Conformance: the acquisition and matching case pack (SPEC.md
 // section 21).
 export { acquisitionPolicyCases } from "./conformance/cases/acquisition-policy.js";
+
+// Conformance: the workspace and workspace-authority case pack
+// (SPEC.md section 21).
+export { workspaceCases } from "./conformance/cases/workspace.js";

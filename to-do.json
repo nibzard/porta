@@ -1382,7 +1382,7 @@
     "id": "T055",
     "title": "Add workspace conformance cases",
     "priority": 2,
-    "status": "todo",
+    "status": "done",
     "details": "Verify tree integrity, portable files, proposal authority, stable checkpoints, and export recovery.",
     "depends_on": [
       "T019",
