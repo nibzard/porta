@@ -323,6 +323,35 @@ export type {
   WorkingCopyBound,
 } from "./runtime/process-capability.js";
 
+// Capability: lightweight Python evaluation (SPEC.md section 14.2).
+export {
+  checkEvaluateWithinLimits,
+  checkPythonAttributes,
+  PYTHON_ATTRIBUTE_KEYS,
+  PYTHON_CAPABILITY_ID,
+  PYTHON_OPERATIONS,
+  PYTHON_PERSISTENT_STATES,
+  PYTHON_SUBSETS,
+  pythonCapabilityDescriptor,
+  pythonEvaluateInputSchema,
+  pythonEvaluateResultSchema,
+  resolvePythonBindingPath,
+  validatePythonEvaluateInput,
+  validatePythonEvaluateResult,
+} from "./runtime/python-capability.js";
+export type {
+  PythonAttributeDeclarations,
+  PythonBinding,
+  PythonCapturedOutput,
+  PythonEvaluateInput,
+  PythonEvaluateResult,
+  PythonException,
+  PythonLimits,
+  PythonOperation,
+  PythonPersistentState,
+  PythonSubset,
+} from "./runtime/python-capability.js";
+
 // Adapter: local process execution under the host account.
 export {
   LOCAL_PROCESS_PROVIDER_ID,

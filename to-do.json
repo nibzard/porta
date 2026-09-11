@@ -760,7 +760,7 @@
       "id": "T031",
       "title": "Define the lightweight Python capability",
       "priority": 2,
-      "status": "todo",
+      "status": "done",
       "details": "Define evaluation schemas, engine attributes, language subsets, limits, and host-function bindings.",
       "depends_on": [
         "T002",
