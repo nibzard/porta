@@ -253,7 +253,7 @@
       "id": "T011",
       "title": "Define adapter contracts and a deterministic test adapter",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Implement adapter interfaces and a controllable fake for allocation, operation, lease, and failure behavior.",
       "depends_on": [
         "T002",

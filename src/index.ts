@@ -114,6 +114,20 @@ export type {
   SecretResolverOptions,
 } from "./core/secrets.js";
 
+// Deterministic test adapter.
+export {
+  FakeEnvironmentAdapter,
+  FakeEnvironmentLease,
+} from "./adapters/test-adapter.js";
+export type {
+  AcquireDirective,
+  BindDirective,
+  CancelDirective,
+  InvokeDirective,
+  ReleaseDirective,
+  RenewDirective,
+} from "./adapters/test-adapter.js";
+
 // Journal stream (durability helpers over the control store).
 export {
   EventDeduplicator,
