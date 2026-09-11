@@ -455,6 +455,31 @@ export type {
   ProcessRecord,
 } from "./adapters/local-process-adapter.js";
 
+// Adapter: independent browser sessions over a provider driver
+// (SPEC.md section 14.4).
+export {
+  BROWSER_PROVIDER_ID,
+  BrowserAdapter,
+  BrowserLease,
+  OWNER_ATTACHMENT_EXTENSION,
+  OWNER_GENERATION_EXTENSION,
+  OWNER_SESSION_EXTENSION,
+  PROVIDER_SESSION_EXTENSION,
+  browserOwnerOf,
+} from "./adapters/browser-adapter.js";
+export type {
+  BrowserAcquisitionRecord,
+  BrowserAdapterOptions,
+  BrowserDriver,
+  BrowserDriverCapture,
+  BrowserDriverCreate,
+  BrowserDriverNavigation,
+  BrowserDriverObservation,
+  BrowserDriverSession,
+  BrowserOwner,
+  BrowserSessionRecord,
+} from "./adapters/browser-adapter.js";
+
 // Adapter: sandboxed lightweight Python on the Monty engine.
 export {
   MONTY_PYTHON_PROVIDER_ID,

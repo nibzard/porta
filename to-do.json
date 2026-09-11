@@ -1073,7 +1073,7 @@
     "id": "T043",
     "title": "Implement the independent browser adapter",
     "priority": 2,
-    "status": "todo",
+    "status": "done",
     "details": "Create and operate browser sessions independently of compute allocation.",
     "depends_on": [
       "T009",
