@@ -264,6 +264,20 @@ export {
 } from "./runtime/output.js";
 export type { ArtifactInput, ChunkInput, OutputOptions } from "./runtime/output.js";
 
+// Runtime: resource binding, resolution, invalidation, and reattachment.
+export {
+  bindResource,
+  invalidateOwnedResources,
+  reattachResource,
+  resolveResource,
+} from "./runtime/resources.js";
+export type {
+  BindResourceInput,
+  BindTransport,
+  ResolveResourceOptions,
+  ResourceFlowOptions,
+} from "./runtime/resources.js";
+
 // Records and schemas.
 export * from "./schema/error.js";
 export * from "./schema/event.js";

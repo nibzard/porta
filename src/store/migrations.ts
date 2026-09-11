@@ -223,6 +223,30 @@ export const STREAMED_OUTPUT: Migration = {
   ],
 };
 
+export const RESOURCE_BINDINGS: Migration = {
+  id: 7,
+  name: "resource-bindings",
+  statements: [
+    `CREATE TABLE resource_bindings (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES sessions(id),
+      attachment_id TEXT NOT NULL,
+      generation INTEGER NOT NULL CHECK (generation >= 1),
+      type TEXT NOT NULL,
+      capability TEXT NOT NULL,
+      lifetime TEXT NOT NULL CHECK (lifetime IN ('operation', 'attachment', 'external')),
+      recovery TEXT NOT NULL CHECK (recovery IN ('none', 'reconstruct', 'reattach', 'native')),
+      status TEXT NOT NULL CHECK (status IN ('bound', 'invalidated')),
+      provider_resource_id TEXT,
+      bound_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      record_json TEXT NOT NULL
+    )`,
+    `CREATE INDEX resource_bindings_owner
+      ON resource_bindings (session_id, attachment_id, generation, status)`,
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   INITIAL_SCHEMA,
   MUTATION_LEASES,
@@ -230,6 +254,7 @@ export const MIGRATIONS: readonly Migration[] = [
   REVISION_TREES,
   WORKSPACE_PROPOSALS,
   STREAMED_OUTPUT,
+  RESOURCE_BINDINGS,
 ];
 
 /** Tables with compare-and-swap support and their writable columns. */

@@ -50,6 +50,19 @@ import {
   recordResultArtifact,
 } from "./output.js";
 import type { ArtifactInput, ChunkInput, OutputOptions } from "./output.js";
+import {
+  bindResource as bindResourceFlow,
+  invalidateOwnedResources as invalidateOwnedResourcesFlow,
+  reattachResource as reattachResourceFlow,
+  resolveResource as resolveResourceFlow,
+} from "./resources.js";
+import type {
+  BindResourceInput,
+  BindTransport,
+  ResourceFlowOptions,
+  ResolveResourceOptions,
+} from "./resources.js";
+import type { ResourceDescription } from "../schema/resource.js";
 import type {
   AcceptOutcome,
   CheckpointOptions,
@@ -419,6 +432,71 @@ export class ManagedSession {
     digest: string,
   ): Promise<{ record: ArtifactRecord; data: Uint8Array }> {
     return readArtifact(this.store, blobs, this.id, digest);
+  }
+
+  /**
+   * Bind one provider resource into a portable reference
+   * (SPEC.md section 10).
+   *
+   * The reference carries no credential; the adapter reads credentials
+   * from the authorized context at use time. The stored binding keeps
+   * the provider-side identity out of the reference.
+   */
+  async bindResource(
+    input: BindResourceInput,
+    transport: BindTransport,
+    options: ResourceFlowOptions,
+  ): Promise<ResourceDescription> {
+    return bindResourceFlow(this.store, this.id, input, transport, options);
+  }
+
+  /**
+   * Resolve one resource reference against persisted state.
+   *
+   * The answer reports validity: authorization, owner generation,
+   * resource status, and lease validity all run before `valid`.
+   */
+  async resolveResource(
+    resourceId: string,
+    options: ResolveResourceOptions,
+  ): Promise<ResourceDescription> {
+    return resolveResourceFlow(this.store, this.id, resourceId, options);
+  }
+
+  /**
+   * Invalidate every binding one attachment generation owns.
+   *
+   * Replacement and release sweep the generation they end. Bindings of
+   * other attachments keep their own generation and stay valid.
+   */
+  async invalidateOwnedResources(
+    attachmentId: string,
+    generation: number,
+    reason: string,
+    options?: ResourceFlowOptions,
+  ): Promise<ResourceDescription[]> {
+    return invalidateOwnedResourcesFlow(
+      this.store,
+      this.id,
+      attachmentId,
+      generation,
+      reason,
+      options,
+    );
+  }
+
+  /**
+   * Reattach one external resource under a new owner generation.
+   *
+   * The reattachment creates a new binding; the old identifier stays
+   * invalid forever, even though the provider identity may be stable.
+   */
+  async reattachResource(
+    resourceId: string,
+    newOwner: { sessionId: string; attachmentId: string; generation: number },
+    options: ResourceFlowOptions,
+  ): Promise<ResourceDescription> {
+    return reattachResourceFlow(this.store, this.id, resourceId, newOwner, options);
   }
 
   /** Complete or restore one interrupted export of a destination. */

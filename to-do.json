@@ -601,7 +601,7 @@
       "id": "T025",
       "title": "Implement resource binding and validity checks",
       "priority": 1,
-      "status": "todo",
+      "status": "done",
       "details": "Track ownership, generation, lifetime, expiry, and authorized bindings.",
       "depends_on": [
         "T005",

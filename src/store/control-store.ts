@@ -103,6 +103,32 @@ export interface TransitionRecord {
   updatedAt: string;
 }
 
+/**
+ * Durable resource binding (SPEC.md section 10).
+ *
+ * The stored record keeps the provider-side identity next to the portable
+ * reference fields. The portable `ResourceRef` built from it never carries
+ * that identity or any credential: those live only here and in the
+ * description a resolution reports.
+ */
+export interface ResourceBindingRecord {
+  id: string;
+  sessionId: string;
+  type: string;
+  /** The capability this binding authorizes use through. */
+  capability: string;
+  owner: { sessionId: string; attachmentId: string; generation: number };
+  lifetime: "operation" | "attachment" | "external";
+  recovery: "none" | "reconstruct" | "reattach" | "native";
+  status: "bound" | "invalidated";
+  providerResourceId?: string | undefined;
+  expiresAt?: string | undefined;
+  extensions?: Record<string, unknown> | undefined;
+  boundAt: string;
+  invalidatedAt?: string | undefined;
+  invalidationReason?: string | undefined;
+}
+
 interface Row {
   [column: string]: unknown;
 }
@@ -823,6 +849,125 @@ export class ControlStore {
     const parsed = JSON.parse(row.record_json as string) as unknown;
     assertValid(artifactRecordSchema, parsed);
     return parsed as ArtifactRecord;
+  }
+
+  // -- Resource bindings ------------------------------------------------------
+
+  /**
+   * Persist one resource binding.
+   *
+   * The record mirrors its owner columns, so bindings of one attachment
+   * generation are queryable without reading the record JSON.
+   */
+  insertResourceBinding(record: ResourceBindingRecord): void {
+    if (
+      !record.id ||
+      !record.sessionId ||
+      !record.type ||
+      !record.capability ||
+      !record.owner.attachmentId ||
+      !record.boundAt
+    ) {
+      throw new StoreError(
+        "invalid",
+        "Resource bindings need id, session, type, capability, owner, and boundAt.",
+      );
+    }
+    this.run(
+      "INSERT INTO resource_bindings (id, session_id, attachment_id, generation, type, capability, lifetime, recovery, status, provider_resource_id, bound_at, created_at, record_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      record.id,
+      record.sessionId,
+      record.owner.attachmentId,
+      record.owner.generation,
+      record.type,
+      record.capability,
+      record.lifetime,
+      record.recovery,
+      record.status,
+      record.providerResourceId ?? null,
+      record.boundAt,
+      nowUtcTimestamp(),
+      JSON.stringify(record),
+    );
+  }
+
+  /** One binding of one session by its resource identifier. */
+  getResourceBinding(sessionId: string, resourceId: string): ResourceBindingRecord | null {
+    const row = this.get(
+      "SELECT record_json FROM resource_bindings WHERE session_id = ? AND id = ?",
+      sessionId,
+      resourceId,
+    );
+    return row === undefined
+      ? null
+      : (JSON.parse(row.record_json as string) as ResourceBindingRecord);
+  }
+
+  /**
+   * Every binding one attachment generation owns, bound ones first.
+   *
+   * Replacement and release sweeps read this list to invalidate exactly
+   * the handles the old generation issued (SPEC.md section 10).
+   */
+  listResourceBindingsForOwner(
+    sessionId: string,
+    attachmentId: string,
+    generation?: number,
+    onlyBound = false,
+  ): ResourceBindingRecord[] {
+    const clauses = ["session_id = ?", "attachment_id = ?"];
+    const params: SQLInputValue[] = [sessionId, attachmentId];
+    if (generation !== undefined) {
+      clauses.push("generation = ?");
+      params.push(generation);
+    }
+    if (onlyBound) {
+      clauses.push("status = 'bound'");
+    }
+    const rows = this.all(
+      `SELECT record_json FROM resource_bindings WHERE ${clauses.join(" AND ")} ORDER BY bound_at, id`,
+      ...params,
+    );
+    return rows.map(
+      (row) => JSON.parse(row.record_json as string) as ResourceBindingRecord,
+    );
+  }
+
+  /**
+   * Invalidate one binding under a `bound` expectation.
+   *
+   * Returns the updated record, or null when the binding was already
+   * invalidated: an old handle never becomes valid again, so the guard
+   * makes double invalidation visible to the caller.
+   */
+  markResourceBindingInvalidated(
+    resourceId: string,
+    reason: string,
+    invalidatedAt: string,
+  ): ResourceBindingRecord | null {
+    return this.transaction(() => {
+      const row = this.get(
+        "SELECT record_json FROM resource_bindings WHERE id = ?",
+        resourceId,
+      );
+      if (row === undefined) {
+        throw new StoreError("not-found", `Resource binding ${resourceId} does not exist.`);
+      }
+      const current = JSON.parse(row.record_json as string) as ResourceBindingRecord;
+      if (current.status !== "bound") {
+        return null;
+      }
+      const updated: ResourceBindingRecord = {
+        ...current,
+        status: "invalidated",
+        invalidatedAt,
+        invalidationReason: reason,
+      };
+      const changes = this.stmt(
+        "UPDATE resource_bindings SET status = 'invalidated', record_json = ? WHERE id = ? AND status = 'bound'",
+      ).run(JSON.stringify(updated), resourceId).changes;
+      return changes === 0 ? null : updated;
+    });
   }
 
   // -- Transitions ----------------------------------------------------------
