@@ -39,24 +39,39 @@ flowchart TD
 One session, one attachment, one checkpoint, one release:
 
 ```ts
+import { mkdirSync, writeFileSync } from "node:fs";
 import {
   BlobStore,
   ControlStore,
   LocalProcessAdapter,
   PolicyAuthority,
   PortableRuntime,
+  portableError,
 } from "portable";
+
+// Grants the local adapter enforces: execution on the local host,
+// unrestricted networking, host filesystem access, a lease lifetime,
+// transfer of workspace files to local copies, and resource ceilings.
+const authority = PolicyAuthority.fromPolicy({
+  schemaVersion: 1,
+  providers: ["local-process"],
+  operations: ["exec.process@1"],
+  locations: ["local"],
+  transferDestinations: ["local"],
+  networkEgress: "unrestricted",
+  hostFilesystemAccess: true,
+  maxEnvironmentLifetimeMs: 3_600_000,
+  maxResources: {
+    memoryBytes: 4 * 1024 ** 3,
+    storageBytes: 4 * 1024 ** 3,
+    gpuMemoryBytes: 4 * 1024 ** 3,
+  },
+});
 
 const store = ControlStore.open("control.db");
 const blobs = new BlobStore("blobs", store);
 const session = await new PortableRuntime(store).createSession({
   policyRef: "policy://demo",
-});
-
-const authority = PolicyAuthority.fromPolicy({
-  schemaVersion: 1,
-  providers: ["local-process"],
-  operations: ["exec.process@1"],
 });
 const adapter = new LocalProcessAdapter({ supervisorDir: "./supervisor" });
 
@@ -73,55 +88,96 @@ const ref = {
   attachmentId: compute.attachmentId,
   generation: compute.generation,
 };
+const environmentId = compute.environmentId;
+if (environmentId === undefined) {
+  throw new Error("The attachment names no environment.");
+}
 
-// Admit, dispatch, settle: the record exists before the provider runs,
-// and the outcome lands before the caller hears it.
+// Admit, dispatch, settle: the record exists before the provider runs.
+// Only the caller that wins the dispatch claim reaches the provider;
+// a retry under the same request key adopts the recorded outcome.
+const input = { command: "node", args: ["--version"] };
 const admitted = await session.invoke(
   {
     attachment: ref,
     capability: "exec.process@1",
     operation: "run",
-    input: { command: "node", args: ["--version"] },
+    input,
     requestKey: "version-1",
   },
   { authority },
 );
-await session.markDispatched(admitted.id);
-const lease = adapter.lease(compute.environmentId!);
-const answered = await lease.invoke({
-  operationId: admitted.id,
-  capability: "exec.process@1",
-  operation: "run",
-  input: { command: "node", args: ["--version"] },
-  environmentId: lease.environmentId,
-  limits: {},
-});
-await session.settle(admitted.id, {
-  kind: "completed",
-  resultRef: JSON.stringify(answered.result ?? null),
-});
+const claim = await session.claimDispatch(admitted.id);
+if (claim.claimed) {
+  const lease = adapter.lease(environmentId);
+  try {
+    const answered = await lease.invoke({
+      operationId: admitted.id,
+      capability: "exec.process@1",
+      operation: "run",
+      input,
+      environmentId: lease.environmentId,
+      limits: {},
+    });
+    if (answered.status === "completed") {
+      await session.settle(admitted.id, {
+        kind: "completed",
+        resultRef: JSON.stringify(answered.result ?? null),
+      });
+    } else {
+      // The provider answered no: record its failure, never success.
+      await session.settle(admitted.id, {
+        kind: "failed",
+        error:
+          answered.error ??
+          portableError("ProviderFailed", `The provider answered ${answered.status}.`),
+      });
+    }
+  } catch (error) {
+    // The call threw, so the effect may or may not have happened: the
+    // record settles unknown, and reconciliation resolves it later.
+    await session.settle(admitted.id, {
+      kind: "unknown",
+      error: portableError(
+        "ProviderUnavailable",
+        error instanceof Error ? error.message : String(error),
+        { retry: "after-reconciliation" },
+      ),
+    });
+  }
+}
 
-// Checkpoint the workspace as one immutable revision.
+// Checkpoint the bridge directory as one immutable revision.
+mkdirSync("repo", { recursive: true });
+writeFileSync("repo/notes.txt", "one bridge\n");
 const checkpoint = await session.checkpoint(
   blobs,
   { requestKey: "snapshot-1", source: { kind: "bridge", rootPath: "./repo" } },
   { stability: { kind: "locked", detail: "No bridge writer is active." } },
 );
+console.log("checkpoint", checkpoint.revision.id);
 
-// Release the environment. A later process reopens the session with
-// the revision retained and no conversation restored.
-await session.release(ref, "release-build-1", { adapter, principal: "user://me" });
+// Release the environment, close the store. A later process reopens
+// the session with the revision retained and no conversation restored.
+await session.release(ref, "release-build-1", {
+  adapter,
+  principal: "user://me",
+  authority,
+});
 store.close();
-const again = await new PortableRuntime(ControlStore.open("control.db")).openSession(
-  session.id,
-);
+const reopenStore = ControlStore.open("control.db");
+const again = await new PortableRuntime(reopenStore).openSession(session.id);
 const report = await again.reopen(); // report.conversationRestored === false
+console.log("conversationRestored", report.conversationRestored);
+reopenStore.close();
 ```
 
 The CLI calls the same contracts. See [the CLI reference](docs/cli.md):
 
 ```bash
-node dist/cli/main.js attach --session ses_x --request attach-request.json
+node dist/cli/main.js attach --session ses_x --request attach-request.json \
+  --request-key attach-1 --adapter ./worker-adapter.mjs \
+  --principal user://me --policy-file policy.json
 node dist/cli/main.js conformance --adapter ./worker-adapter.mjs \
   --adapter-version 1.2.3 --external-effects
 ```
