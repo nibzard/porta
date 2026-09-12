@@ -31,7 +31,7 @@ committed tree; see "Verification record" for the results.
 
 1. Copy the repository to a fresh directory.
 2. Remove `node_modules` and `dist` from the copy.
-3. Run `npm install --no-audit --no-fund`.
+3. Run `npm ci --no-audit --no-fund`.
 4. Run `npm test`. The command builds with `tsc`, then runs every
    suite under `dist/` with `node --test`.
 
@@ -40,12 +40,12 @@ rm -rf /tmp/porta-clean
 cp -r . /tmp/porta-clean
 cd /tmp/porta-clean
 rm -rf node_modules dist
-npm install --no-audit --no-fund
+npm ci --no-audit --no-fund
 npm test
 ```
 
 The clean checkout proves the package file set is complete: no suite
-depends on a file that `npm install` cannot restore.
+depends on a file that the lockfile install cannot restore.
 
 ### Local conformance suite
 
@@ -74,7 +74,7 @@ node dist/cli/main.js conformance \
 Replace `<repo>` with the checkout path. This run executes every pack.
 The `python` pack skips with reason `capability-not-offered`, because
 the local process adapter offers no `exec.python@1` capability. The
-expected report is 67 cases: 60 pass, 0 fail, 7 skip, and the process
+expected report is 70 cases: 63 pass, 0 fail, 7 skip, and the process
 exits with code 3. Exit 3 means "no failure, but at least one skip":
 skipped support is not established support.
 
@@ -92,7 +92,10 @@ The expected report is 7 cases: all pass, and the process exits 0.
 
 A run without grants exercises the refusal path: cases that cause
 external effects or paid allocation skip with
-`external-effects-not-authorized`, and the exit code is 3.
+`external-effects-not-authorized`. The expected report is 70 cases:
+43 pass, 0 fail, 27 skip (26 for the missing grant and
+`python.full-python-requirement` for the missing capability), and the
+exit code is 3.
 
 ### Authorized acceptance demonstration
 
@@ -179,7 +182,7 @@ story.
 | An unspecified permission MUST inherit the configured policy; it MUST NOT default to broader access (line 267). | `core/policy.ts` resolves each check against the policy record; absence of a grant is refusal. | `test:core/policy` |
 | A local process adapter MUST declare its actual host access and reject isolation requirements it cannot enforce (line 271). | `adapters/local-process-adapter.ts` declares `ENFORCEMENT` (no isolation, full host filesystem, inherited network) and rejects unsatisfiable requirements at acquisition. | `conf:matching.declared-restrictions`, `docs/adapters` |
 | Offers and manifests MUST carry typed enforcement facts; a target without them never matches, and missing evidence never becomes an implicit grant (line 273). | `schema/capability.ts` types `enforcementFacts` on offers and manifests; `core/policy.ts` `checkAcquisitionTarget` denies any target without facts, at match and again at activation. | `test:runtime/acquisition`, `conf:acquisition-policy` |
-| Every acquire MUST carry the effective acquisition limits; a provider rejects restrictions it cannot enforce before allocating, and every lease names its end (line 275). | `PolicyAuthority.acquisitionLimits()` builds the `limits` field of `AuthorizedAcquireRequest`; each adapter refuses unsatisfiable limits before allocation; `checkLeaseGrant` refuses a grant without an expiration or beyond the ceiling. | `test:runtime/acquisition`, `test:adapters`, `docs/adapters` |
+| Every acquire MUST carry the effective acquisition limits; a provider rejects restrictions it cannot enforce before allocating, and every lease names its end (line 275). | `PolicyAuthority.acquisitionLimits()` builds the `limits` field of `AuthorizedAcquireRequest`; each adapter refuses unsatisfiable limits before allocation; `checkLeaseGrant` refuses a grant without an expiration or beyond the ceiling. | `test:runtime/acquisition`, `test:adapters`, `conf:matching.unenforceable-limits`, `docs/adapters` |
 | Credentials MUST arrive through an authorized secret resolver at execution time; checkpoints and references carry references, not values (line 277). | `core/secrets.ts` resolves and scrubs; bundle export refuses credential-shaped values. | `test:core/secrets`, `conf:bundle.credential-references` |
 | Revocation blocks new admissions at once, cancels existing operations where possible, and reports unconfirmed cancellation (line 281). | `runtime/revocation.ts` updates policy, issues cancellations, and records unconfirmed stops as unknown. | `test:runtime/revocation` |
 
@@ -202,7 +205,7 @@ story.
 | The runtime MUST record acceptance before dispatch and outcomes before acknowledging (line 361). | `runtime/admission.ts` commits the record first; `runtime/outcomes.ts` commits the settlement before the call returns. | `test:runtime/admission`, `demo` |
 | `(sessionId, requestKey)` MUST identify one request; reuse for different work returns `RequestConflict` (line 363). | Admission compares the whole invocation identity — input hash, capability, operation, attachment identifier, and generation — before answering a used key. | `conf:operations.duplicate-request`, `conf:operations.mismatched-input`, `test:runtime/admission` |
 | A repeated request returns the existing operation and MUST NOT blindly redispatch (line 365). | The admission path returns the stored record without a second dispatch. | `conf:operations.duplicate-request`, `test:runtime/admission` |
-| Dispatch is claimed once; only the caller whose transaction moves `accepted` to `running` may invoke the provider, and every other caller adopts the record (line 367). | `claimOperationDispatch` in `runtime/outcomes.ts` owns the compare-and-set; the session exposes it as `claimDispatch`, and the harness, the reconstruction steps, and the acceptance demonstration claim before every provider call. A lost claim reads the stored outcome, waits bounded for a running holder, or reports the unknown. | `test:runtime/outcomes`, `test:harness/agents-sdk`, `test:runtime/replacement`, `demo` |
+| Dispatch is claimed once; only the caller whose transaction moves `accepted` to `running` may invoke the provider, and every other caller adopts the record (line 367). | `claimOperationDispatch` in `runtime/outcomes.ts` owns the compare-and-set; the session exposes it as `claimDispatch`, and the harness, the reconstruction steps, and the acceptance demonstration claim before every provider call. A lost claim reads the stored outcome, waits bounded for a running holder, or reports the unknown. | `test:runtime/outcomes`, `test:harness/agents-sdk`, `test:runtime/replacement`, `conf:operations.concurrent-dispatch-claim`, `demo` |
 | A timeout does not establish cancellation; a lost response after dispatch MUST yield `unknown` unless reconciliation resolves it (line 382). | `runtime/cancellation.ts` records the attempt as unconfirmed; `runtime/outcomes.ts` marks the outcome unknown. | `conf:operations.unconfirmed-cancellation`, `conf:operations.lost-response-after-effects` |
 | An unknown record MAY resolve later; the journal MUST retain the original uncertainty and the evidence (line 384). | `runtime/outcomes.ts` `reconcileOperation` appends reconciliation trails and never rewrites history. | `conf:operations.reconciliation-history` |
 | Journal entries MUST be append-only and ordered, with identifier, sequence, timestamp, and event type (line 388). | `store/event-stream.ts` appends numbered events inside each state transaction. | `test:store/event-stream`, `conf:events.state-transaction-consistency` |
@@ -236,7 +239,7 @@ story.
 | Version one MUST NOT merge automatically (line 478). | No merge code exists; a new proposal against the current head is the only path. | `test:runtime/proposal` |
 | A checkpoint requires a stable source through a lock or snapshot (line 484). | `Session.checkpoint` requires a stability declaration. | `conf:workspace-authority.stability-declaration` |
 | Without a lock or snapshot, the runtime MUST refuse a consistency-guaranteed checkpoint (line 486). | The stability declaration names its kind; reading files twice is not an accepted kind. | `conf:workspace-authority.stability-declaration` |
-| The bridge MUST stage contents and keep a recovery journal before changing destination files (line 490). | `runtime/workspace.ts` stages and journals; a crash completes from the stage. | `conf:workspace-authority.interrupted-export`, `conf:workspace-authority.checkpoint-lock` |
+| The bridge MUST stage contents and keep a recovery journal before changing destination files (line 490). | `runtime/workspace.ts` stages and journals; a crash completes from the stage. `runtime/export.ts` applies the staged tree by path and kind, verifies it against the journal hash before recovery publishes, and records the bridge state only after the destination hashes to the revision. | `conf:workspace-authority.interrupted-export`, `conf:workspace-authority.export-type-change`, `conf:workspace-authority.checkpoint-lock` |
 | Export MUST fail when local files differ from the recorded base, without overwriting them (line 492). | The bridge compares before applying. | `conf:workspace-authority.local-edits-during-export` |
 | Every workspace-backed invocation MUST record its base revision and working copy identifier (line 496). | `runtime/provenance.ts` records both. | `test:runtime/provenance`, `demo` |
 | A command on a modified copy MUST NOT claim it tested the unmodified base (line 498). | Provenance reports `copyModified`. | `test:runtime/provenance`, `demo` |
@@ -395,9 +398,14 @@ deliberate stand-in or a documented limit, not a silent omission.
 3. **E2B credentials.** No credentials exist in this repository, so
    the E2B adapter has no executed run here. Its write-ahead
    acquisition protocol is documented in `docs/adapters/e2b-linux.md`.
-   The opt-in live smoke test checks outbound access from a subprocess
-   in both network configurations when `E2B_API_KEY` is set; without
-   the key it skips, and a skip is unverified, never passed.
+   The working-copy evidence — executable bits, staged-swap
+   publication, interrupted recovery — rests on the injected client of
+   `test:adapters/e2b-adapter`, not on a live provider run. The
+   opt-in live smoke test checks a full lifecycle, an uploaded
+   executable script that must run, and outbound access from a
+   subprocess in both network configurations when `E2B_API_KEY` is
+   set; without the key it skips, and a skip is unverified, never
+   passed.
 4. **`browser.cdp@1` profile.** The browser capability exposes
    session, navigation, and observation operations. The Chrome DevTools
    Protocol profile is optional in the specification and no adapter
@@ -411,12 +419,17 @@ deliberate stand-in or a documented limit, not a silent omission.
 
 ## Verification record
 
-- Clean checkout: `npm install` then `npm test` — 443 tests, 442
-  pass, 1 skip, 0 fail.
-- Conformance, local process adapter, all packs, both grants: 67
-  cases, 60 pass, 7 skip (`capability-not-offered`), exit 3.
+- Clean checkout: `npm ci` then `npm test` — 477 tests, 476
+  pass, 1 skip (live E2B, no key), 0 fail.
+- Conformance, local process adapter, all packs, both grants: 70
+  cases, 63 pass, 7 skip (`capability-not-offered`), exit 3.
 - Conformance, Python pack, lightweight adapter, external effects
   granted: 7 cases, 7 pass, exit 0.
+- Conformance, local process adapter, no grants: 70 cases, 43 pass,
+  27 skip (26 `external-effects-not-authorized`, 1
+  `capability-not-offered`), exit 3.
 - Acceptance demonstration: part of `npm test`; all assertions pass
   with no leaked server process.
+- Live E2B smoke: unverified — no `E2B_API_KEY` in this environment.
+  The suite records it as skipped, never passed.
 - Specification: `0.1.0-draft.1`. Implementation: `0.1.0`.

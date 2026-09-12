@@ -1,6 +1,6 @@
 # Review repair plan
 
-Date: 2026-09-12. Status: in progress. R1 through R8 are complete; R9 remains.
+Date: 2026-09-12. Status: complete. All nine repairs (R1 through R9) are complete.
 
 This plan covers all eight defects found in the project review. It includes the related documentation and validation work.
 
@@ -377,6 +377,26 @@ Each repair starts with a failing regression test. Use temporary files, loopback
 5. Run authorized live E2B smoke tests when credentials and allocation authorization are available. Ensure every allocated environment has cleanup in a finalization path. Record unavailable live evidence explicitly.
 6. Update the release coverage map with exact regression names and results. Correct claims that rely only on injected clients. Document adapter contract changes and any control-store migration.
 7. Review the final diff for unrelated changes and unresolved cleanup. Mark a repair complete only when its acceptance checks pass.
+
+> **Status: complete (2026-09-12).** The public packs now carry the
+> review's negative evidence. `conf:matching.unenforceable-limits`
+> proves a restrictive policy ends in a refusal before allocation or
+> an enforced manifest, never an unenforced environment;
+> `conf:operations.concurrent-dispatch-claim` proves one transaction
+> owns the provider call and every other caller adopts the record.
+> R8 added `conf:workspace-authority.export-type-change` and R5 had
+> added `conf:process.release-orphaned-group`. The documented
+> workflows ran on the committed tree: the `npm ci` clean checkout
+> runs 477 tests with 476 pass and 1 skip (live E2B, no key); the
+> local conformance run reports 70 cases, 63 pass, 7 skip, exit 3;
+> the Python pack reports 7 cases, 7 pass, exit 0; the no-grants run
+> reports 70 cases, 43 pass, 27 skip, exit 3; the acceptance
+> demonstration passes alone with no leaked process. The release
+> coverage map names the new regressions, states that the E2B
+> working-copy evidence rests on the injected client, and records the
+> live smoke as unverified without `E2B_API_KEY`. The final diff
+> carries the nine repairs, their regressions, their documentation,
+> and the loop's own state file — nothing unrelated.
 
 ## Completion criteria
 
