@@ -1,6 +1,6 @@
 # Review repair plan
 
-Date: 2026-09-12. Status: in progress. R1 through R5 are complete; R6 through R9 remain.
+Date: 2026-09-12. Status: in progress. R1 through R6 are complete; R7 through R9 remain.
 
 This plan covers all eight defects found in the project review. It includes the related documentation and validation work.
 
@@ -244,6 +244,34 @@ Each repair starts with a failing regression test. Use temporary files, loopback
 - Binary files, Unicode paths, empty directories, and restrictive creation masks work.
 - An uploaded executable script runs directly in the authorized live smoke test.
 - Unsupported links and special files fail explicitly.
+
+> **Status: complete (2026-09-12).** The listed entry now carries its
+> kind — file, directory, link, or other — and its provider mode bits,
+> and the session gained an explicit `setPermissions` operation (the
+> SDK files API has none, so the production client runs one
+> adapter-quoted `chmod` per entry and treats a nonzero exit as a
+> provider refusal). A push writes each entry and then sets the
+> canonical mode: `0o755` for executables and directories, `0o644`
+> for plain files. The provider's creation mask never decides the
+> bits. A pull reads the bits from the listing, marks a file
+> executable when any execute bit is set, and applies the same
+> canonical modes after writing, so the local mask decides nothing
+> either; a round trip now returns the same root hash. A walk that
+> meets a link refuses with `UnsupportedOperation`, reason
+> `remote-link`, and the path named; a device, socket, or FIFO
+> refuses with reason `remote-special-file` — before anything reads
+> through the entry, exactly as the local importer refuses it. A
+> listing without mode bits reports the file as non-executable; the
+> adapter assumes no support from silence. The fake client models
+> permission bits, a creation mask, and unrepresentable entries, so
+> the evidence no longer rests on a byte-only fake. The opt-in live
+> test gained an uploaded script that must run as an executable; it
+> stays unverified without `E2B_API_KEY`. Coverage:
+> `test:adapters/e2b-adapter` (round trip under a `0o600` mask,
+> binary and Unicode and empty-directory preservation, link and
+> special-entry refusals, modeless-listing default), the live smoke
+> path, `docs/adapters/e2b-linux.md`. Full suite: 471 tests, 470
+> pass, 1 skip (live E2B, no key).
 
 ## R7: Publish exact remote workspace trees
 

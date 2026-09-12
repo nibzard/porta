@@ -1,6 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -44,6 +53,19 @@ class FakeE2BClient implements E2BClient {
       files: Map<string, Uint8Array>;
       /** That sandbox's made directories by absolute path. */
       madeDirs: string[];
+      /**
+       * That sandbox's permission bits by absolute path. Writes land
+       * under `defaultFileMode`, so a test can model a restrictive
+       * creation mask.
+       */
+      modes: Map<string, number>;
+      /** Mode a fresh write takes, like a provider creation mask. */
+      defaultFileMode: number;
+      /**
+       * Entries the provider lists but a portable tree cannot
+       * represent, by absolute path: links and special files.
+       */
+      specials: Map<string, "link" | "other">;
       /** That sandbox's processes by pid. */
       processes: Map<
         number,
@@ -61,6 +83,8 @@ class FakeE2BClient implements E2BClient {
   }> = [];
   /** Every file write a session made, newest last. */
   readonly fileWrites: Array<{ path: string; bytes: number }> = [];
+  /** Every permission change a session made, newest last. */
+  readonly permissionCalls: Array<{ path: string; mode: number }> = [];
   /** Scripted outcome of the next foreground command. */
   nextRun: {
     exitCode: number | null;
@@ -103,6 +127,9 @@ class FakeE2BClient implements E2BClient {
   private session(state: {
     files: Map<string, Uint8Array>;
     madeDirs: string[];
+    modes: Map<string, number>;
+    defaultFileMode: number;
+    specials: Map<string, "link" | "other">;
     processes: Map<
       number,
       { pid: number; command: string; cwd: string; envs: Record<string, string>; running: boolean }
@@ -164,25 +191,37 @@ class FakeE2BClient implements E2BClient {
       async writeFile(path, bytes) {
         client.fileWrites.push({ path, bytes: bytes.byteLength });
         state.files.set(path, bytes);
+        state.modes.set(path, state.defaultFileMode);
+      },
+      async setPermissions(path, mode) {
+        client.permissionCalls.push({ path, mode });
+        state.modes.set(path, mode);
       },
       async listDir(path) {
         const prefix = path.endsWith("/") ? path : `${path}/`;
         const exists =
           path === "/" ||
           state.files.has(path) ||
+          state.specials.has(path) ||
           [...state.files.keys()].some((key) => key.startsWith(prefix)) ||
+          [...state.specials.keys()].some((key) => key.startsWith(prefix)) ||
           state.madeDirs.some((dir) => dir === path || dir.startsWith(prefix));
         if (!exists) {
           return null;
         }
-        const names = new Map<string, "file" | "directory">();
-        const fold = (key: string, kind: "file" | "directory") => {
+        const names = new Map<string, { type: "file" | "directory" | "link" | "other"; mode?: number }>();
+        const fold = (key: string, kind: "file" | "directory" | "link" | "other") => {
           if (key === path || !key.startsWith(prefix)) {
             return;
           }
           const rest = key.slice(prefix.length);
           const slash = rest.indexOf("/");
-          names.set(slash === -1 ? rest : rest.slice(0, slash), slash === -1 ? kind : "directory");
+          names.set(slash === -1 ? rest : rest.slice(0, slash), {
+            type: slash === -1 ? kind : "directory",
+            ...(slash === -1 && kind === "file" && state.modes.has(key)
+              ? { mode: state.modes.get(key) as number }
+              : {}),
+          });
         };
         for (const key of state.files.keys()) {
           fold(key, "file");
@@ -190,7 +229,10 @@ class FakeE2BClient implements E2BClient {
         for (const dir of state.madeDirs) {
           fold(dir, "directory");
         }
-        return [...names.entries()].map(([name, type]) => ({ name, type }));
+        for (const [key, kind] of state.specials) {
+          fold(key, kind);
+        }
+        return [...names.entries()].map(([name, described]) => ({ name, ...described }));
       },
       async makeDir(path) {
         state.madeDirs.push(path);
@@ -226,6 +268,9 @@ class FakeE2BClient implements E2BClient {
       metadata: { ...input.metadata },
       files: new Map(),
       madeDirs: [],
+      modes: new Map(),
+      defaultFileMode: 0o644,
+      specials: new Map(),
       processes: new Map(),
     });
     if (this.loseCreateResponse) {
@@ -1143,6 +1188,132 @@ test("pull rebuilds the remote tree through the content-addressed store", async 
   }
 });
 
+test("a round trip preserves executable bits and entry kinds exactly", async () => {
+  const fixture = make();
+  const staging = mkdtempSync(join(tmpdir(), "porta-bits-src-"));
+  const blobRoot = mkdtempSync(join(tmpdir(), "porta-bits-blobs-"));
+  const harvest = mkdtempSync(join(tmpdir(), "porta-bits-out-"));
+  try {
+    mkdirSync(join(staging, "nested"));
+    mkdirSync(join(staging, "empty-dir"));
+    writeFileSync(join(staging, "plain.txt"), "plain");
+    writeFileSync(join(staging, "run.sh"), "#!/bin/sh\nexit 0\n");
+    writeFileSync(join(staging, "nested", "tool"), Buffer.from([0x00, 0xff, 0x7f, 0x01]));
+    writeFileSync(join(staging, "nested", "ünïcode.txt"), "grüß dich");
+    chmodSync(join(staging, "run.sh"), 0o755);
+    chmodSync(join(staging, "nested", "tool"), 0o700);
+
+    const lease = await fixture.adapter.acquire(request("acq-bits"));
+    // A restrictive provider creation mask must not leak into the tree:
+    // every fresh write lands as 0o600 until the transfer sets the
+    // canonical modes itself.
+    fixture.client.sandbox("sbx-1").defaultFileMode = 0o600;
+    const report = await fixture.adapter.pushCopy({
+      environmentId: lease.environmentId,
+      copyRoot: staging,
+      entries: scanTreeFromDirectory(staging).entries,
+      authority: REMOTE_AUTHORITY,
+    });
+
+    // The remote side holds the canonical portable modes, whatever the
+    // provider mask did to the fresh writes.
+    const remote = fixture.client.sandbox("sbx-1");
+    assert.equal(remote.modes.get("/home/user/portable/run.sh"), 0o755);
+    assert.equal(remote.modes.get("/home/user/portable/plain.txt"), 0o644);
+    assert.equal(remote.modes.get("/home/user/portable/nested/tool"), 0o755);
+    assert.ok(
+      fixture.client.permissionCalls.some(
+        (call) => call.path === "/home/user/portable/run.sh" && call.mode === 0o755,
+      ),
+      "the executable file received an explicit permission call",
+    );
+
+    const store = ControlStore.inMemory();
+    const blobs = new BlobStore(blobRoot, store);
+    const round = await fixture.adapter.pullCopy({
+      environmentId: lease.environmentId,
+      destRoot: harvest,
+      blobs,
+      authority: REMOTE_AUTHORITY,
+      expectedRootHash: report.rootHash,
+    });
+    // The imported tree is the pushed tree: the same root hash and the
+    // same bits, without the local umask deciding anything.
+    assert.equal(round.rootHash, report.rootHash);
+    assert.equal(statSync(join(harvest, "run.sh")).mode & 0o777, 0o755);
+    assert.equal(statSync(join(harvest, "plain.txt")).mode & 0o777, 0o644);
+    assert.equal(statSync(join(harvest, "nested", "tool")).mode & 0o777, 0o755);
+    assert.equal(
+      readFileSync(join(harvest, "nested", "tool")).toString("hex"),
+      "00ff7f01",
+    );
+    assert.equal(readFileSync(join(harvest, "nested", "ünïcode.txt"), "utf8"), "grüß dich");
+    assert.equal(statSync(join(harvest, "empty-dir")).isDirectory(), true);
+  } finally {
+    fixture.close();
+    rmSync(staging, { recursive: true, force: true });
+    rmSync(blobRoot, { recursive: true, force: true });
+    rmSync(harvest, { recursive: true, force: true });
+  }
+});
+
+test("remote links and special entries refuse before they are followed", async () => {
+  const fixture = make();
+  const staging = mkdtempSync(join(tmpdir(), "porta-refuse-src-"));
+  const blobRoot = mkdtempSync(join(tmpdir(), "porta-refuse-blobs-"));
+  const harvest = mkdtempSync(join(tmpdir(), "porta-refuse-out-"));
+  let lease: EnvironmentLease | undefined;
+  let blobs: BlobStore | undefined;
+  const pull = () =>
+    fixture.adapter.pullCopy({
+      environmentId: lease!.environmentId,
+      destRoot: harvest,
+      blobs: blobs!,
+      authority: REMOTE_AUTHORITY,
+    });
+  try {
+    writeFileSync(join(staging, "keep.txt"), "kept");
+    lease = await fixture.adapter.acquire(request("acq-specials"));
+    await fixture.adapter.pushCopy({
+      environmentId: lease.environmentId,
+      copyRoot: staging,
+      entries: scanTreeFromDirectory(staging).entries,
+      authority: REMOTE_AUTHORITY,
+    });
+    blobs = new BlobStore(blobRoot, ControlStore.inMemory());
+    const remote = fixture.client.sandbox("sbx-1");
+
+    // A link the provider lists refuses with its kind named; the
+    // transfer never reads through it.
+    remote.specials.set("/home/user/portable/secret-link", "link");
+    const link = await refuse(pull);
+    assert.equal(link?.code, "UnsupportedOperation");
+    const linkDetails = link?.details as Record<string, unknown> | undefined;
+    assert.equal(linkDetails?.operation, "remote-link");
+    assert.equal(linkDetails?.path, "secret-link");
+
+    // A device or socket refuses the same way.
+    remote.specials.delete("/home/user/portable/secret-link");
+    remote.specials.set("/home/user/portable/device", "other");
+    const device = await refuse(pull);
+    assert.equal(device?.code, "UnsupportedOperation");
+    const deviceDetails = device?.details as Record<string, unknown> | undefined;
+    assert.equal(deviceDetails?.operation, "remote-special-file");
+    assert.equal(deviceDetails?.path, "device");
+
+    // Without the unsupported entries the same pull completes.
+    remote.specials.delete("/home/user/portable/device");
+    const clean = await pull();
+    assert.equal(clean.rootHash.length > 0, true);
+    assert.equal(readFileSync(join(harvest, "keep.txt"), "utf8"), "kept");
+  } finally {
+    fixture.close();
+    rmSync(staging, { recursive: true, force: true });
+    rmSync(blobRoot, { recursive: true, force: true });
+    rmSync(harvest, { recursive: true, force: true });
+  }
+});
+
 test("remote changes return as proposals and never overwrite the source", async () => {
   const fixture = make();
   const src = mkdtempSync(join(tmpdir(), "porta-e2e-src-"));
@@ -1292,6 +1463,41 @@ test(
       assert.ok(
         Buffer.from(liveRun.stdout.dataBase64 ?? "", "base64").toString("utf8").includes("porta-live"),
       );
+
+      // An uploaded executable script runs directly. The bits crossed
+      // with the bytes; the provider filesystem did not strip them.
+      const liveSrc = mkdtempSync(join(tmpdir(), "porta-e2b-live-src-"));
+      try {
+        writeFileSync(join(liveSrc, "probe.sh"), "#!/bin/sh\necho porta-executable\n");
+        chmodSync(join(liveSrc, "probe.sh"), 0o755);
+        await adapter.pushCopy({
+          environmentId: lease.environmentId,
+          copyRoot: liveSrc,
+          entries: scanTreeFromDirectory(liveSrc).entries,
+          authority: REMOTE_AUTHORITY,
+        });
+        const executed = await lease.invoke({
+          operationId: "op-live-exec-bit",
+          capability: "exec.process@1",
+          operation: "run",
+          input: { command: "/home/user/portable/probe.sh" },
+          environmentId: lease.environmentId,
+          limits: {},
+        });
+        const script = executed.result as {
+          exitCode?: number;
+          stdout: { dataBase64?: string };
+        };
+        assert.equal(script.exitCode, 0);
+        assert.ok(
+          Buffer.from(script.stdout.dataBase64 ?? "", "base64")
+            .toString("utf8")
+            .includes("porta-executable"),
+          "the uploaded script ran as an executable",
+        );
+      } finally {
+        rmSync(liveSrc, { recursive: true, force: true });
+      }
 
       // Outbound access from a subprocess, in both configurations
       // (SPEC.md section 7). The probe opens one TCP connection with

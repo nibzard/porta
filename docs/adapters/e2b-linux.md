@@ -211,9 +211,26 @@ root it was given and nothing else: the change returns to the
 workspace as a proposal with provenance, and the source of the base
 revision is never overwritten.
 
-The executable bit does not transfer; the remote filesystem API
-writes plain files. A tree entry keeps the bit for the workspace, but
-remote content lands non-executable.
+The executable bit transfers with the bytes. The remote files API has
+no permission operation, so a push sets the canonical modes through
+one `chmod` command per entry after the write: `0o755` for an
+executable file or a directory, `0o644` for a plain file. The
+provider's creation mask never decides the bits. A pull reads the
+listed bits back, marks each file executable when any execute bit is
+set, and applies the same canonical modes after writing. The local
+creation mask never decides them either. A round trip keeps the root
+hash, whatever either mask did.
+
+Links and special entries refuse by name, on both sides of the walk.
+A pull that meets a symbolic link fails with `UnsupportedOperation`
+and reason `remote-link`; a device, socket, or FIFO fails with reason
+`remote-special-file`. The transfer never reads through such an entry.
+This mirrors the local importer, which refuses links and special files
+the same way (SPEC.md section 11.2).
+
+One platform limit stays: a provider listing that carries no mode bits
+reports its files as non-executable. The adapter assumes no support
+from silence.
 
 ## Unsupported requirements
 

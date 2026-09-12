@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -271,10 +272,16 @@ export interface E2BCommandOutcome {
   timedOut: boolean;
 }
 
-/** One directory entry as the adapter models it. */
+/**
+ * One directory entry as the adapter models it. The kind is explicit:
+ * `link` and `other` name entries a portable tree cannot represent, so
+ * a transfer refuses them by name instead of reading through them.
+ */
 export interface E2BListedEntry {
   name: string;
-  type: "file" | "directory";
+  type: "file" | "directory" | "link" | "other";
+  /** Provider permission bits, when the listing carries them. */
+  mode?: number;
 }
 
 /**
@@ -293,6 +300,8 @@ export interface E2BSandboxSession {
   /** `null` when the directory does not exist. */
   listDir(path: string): Promise<E2BListedEntry[] | null>;
   makeDir(path: string): Promise<void>;
+  /** Set the permission bits of one remote path. */
+  setPermissions(path: string, mode: number): Promise<void>;
 }
 
 /** Production client over the E2B SDK statics. */
@@ -424,10 +433,17 @@ class SdkE2BSession implements E2BSandboxSession {
   async listDir(path: string): Promise<E2BListedEntry[] | null> {
     try {
       const entries = await this.sandbox.files.list(path);
-      return entries.map((entry) => ({
-        name: entry.name,
-        type: entry.type === FileType.FILE ? ("file" as const) : ("directory" as const),
-      }));
+      return entries.map((entry) => {
+        const type: E2BListedEntry["type"] =
+          entry.symlinkTarget !== undefined
+            ? "link"
+            : entry.type === FileType.FILE
+              ? "file"
+              : entry.type === FileType.DIR
+                ? "directory"
+                : "other";
+        return { name: entry.name, type, mode: entry.mode };
+      });
     } catch (error) {
       if (error instanceof NotFoundError) {
         return null;
@@ -438,6 +454,25 @@ class SdkE2BSession implements E2BSandboxSession {
 
   async makeDir(path: string): Promise<void> {
     await this.sandbox.files.makeDir(path);
+  }
+
+  async setPermissions(path: string, mode: number): Promise<void> {
+    // The files API has no chmod, so the bits cross through one
+    // command with the adapter-quoted path. A nonzero exit is a
+    // provider refusal, never a silent skip: a tree that keeps the
+    // creation mask's bits would hash differently.
+    const outcome = await this.runCommand({
+      command: `chmod ${mode.toString(8)} ${shellQuote(path)}`,
+      cwd: "/",
+      envs: {},
+      timeoutMs: 30_000,
+    });
+    if (outcome.exitCode !== 0) {
+      throw providerUnavailableError(
+        `The sandbox refused to set the permissions of ${path}: chmod exited with ${outcome.exitCode}.`,
+        { path, mode, exitCode: outcome.exitCode },
+      );
+    }
   }
 }
 
@@ -1334,19 +1369,27 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
       this.client.connect(sandboxId, this.apiKey()),
     );
     await this.guarded(() => session.makeDir(REMOTE_COPY_ROOT));
+    await this.guarded(() => session.setPermissions(REMOTE_COPY_ROOT, 0o755));
     let bytesSent = 0;
     const ordered = [...scanned.entries].sort((a, b) =>
       compareTreePaths(a.path, b.path),
     );
+    // Every entry takes its canonical mode after it lands: the remote
+    // creation mask must not decide the bits of a portable tree
+    // (SPEC.md section 11.1).
     for (const entry of ordered.filter((candidate) => candidate.kind === "directory")) {
-      await this.guarded(() =>
-        session.makeDir(posix.join(REMOTE_COPY_ROOT, entry.path)),
-      );
+      const target = posix.join(REMOTE_COPY_ROOT, entry.path);
+      await this.guarded(() => session.makeDir(target));
+      await this.guarded(() => session.setPermissions(target, 0o755));
     }
     for (const entry of ordered.filter((candidate) => candidate.kind === "file")) {
       const bytes = readFileSync(join(input.copyRoot, entry.path));
+      const target = posix.join(REMOTE_COPY_ROOT, entry.path);
+      await this.guarded(() => session.writeFile(target, bytes));
+      // The portable executable bit is the whole permission truth: the
+      // canonical 0o755 or 0o644, nothing the mask left behind.
       await this.guarded(() =>
-        session.writeFile(posix.join(REMOTE_COPY_ROOT, entry.path), bytes),
+        session.setPermissions(target, entry.executable ? 0o755 : 0o644),
       );
       bytesSent += bytes.byteLength;
     }
@@ -1408,12 +1451,18 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
     // staging root it was given.
     rmSync(input.destRoot, { recursive: true, force: true });
     mkdirSync(input.destRoot, { recursive: true });
+    // Every entry takes its canonical mode after it lands, so the local
+    // creation mask never decides the bits of the imported tree.
     for (const directory of walked.directories.sort()) {
-      mkdirSync(join(input.destRoot, directory), { recursive: true });
+      const absolute = join(input.destRoot, directory);
+      mkdirSync(absolute, { recursive: true });
+      chmodSync(absolute, 0o755);
     }
     for (const file of walked.files) {
       mkdirSync(dirname(join(input.destRoot, file.path)), { recursive: true });
-      writeFileSync(join(input.destRoot, file.path), file.bytes);
+      const absolute = join(input.destRoot, file.path);
+      writeFileSync(absolute, file.bytes);
+      chmodSync(absolute, file.executable ? 0o755 : 0o644);
     }
     const tree = buildTreeFromDirectory(input.destRoot, input.blobs);
     if (input.expectedRootHash !== undefined && input.expectedRootHash !== tree.rootHash) {
@@ -1429,20 +1478,22 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
   /**
    * Walk the portable root of one sandbox. Returns `null` when the root
    * does not exist. Names that are not plain path segments refuse the
-   * walk: a provider entry can never escape the staging root.
+   * walk: a provider entry can never escape the staging root. Links and
+   * special entries refuse by name before anything reads through them,
+   * exactly as the local importer refuses them (SPEC.md section 11.2).
    */
   private async walkRemote(
     session: E2BSandboxSession,
   ): Promise<{
     directories: string[];
-    files: Array<{ path: string; bytes: Uint8Array }>;
+    files: Array<{ path: string; bytes: Uint8Array; executable: boolean }>;
   } | null> {
     const root = await session.listDir(REMOTE_COPY_ROOT);
     if (root === null) {
       return null;
     }
     const directories: string[] = [];
-    const files: Array<{ path: string; bytes: Uint8Array }> = [];
+    const files: Array<{ path: string; bytes: Uint8Array; executable: boolean }> = [];
     const walk = async (relative: string): Promise<void> => {
       const absolute =
         relative === "" ? REMOTE_COPY_ROOT : posix.join(REMOTE_COPY_ROOT, relative);
@@ -1460,12 +1511,29 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
           );
         }
         const child = relative === "" ? entry.name : `${relative}/${entry.name}`;
+        if (entry.type === "link") {
+          throw unsupportedOperationError("workspace.tree@1", "remote-link", {
+            path: child,
+            entryType: "symbolic-link",
+            detail: "Version one rejects symbolic links; it never reads through one.",
+          });
+        }
+        if (entry.type === "other") {
+          throw unsupportedOperationError("workspace.tree@1", "remote-special-file", {
+            path: child,
+            entryType: "special-file",
+            detail: "Version one rejects device files, sockets, and FIFOs.",
+          });
+        }
         if (entry.type === "directory") {
           directories.push(child);
           await walk(child);
         } else {
           const bytes = await session.readFile(posix.join(REMOTE_COPY_ROOT, child));
-          files.push({ path: child, bytes });
+          // A listing without bits reports the file as non-executable:
+          // support is never assumed from silence.
+          const mode = entry.mode ?? 0o644;
+          files.push({ path: child, bytes, executable: (mode & 0o111) !== 0 });
         }
       }
     };
