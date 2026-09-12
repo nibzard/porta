@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import { relative } from "node:path";
+import { rmSync } from "node:fs";
+import { isAbsolute, relative } from "node:path";
 import { invalidRequestError, policyDeniedError } from "../core/errors.js";
 import type { PortableError } from "../schema/error.js";
 import type { PolicyAuthority } from "../core/policy.js";
 import type { ManagedSession } from "../runtime/session.js";
+import type { ExecutionProvenance } from "../schema/workspace.js";
 import type { ReopenReport } from "../runtime/release.js";
 import type { BlobStore } from "../store/blob-store.js";
 import type { EnvironmentLease } from "../schema/adapter.js";
@@ -125,6 +126,19 @@ export interface EnvironmentContextUpdate {
 /** The managed process capability this version of the toolkit routes. */
 const PROCESS = "exec.process@1";
 
+/** The answer of one verification preparation attempt. */
+type PreparationAnswer =
+  | { status: "refused"; code: string; message: string }
+  | { status: "prepared"; cwd: string; verify: Record<string, unknown> };
+
+/**
+ * Preparations in flight in this process, keyed by operation id. One
+ * operation prepares once: a concurrent caller of the same operation
+ * waits for and adopts the in-flight answer instead of racing a second
+ * bridge checkpoint against it.
+ */
+const inFlightPreparations = new Map<string, Promise<PreparationAnswer>>();
+
 /** Options of one toolkit bound to one managed session. */
 export interface AgentsToolkitOptions {
   session: ManagedSession;
@@ -143,6 +157,12 @@ export interface AgentsToolkitOptions {
    * Root the verification copies materialize under. The environment
    * adapter's working-copy root must be the same directory, so a
    * relative working directory resolves inside the verification copy.
+   *
+   * Each preparation stages inside its own uniquely named directory
+   * below this root, so several toolkit instances over one session
+   * never collide. The root itself follows the `materializeTree`
+   * destination contract: no symbolic links, and the caller owns its
+   * parent exclusively.
    */
   runsRoot?: string;
   /** Opaque harness conversation reference, carried uninterpreted. */
@@ -205,8 +225,6 @@ export interface ReopenOutcome {
 /** The toolkit one harness embeds around a managed session. */
 export class AgentsToolkit {
   private readonly options: AgentsToolkitOptions;
-  private checkpoints = 0;
-  private runs = 0;
 
   constructor(options: AgentsToolkitOptions) {
     this.options = options;
@@ -274,7 +292,6 @@ export class AgentsToolkit {
         route: this.options.route.decision,
       });
     }
-    this.checkpoints += 1;
     const current = (await this.options.session.describe()).workspace.headRevisionId;
     const outcome = await this.options.session.checkpoint(
       this.options.blobs,
@@ -420,22 +437,64 @@ export class AgentsToolkit {
     };
   }
 
-  /** Prepare one verification run: synchronize, then stage the copies. */
+  /**
+   * Prepare one verification run: synchronize, then stage the copies.
+   *
+   * A recorded preparation wins before anything is staged. The durable
+   * provenance record names the copy the operation owns, so a retry —
+   * after a crash, or from a concurrent toolkit that lost the
+   * preparation race — adopts that copy instead of staging a second
+   * one. Staging happens inside a uniquely named attempt directory, so
+   * toolkit restarts and concurrent instances never collide; an attempt
+   * that fails removes only its own uncommitted directories.
+   *
+   * Preparation for one operation is serialized in this process: a
+   * concurrent caller of the same operation waits for the answer of the
+   * attempt in flight rather than racing a second bridge checkpoint.
+   */
   private async prepareVerification(
     operation: { id: string },
     attachmentRef: { sessionId: string; attachmentId: string; generation: number },
     launch: { command: string; args?: string[] },
     authority: PolicyAuthority,
-  ): Promise<
-    | { status: "refused"; code: string; message: string }
-    | { status: "prepared"; cwd: string; verify: Record<string, unknown> }
-  > {
+  ): Promise<PreparationAnswer> {
     if (this.options.runsRoot === undefined) {
       return {
         status: "refused",
         code: "InvalidRequest",
         message: "The toolkit was configured without a runs root, so it stages no verification copies.",
       };
+    }
+    const inFlight = inFlightPreparations.get(operation.id);
+    if (inFlight !== undefined) {
+      return inFlight;
+    }
+    const started = this.stagePreparation(operation, attachmentRef, launch, authority);
+    inFlightPreparations.set(operation.id, started);
+    try {
+      return await started;
+    } finally {
+      inFlightPreparations.delete(operation.id);
+    }
+  }
+
+  /** Stage one preparation: adopt the recorded answer or build it. */
+  private async stagePreparation(
+    operation: { id: string },
+    attachmentRef: { sessionId: string; attachmentId: string; generation: number },
+    launch: { command: string; args?: string[] },
+    authority: PolicyAuthority,
+  ): Promise<PreparationAnswer> {
+    // A preparation this operation already holds is adopted before the
+    // bridge is synchronized or any copy is staged: the tested revision
+    // and the copy to run in are already recorded (SPEC.md 11.5).
+    const recorded = await this.options.session.executionProvenance(operation.id);
+    if (recorded !== null && recorded.testedRevisionId !== undefined && recorded.verificationCopyId !== undefined) {
+      try {
+        return this.adoptPreparation(recorded);
+      } catch (error) {
+        return refusalOf(error);
+      }
     }
     // Remote verification first synchronizes local edits through the
     // checkpoint contract (SPEC.md section 17).
@@ -454,16 +513,12 @@ export class AgentsToolkit {
         message: "The synchronized bridge produced no workspace head to verify against.",
       };
     }
-    this.runs += 1;
-    const copyRoot = `${this.options.runsRoot}/copy-${this.runs}`;
-    const verificationRoot = `${this.options.runsRoot}/verify-${this.runs}`;
-    mkdirSync(copyRoot, { recursive: true });
-    mkdirSync(verificationRoot, { recursive: true });
+    const attempt = `${this.options.runsRoot}/run-${randomUUID()}`;
     try {
       const copy = await this.options.session.materialize(
         this.options.blobs,
         head,
-        copyRoot,
+        `${attempt}/input`,
         { authority, mode: "proposal" },
       );
       const prepared = await this.options.session.prepareVerificationRun(
@@ -476,12 +531,14 @@ export class AgentsToolkit {
           arguments: launch,
           workingCopyId: copy.record.id,
         },
-        { authority, destination: verificationRoot },
+        { authority, destination: `${attempt}/verify` },
       );
-      const cwd = relative(this.options.runsRoot, verificationRoot);
+      // The working directory comes from the recorded copy, never from
+      // a name this attempt calculated: an adopted preparation keeps
+      // pointing at the copy the record owns.
       return {
         status: "prepared",
-        cwd,
+        cwd: this.cwdOfRecordedCopy(prepared.verificationCopy.rootPath),
         verify: {
           synchronizedRevisionId: synchronized.revisionId,
           synchronizedNewRevision: synchronized.created,
@@ -490,8 +547,64 @@ export class AgentsToolkit {
         },
       };
     } catch (error) {
+      // Nothing of this attempt committed — the record insert is the
+      // last step of preparation — so only its own directories go. A
+      // concurrent winner's preparation survives and is adopted.
+      rmSync(attempt, { recursive: true, force: true });
+      const winner = await this.options.session.executionProvenance(operation.id);
+      if (winner !== null && winner.testedRevisionId !== undefined && winner.verificationCopyId !== undefined) {
+        return this.adoptPreparation(winner);
+      }
       return refusalOf(error);
     }
+  }
+
+  /**
+   * Adopt the preparation another attempt recorded.
+   *
+   * The report names the recorded revision and copy. No bridge
+   * synchronization happened for this call, so the synchronized fields
+   * state the tested revision as it stands recorded.
+   */
+  private adoptPreparation(
+    record: ExecutionProvenance,
+  ):
+    | { status: "refused"; code: string; message: string }
+    | { status: "prepared"; cwd: string; verify: Record<string, unknown> } {
+    const copy = this.options.session.controlStore.getWorkingCopy(record.verificationCopyId!);
+    if (copy === null) {
+      return {
+        status: "refused",
+        code: "InvalidRequest",
+        message: `The recorded verification copy ${record.verificationCopyId} of ${record.operationId} is gone.`,
+      };
+    }
+    return {
+      status: "prepared",
+      cwd: this.cwdOfRecordedCopy(copy.rootPath),
+      verify: {
+        synchronizedRevisionId: record.testedRevisionId,
+        synchronizedNewRevision: false,
+        testedRevisionId: record.testedRevisionId,
+        verificationCopyId: record.verificationCopyId,
+      },
+    };
+  }
+
+  /**
+   * The working directory of one recorded copy, relative to the runs
+   * root. A copy outside the runs root refuses: the adapter would not
+   * resolve it inside the verification copy.
+   */
+  private cwdOfRecordedCopy(rootPath: string): string {
+    const cwd = relative(this.options.runsRoot!, rootPath);
+    if (cwd === "" || cwd.startsWith("..") || isAbsolute(cwd)) {
+      throw invalidRequestError(
+        `The recorded verification copy ${rootPath} lies outside the configured runs root ${this.options.runsRoot}.`,
+        { rootPath, runsRoot: this.options.runsRoot },
+      );
+    }
+    return cwd;
   }
 
   /**

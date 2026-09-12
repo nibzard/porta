@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ControlStore } from "../store/control-store.js";
@@ -470,6 +470,254 @@ test("one request key reaches one provider invocation across concurrent callers"
     assert.equal(third.status, "completed");
     assert.equal(third.operationId, a.operationId);
     assert.equal(third.result?.exitCode, 0);
+  } finally {
+    state.done();
+  }
+});
+
+// -- F3: recoverable verification preparation ----------------------------------
+
+/** One run answer, with the verification fields the toolkit reports. */
+interface RunAnswer {
+  status: string;
+  code?: string;
+  message?: string;
+  operationId: string;
+  result?: { exitCode?: number };
+  verify?: {
+    synchronizedRevisionId: string;
+    synchronizedNewRevision: boolean;
+    testedRevisionId: string;
+    verificationCopyId: string;
+    changedPaths?: { path: string; change: string }[];
+  };
+}
+
+/** Build a second toolkit over the same durable session. */
+async function secondToolkit(
+  state: Bench,
+  extras: { runsRoot?: string; leaseOf?: (environmentId: string) => Promise<EnvironmentLease> },
+): Promise<AgentsToolkit> {
+  const session = await new PortableRuntime(state.store).openSession(state.sessionId);
+  return new AgentsToolkit({
+    session,
+    blobs: new BlobStore(join(state.root, "blobs"), state.store),
+    route: { decision: "local-bridge", bridgeRootPath: state.bridge },
+    authority: baseAuthority(),
+    approvals: approving(state),
+    principal: "user://operator",
+    leaseOf:
+      extras.leaseOf ??
+      ((environmentId) => Promise.resolve(state.adapter.lease(environmentId))),
+    ...(extras.runsRoot !== undefined ? { runsRoot: extras.runsRoot } : { runsRoot: join(state.root, "runs") }),
+    harnessContextRef: "agents-sdk://thread/7f3c",
+  });
+}
+
+test("a new toolkit instance verifies new requests in the same runs directory", async () => {
+  const state = await bench();
+  try {
+    state.granted.push({ approvedBy: "user://ada", operations: ["exec.process@1"] });
+    const first = (await state.toolkit.run({
+      command: "true",
+      verify: true,
+      requestKey: "fresh-1",
+    })) as unknown as RunAnswer;
+    assert.equal(first.status, "completed");
+
+    // A harness restart: a new toolkit, the same session, the same runs
+    // directory. A per-instance counter would reoccupy the first copy.
+    const restarted = await secondToolkit(state, {});
+    state.granted.push({ approvedBy: "user://ada", operations: ["exec.process@1"] });
+    const second = (await restarted.run({
+      command: "true",
+      verify: true,
+      requestKey: "fresh-2",
+    })) as unknown as RunAnswer;
+    assert.equal(second.status, "completed");
+    assert.notEqual(second.verify?.verificationCopyId, first.verify?.verificationCopyId);
+  } finally {
+    state.done();
+  }
+});
+
+test("concurrent toolkits prepare one request once and stage distinct copies", async () => {
+  const state = await bench();
+  try {
+    const runsRoot = join(state.root, "runs");
+    const before = new Set(readdirSync(runsRoot));
+    let invocations = 0;
+    const counting = async (environmentId: string): Promise<EnvironmentLease> => {
+      const lease = await state.adapter.lease(environmentId);
+      const counted: EnvironmentLease = {
+        environmentId: lease.environmentId,
+        ...(lease.expiresAt !== undefined ? { expiresAt: lease.expiresAt } : {}),
+        manifest: () => lease.manifest(),
+        invoke: async (request) => {
+          invocations += 1;
+          return lease.invoke(request);
+        },
+        inspect: (operationId) => lease.inspect(operationId),
+        cancel: (operationId) => lease.cancel(operationId),
+        bind: (resource, context) => lease.bind(resource, context),
+        renew: (expiresAt) => lease.renew(expiresAt),
+        release: () => lease.release(),
+      };
+      return counted;
+    };
+    const one = await secondToolkit(state, { leaseOf: counting });
+    const two = await secondToolkit(state, { leaseOf: counting });
+    const launch = { command: "printf", args: ["%s", "once"], verify: true, requestKey: "verify-once-1" };
+
+    state.granted.push({ approvedBy: "user://ada", operations: ["exec.process@1"] });
+    state.granted.push({ approvedBy: "user://ada", operations: ["exec.process@1"] });
+    const answers = (await Promise.all([
+      one.run({ ...launch }),
+      two.run({ ...launch }),
+    ])) as unknown as RunAnswer[];
+
+    // One authoritative preparation, one provider invocation, both callers
+    // completed on the same recorded copy.
+    assert.equal(invocations, 1);
+    assert.equal(answers[0]?.status, "completed");
+    assert.equal(answers[1]?.status, "completed");
+    assert.equal(answers[1]?.operationId, answers[0]?.operationId);
+    assert.equal(answers[1]?.verify?.verificationCopyId, answers[0]?.verify?.verificationCopyId);
+    const record = state.store.getExecutionProvenance(answers[0]!.operationId);
+    assert.equal(record?.verificationCopyId, answers[0]?.verify?.verificationCopyId);
+
+    // Exactly one staging attempt appeared under the runs directory; the
+    // losing attempt removed its own uncommitted directories.
+    const added = readdirSync(runsRoot).filter((name) => !before.has(name));
+    assert.deepEqual(added.length, 1);
+  } finally {
+    state.done();
+  }
+});
+
+test("a completed retry returns its recorded result and tested revision", async () => {
+  const state = await bench();
+  try {
+    state.granted.push({ approvedBy: "user://ada", operations: ["exec.process@1"] });
+    const first = (await state.toolkit.run({
+      command: "printf",
+      args: ["%s", "one"],
+      verify: true,
+      requestKey: "recorded-1",
+    })) as unknown as RunAnswer;
+    assert.equal(first.status, "completed");
+
+    // The bridge changes after the run settled. A retry under the same
+    // request key must return the recorded outcome, not re-stage: the
+    // workspace head stays where the first run left it.
+    writeFileSync(join(state.bridge, "app.txt"), "v2\n");
+    const headBefore = (await state.toolkit.environmentContext()).workspace.headRevisionId;
+    state.granted.push({ approvedBy: "user://ada", operations: ["exec.process@1"] });
+    const retry = (await state.toolkit.run({
+      command: "printf",
+      args: ["%s", "one"],
+      verify: true,
+      requestKey: "recorded-1",
+    })) as unknown as RunAnswer;
+    assert.equal(retry.status, "completed");
+    assert.equal(retry.operationId, first.operationId);
+    assert.deepEqual(retry.result, first.result);
+    assert.equal(retry.verify?.testedRevisionId, first.verify?.testedRevisionId);
+    assert.equal(retry.verify?.verificationCopyId, first.verify?.verificationCopyId);
+    const headAfter = (await state.toolkit.environmentContext()).workspace.headRevisionId;
+    assert.equal(headAfter, headBefore);
+  } finally {
+    state.done();
+  }
+});
+
+test("a retry adopts the preparation a crashed process recorded", async () => {
+  const state = await bench();
+  try {
+    // Stage a preparation the way the toolkit would, then let the
+    // "process die": the operation holds a preparation and no dispatch.
+    const session = await new PortableRuntime(state.store).openSession(state.sessionId);
+    const blobs = new BlobStore(join(state.root, "blobs"), state.store);
+    const authority = baseAuthority();
+    const checkpoint = await state.toolkit.synchronizeBridge();
+    const head = checkpoint.revisionId;
+    const description = await session.describe();
+    const attachment = description.attachments.find((entry) => entry.status === "active")!;
+    const attachmentRef = {
+      sessionId: state.sessionId,
+      attachmentId: attachment.attachmentId,
+      generation: attachment.generation,
+    };
+    const admitted = await session.invoke(
+      {
+        requestKey: "crash-1",
+        attachment: attachmentRef,
+        capability: "exec.process@1",
+        operation: "run",
+        input: { command: "tee", args: ["crash.txt"] },
+      },
+      { authority },
+    );
+    const attempt = join(state.root, "runs", "run-crashed");
+    const copy = await session.materialize(blobs, head, join(attempt, "input"), {
+      authority,
+      mode: "proposal",
+    });
+    const prepared = await session.prepareVerificationRun(
+      blobs,
+      {
+        operationId: admitted.id,
+        attachment: attachmentRef,
+        capability: "exec.process@1",
+        operation: "run",
+        arguments: { command: "tee", args: ["crash.txt"] },
+        workingCopyId: copy.record.id,
+      },
+      { authority, destination: join(attempt, "verify") },
+    );
+
+    state.granted.push({ approvedBy: "user://ada", operations: ["exec.process@1"] });
+    const retry = (await state.toolkit.run({
+      command: "tee",
+      args: ["crash.txt"],
+      verify: true,
+      requestKey: "crash-1",
+    })) as unknown as RunAnswer;
+    assert.equal(retry.status, "completed");
+    assert.equal(retry.operationId, admitted.id);
+    assert.equal(retry.verify?.verificationCopyId, prepared.verificationCopy.id);
+    assert.equal(retry.verify?.testedRevisionId, prepared.provenance.testedRevisionId);
+    // The command ran inside the recorded copy: its change is measured.
+    assert.deepEqual(retry.verify?.changedPaths, [{ path: "crash.txt", change: "added" }]);
+  } finally {
+    state.done();
+  }
+});
+
+test("a refused preparation leaves the operation recoverable", async () => {
+  const state = await bench();
+  try {
+    // The runs root names a file, so staging cannot create directories.
+    writeFileSync(join(state.root, "not-a-dir"), "");
+    const broken = await secondToolkit(state, { runsRoot: join(state.root, "not-a-dir") });
+    state.granted.push({ approvedBy: "user://ada", operations: ["exec.process@1"] });
+    const refused = (await broken.run({
+      command: "true",
+      verify: true,
+      requestKey: "recover-1",
+    })) as unknown as RunAnswer;
+    assert.equal(refused.status, "refused");
+
+    // The failed attempt committed no preparation, so a healthy toolkit
+    // retries the same request key and completes it.
+    state.granted.push({ approvedBy: "user://ada", operations: ["exec.process@1"] });
+    const recovered = (await state.toolkit.run({
+      command: "true",
+      verify: true,
+      requestKey: "recover-1",
+    })) as unknown as RunAnswer;
+    assert.equal(recovered.status, "completed");
+    assert.equal(recovered.operationId !== "", true);
   } finally {
     state.done();
   }
