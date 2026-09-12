@@ -843,16 +843,77 @@ function alive(pid: number): boolean {
   }
   try {
     process.kill(pid, 0);
-    return true;
   } catch {
     return false;
   }
+  // A signal probe also answers for a zombie: dead, waiting for a
+  // parent that may be another blocked process. A zombie holds no
+  // resources and runs nothing, so it does not count as alive.
+  return !isZombie(pid);
 }
 
-/** Whether any member of one process group is alive. */
+/**
+ * Whether one process is a zombie.
+ *
+ * Reads the kernel state on Linux; elsewhere the answer is no and the
+ * signal probe alone decides.
+ */
+function isZombie(pid: number): boolean {
+  const fields = procStatFields(pid);
+  return fields !== null && fields[0] === "Z";
+}
+
+/** The `/proc` stat fields after the command name, or null. */
+function procStatFields(pid: number): string[] | null {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const afterName = stat.lastIndexOf(")");
+    if (afterName === -1) {
+      return null;
+    }
+    return stat.slice(afterName + 1).trim().split(/\s+/);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether any member of one process group is alive.
+ *
+ * On Linux this scans the process table for non-zombie members of the
+ * group, because a group signal probe also answers for zombies of
+ * members whose parents live in other processes.
+ */
 function groupAlive(pid: number): boolean {
   if (pid <= 0) {
     return false;
+  }
+  if (process.platform === "linux") {
+    let members = 0;
+    try {
+      for (const entry of readdirSync("/proc")) {
+        if (!/^[0-9]+$/.test(entry)) {
+          continue;
+        }
+        const fields = procStatFields(Number(entry));
+        if (fields === null) {
+          // The process ended between listing and reading.
+          continue;
+        }
+        if (Number(fields[2]) === pid) {
+          members += 1;
+          if (fields[0] !== "Z" && fields[0] !== "X") {
+            return true;
+          }
+        }
+      }
+    } catch {
+      // The table read failed; fall through to the signal probe.
+    }
+    if (members > 0) {
+      // Every member is a zombie or a corpse; the group runs nothing.
+      return false;
+    }
   }
   try {
     process.kill(-pid, 0);

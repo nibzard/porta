@@ -1287,7 +1287,7 @@
     "id": "T051",
     "title": "Implement CLI attachment and operation commands",
     "priority": 3,
-    "status": "todo",
+    "status": "done",
     "details": "Expose attach, invoke, operation inspection, cancellation, and release.",
     "depends_on": [
       "T049"

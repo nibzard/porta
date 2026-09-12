@@ -175,6 +175,38 @@ The journal prints as one JSON object per line, in sequence order.
 `--after` resumes from a sequence, so a consumer that stops and starts
 again never misses an event or repeats one.
 
+## Operations
+
+`invoke` admits one invocation and returns its durable operation
+record. The identifier exists the moment the command returns;
+completion is a later, separate step. Run the operation through the
+adapter lease, record its result, and settle it:
+
+1. `invoke` prints the operation record with status `accepted`.
+2. The executor marks the operation dispatched and runs it through
+   the adapter lease.
+3. The executor records the result and settles the operation.
+4. `operation inspect` prints the record exactly as stored.
+
+A retry of `invoke` under the same request key returns the same
+operation; the key and the attachment generation are never
+regenerated.
+
+A completed process operation with a nonzero process exit code is a
+successful Portable invocation: `operation inspect` exits 0, reports
+status `completed`, and the process exit code stays in the recorded
+result. A lost response settles as `unknown`, and `operation
+inspect` exits 3 while it prints the record.
+
+`operation cancel` stops one operation at its provider through the
+adapter lease. Only a confirmed stop settles the record as
+`cancelled`; a best-effort stop leaves the outcome `unknown` with
+the attempt on the cancellation trail.
+
+`release` releases one attachment. The provider must confirm. A
+retry under the same request key reports the recorded release and
+never reaches the provider again.
+
 ## Conflicts change nothing
 
 Every refusal path leaves durable state and files untouched:
