@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "kind": "verification",
+  "workspaceRevisionId": "rev-sample-00000000",
+  "recordedAt": "2026-09-12T00:00:00Z",
+  "producedBy": {
+    "attachmentId": "att-sample"
+  },
+  "checks": [
+    { "name": "dashboard-visible", "passed": true },
+    { "name": "summary-matches-inspection", "passed": true }
+  ]
+}

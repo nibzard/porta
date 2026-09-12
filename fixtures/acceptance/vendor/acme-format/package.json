@@ -1,0 +1,7 @@
+{
+  "name": "acme-format",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.mjs",
+  "description": "The acceptance fixture's declared dependency."
+}

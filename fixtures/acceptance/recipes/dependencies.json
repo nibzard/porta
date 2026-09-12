@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "recipe": "dependencies",
+  "purpose": "Reconstruct the application's node dependency on a fresh environment.",
+  "steps": [
+    {
+      "id": "install-vendor",
+      "run": ["node", "recipes/install-vendor.mjs"],
+      "produces": "node_modules/acme-format",
+      "idempotent": true
+    }
+  ]
+}

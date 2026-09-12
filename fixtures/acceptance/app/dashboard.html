@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Reading summary</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; }
+    #summary { font-size: 1.25rem; }
+    .anomaly { color: #b00020; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>Reading summary</h1>
+  <p id="summary">loading&hellip;</p>
+  <script>
+    // The summary reaches the page only through this script: a plain
+    // HTTP fetch sees "loading", a browser that runs the page sees
+    // the numbers. That is why inspection needs a real browser.
+    fetch("/api/summary")
+      .then((response) => response.json())
+      .then((summary) => {
+        const text = `${summary.count} readings, lowest ${summary.lowest}, ` +
+          `highest ${summary.highest}, anomalies ${summary.anomalies}`;
+        document.getElementById("summary").textContent = text;
+        document.getElementById("summary").className =
+          summary.anomalies > 0 ? "anomaly" : "";
+        document.title = "reading summary loaded";
+      });
+  </script>
+</body>
+</html>

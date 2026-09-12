@@ -1554,7 +1554,7 @@
     "id": "T062",
     "title": "Create the executable acceptance fixture",
     "priority": 3,
-    "status": "todo",
+    "status": "done",
     "details": "Add a small repository fixture with data inspection, native tests, and a browser-visible application.",
     "depends_on": [
       "T028",

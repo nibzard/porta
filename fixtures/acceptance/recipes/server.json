@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "recipe": "server",
+  "purpose": "Start the dashboard application server.",
+  "requires": ["dependencies"],
+  "steps": [
+    {
+      "id": "start-dashboard",
+      "run": ["node", "app/server.mjs", "--port", "0"],
+      "readySignal": "dashboard-ready",
+      "artifact": "server"
+    }
+  ]
+}
