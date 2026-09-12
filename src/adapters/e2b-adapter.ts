@@ -149,19 +149,23 @@ const DEFAULT_SANDBOX_TIMEOUT_MS = 15 * 60_000;
 const DEFAULT_LEASE_TTL_MS = 15 * 60_000;
 
 /**
- * Typed enforcement facts of this provider (SPEC.md 7).
+ * The network egress of one sandbox, as the provider applies it at
+ * creation: the SDK's `allowInternetAccess` option.
+ */
+export type E2BNetworkSetting = "internet-allowed" | "blocked";
+
+/**
+ * Typed enforcement facts of one sandbox (SPEC.md 7).
  *
  * Sandboxes run remotely in Firecracker microVMs without host
- * filesystem access. Until sandbox creation carries the network
- * option through (R3), every sandbox this adapter creates has
- * internet access, so the honest fact is `unrestricted` and a policy
- * that restricts egress refuses acquisition here.
+ * filesystem access. A blocked sandbox reaches nothing beyond the
+ * provider's control plane; an allowed one reaches the internet.
  */
-const ENFORCEMENT_FACTS: EnforcementFacts = {
+const enforcementFactsOf = (network: E2BNetworkSetting): EnforcementFacts => ({
   executionLocation: "remote",
-  networkEgress: "unrestricted",
+  networkEgress: network === "blocked" ? "none" : "unrestricted",
   hostFilesystemAccess: false,
-};
+});
 
 /** Provider hard cap of one timeout: twenty-four hours. */
 const PROVIDER_MAX_TIMEOUT_MS = 86_400_000;
@@ -222,6 +226,8 @@ export interface E2BClient {
     timeoutMs: number;
     metadata: Record<string, string>;
     apiKey: string;
+    /** The sandbox's internet access; the SDK applies it at creation. */
+    allowInternetAccess: boolean;
   }): Promise<{ sandboxId: string }>;
   getInfo(sandboxId: string, apiKey: string): Promise<E2BSandboxInfo | null>;
   listByMetadata(
@@ -296,11 +302,13 @@ export class SdkE2BClient implements E2BClient {
     timeoutMs: number;
     metadata: Record<string, string>;
     apiKey: string;
+    allowInternetAccess: boolean;
   }): Promise<{ sandboxId: string }> {
     const sandbox = await Sandbox.create(input.template, {
       timeoutMs: input.timeoutMs,
       metadata: input.metadata,
       apiKey: input.apiKey,
+      allowInternetAccess: input.allowInternetAccess,
     });
     return { sandboxId: sandbox.sandboxId };
   }
@@ -471,6 +479,14 @@ export interface E2BAcquisitionRecord {
   /** Provider sandbox identifier; `null` until the create response lands. */
   sandboxId: string | null;
   template: string;
+  /**
+   * The internet setting the sandbox was created with. Provider
+   * inspection cannot read the setting back, so the record is the
+   * only evidence. Records from before this field existed were
+   * created with the provider default and read as `internet-allowed`;
+   * no later adapter default relabels them.
+   */
+  network?: E2BNetworkSetting;
   createdAt: string;
   expiresAt: string;
   /** Resources read from the provider after the sandbox existed. */
@@ -618,6 +634,7 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
 
   /** The published offer of this provider. */
   offer(): EnvironmentOffer {
+    const network = this.operatorNetwork();
     return {
       providerId: E2B_LINUX_PROVIDER_ID,
       adapterId: E2B_LINUX_PROVIDER_ID,
@@ -627,11 +644,39 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
       ],
       enforcement: {
         isolation: "firecracker-microvm",
-        networkEgress: this.allowInternetAccess ? "internet-allowed" : "blocked",
+        networkEgress: network,
         releaseSemantics: "kill-discards-state",
       },
-      enforcementFacts: { ...ENFORCEMENT_FACTS },
+      enforcementFacts: enforcementFactsOf(network),
     };
+  }
+
+  /** The network setting this adapter's operator configuration defaults to. */
+  private operatorNetwork(): E2BNetworkSetting {
+    return this.allowInternetAccess ? "internet-allowed" : "blocked";
+  }
+
+  /**
+   * The network setting one acquisition receives under its limits.
+   *
+   * Policy narrows and the operator configures; neither widens the
+   * other. A policy that blocks egress forces a blocked sandbox even
+   * when the operator allows internet. E2B exposes no origin
+   * allowlist, so an allowlist policy refuses instead of being
+   * approximated by either boolean.
+   */
+  private networkFor(limits: AuthorizedAcquireRequest["limits"]): E2BNetworkSetting {
+    if (limits.networkEgress === "allowlist") {
+      throw policyDeniedError(
+        "The E2B provider blocks or allows the internet as a whole; " +
+          "an origin allowlist is not enforceable here.",
+        { dimension: "networkEgress", allowed: limits.networkEgress },
+      );
+    }
+    if (limits.networkEgress === "none") {
+      return "blocked";
+    }
+    return this.operatorNetwork();
   }
 
   async acquire(request: AuthorizedAcquireRequest): Promise<EnvironmentLease> {
@@ -674,24 +719,28 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
     // unless the template's quantities are known truth.
     const environmentId = `env-e2b-${randomUUID()}`;
     const now = new Date().toISOString();
-    const unsatisfied = checkTargetSatisfies(
-      request.request,
-      manifestTarget(this.buildManifest(environmentId, null)),
-    );
-    if (unsatisfied !== null) {
-      throw unsatisfied;
-    }
+    const network = this.networkFor(request.limits);
     const ttlMs = this.admissibleLeaseMs(request.limits);
     // The intent record exists before any provider call: a crash past
-    // this point recovers by identity (SPEC.md section 8).
+    // this point recovers by identity (SPEC.md section 8). The network
+    // setting persists here because provider inspection cannot read it
+    // back; the record is the only evidence of what was enforced.
     const record: E2BAcquisitionRecord = {
       acquisitionId: request.acquisitionId,
       environmentId,
       sandboxId: null,
       template: this.template,
+      network,
       createdAt: now,
       expiresAt: new Date(Date.parse(now) + ttlMs).toISOString(),
     };
+    const unsatisfied = checkTargetSatisfies(
+      request.request,
+      manifestTarget(this.buildManifest(environmentId, record)),
+    );
+    if (unsatisfied !== null) {
+      throw unsatisfied;
+    }
     this.writeRecord(record);
     await this.guarded(() => this.createSandbox(record, apiKey));
     return this.lease(environmentId);
@@ -821,24 +870,15 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
   /**
    * The lease span the effective limits admit, or a refusal.
    *
-   * Sandboxes run remotely. Until creation carries the network option
-   * through (R3), this adapter cannot enforce a restricted egress
-   * policy, so anything below `unrestricted` refuses before any
-   * spend exists. The lease span is constrained to the lifetime
-   * ceiling.
+   * Sandboxes run remotely, so a policy without remote execution
+   * refuses. The lease span is constrained to the lifetime ceiling.
+   * Network limits are resolved by `networkFor` before this runs.
    */
   private admissibleLeaseMs(limits: AuthorizedAcquireRequest["limits"]): number {
     if (!limits.executionLocations.includes("remote")) {
       throw policyDeniedError(
         "The E2B provider executes remotely; the policy allows no remote execution.",
         { dimension: "locations", allowed: limits.executionLocations },
-      );
-    }
-    if (limits.networkEgress !== "unrestricted") {
-      throw policyDeniedError(
-        "The E2B adapter cannot yet enforce restricted network egress at creation; " +
-          "restricted policies refuse instead of being accepted and ignored.",
-        { dimension: "networkEgress", allowed: limits.networkEgress },
       );
     }
     if (limits.maxEnvironmentLifetimeMs <= 0) {
@@ -1527,6 +1567,7 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
       timeoutMs,
       metadata: this.metadataOf(record),
       apiKey,
+      allowInternetAccess: this.networkSettingOf(record) !== "blocked",
     });
     this.writeRecord({ ...record, sandboxId: created.sandboxId });
     // Read the actual resources once; a failure here is not an
@@ -1580,11 +1621,22 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
     });
   }
 
+  /**
+   * The network setting one record carries. Records from before the
+   * setting existed were created with the provider default — internet
+   * allowed — so an absent setting never reads as blocked, whatever
+   * this adapter instance's configuration says now.
+   */
+  private networkSettingOf(record: E2BAcquisitionRecord | null): E2BNetworkSetting {
+    return record?.network ?? "internet-allowed";
+  }
+
   /** One manifest from one record; `null` describes a prospective one. */
   private buildManifest(
     environmentId: string,
     record: E2BAcquisitionRecord | null,
   ): EnvironmentManifest {
+    const network = this.networkSettingOf(record);
     return {
       environmentId,
       providerId: E2B_LINUX_PROVIDER_ID,
@@ -1605,13 +1657,13 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
           : {}),
         ...(record !== null ? { sandboxTemplate: record.template } : {}),
         isolation: "firecracker-microvm",
-        networkEgress: this.allowInternetAccess ? "internet-allowed" : "blocked",
+        networkEgress: network,
         ingress: "public-url-per-exposed-port",
         timeoutBehavior: "killed-when-timeout-expires",
         releaseSemantics: "kill-discards-state",
         renewal: "provider-settimeout",
       },
-      enforcementFacts: { ...ENFORCEMENT_FACTS },
+      enforcementFacts: enforcementFactsOf(network),
       adapterVersion: VERSION,
       ...(record?.resources !== undefined
         ? { providerRuntimeVersion: record.resources.envdVersion }

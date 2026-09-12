@@ -1,6 +1,6 @@
 # Review repair plan
 
-Date: 2026-09-12. Status: in progress. R1 and R2 are complete; R3 through R9 remain.
+Date: 2026-09-12. Status: in progress. R1 through R3 are complete; R4 through R9 remain.
 
 This plan covers all eight defects found in the project review. It includes the related documentation and validation work.
 
@@ -103,6 +103,20 @@ Each repair starts with a failing regression test. Use temporary files, loopback
 **Design constraint:** This establishes at-most-once runtime dispatch. It must not claim exactly-once provider effects across a crash.
 
 ## R3: Apply E2B network restrictions
+
+> **Status: complete (2026-09-12).** The `allowInternetAccess` option
+> crosses to `Sandbox.create` on every acquisition. Policy narrows and
+> the operator configures: `none` forces a blocked sandbox even when
+> the operator allows internet, and an `allowlist` policy refuses with
+> `PolicyDenied` instead of approximating a boolean. The setting
+> persists in the acquisition record — provider inspection cannot read
+> it back — and manifests build from the recorded setting, so reopened
+> defaults never relabel an allocation; pre-field records read as
+> `internet-allowed`. The opt-in live smoke test probes outbound access
+> from a subprocess in both configurations and skips (unverified) when
+> credentials or the blocked-sandbox allocation are absent. Coverage:
+> `test:adapters/e2b-adapter` (creation forwarding, policy narrowing,
+> record-driven manifests, legacy honesty), `docs/adapters/e2b-linux.md`.
 
 **Problem:** `allowInternetAccess: false` changes advertised enforcement but never reaches sandbox creation.
 

@@ -70,6 +70,8 @@ class FakeE2BClient implements E2BClient {
   } | null = null;
   connectCalls = 0;
   createCalls = 0;
+  /** The internet flag every create call received, newest last. */
+  readonly internetFlags: boolean[] = [];
   killCalls = 0;
   readonly timeoutCalls: Array<{ sandboxId: string; timeoutMs: number }> = [];
   /** Throw after registering: the sandbox exists but the reply is lost. */
@@ -201,12 +203,14 @@ class FakeE2BClient implements E2BClient {
     timeoutMs: number;
     metadata: Record<string, string>;
     apiKey: string;
+    allowInternetAccess: boolean;
   }): Promise<{ sandboxId: string }> {
     void input.apiKey;
     if (this.dropCreateRequest) {
       throw new Error("network unreachable");
     }
     this.createCalls += 1;
+    this.internetFlags.push(input.allowInternetAccess);
     const sandboxId = `sbx-${this.createCalls}`;
     this.sandboxes.set(sandboxId, {
       info: {
@@ -285,20 +289,28 @@ interface Fixture {
   client: FakeE2BClient;
   stateDir: string;
   /** A fresh adapter over the same durable records and provider. */
-  reopen(): E2BLinuxAdapter;
+  reopen(options?: { allowInternetAccess?: boolean }): E2BLinuxAdapter;
   close(): void;
 }
 
-function make(options: { client?: FakeE2BClient } = {}): Fixture {
+function make(
+  options: { client?: FakeE2BClient; allowInternetAccess?: boolean } = {},
+): Fixture {
   const stateDir = mkdtempSync(join(tmpdir(), "porta-e2b-"));
   const client = options.client ?? new FakeE2BClient();
-  const build = () =>
-    new E2BLinuxAdapter({ stateDir, client, apiKey: "e2b_test_key" });
+  const build = (reopenOptions: { allowInternetAccess?: boolean } = {}) =>
+    new E2BLinuxAdapter({
+      stateDir,
+      client,
+      apiKey: "e2b_test_key",
+      allowInternetAccess:
+        reopenOptions.allowInternetAccess ?? options.allowInternetAccess ?? true,
+    });
   return {
     adapter: build(),
     client,
     stateDir,
-    reopen: () => build(),
+    reopen: (reopenOptions) => build(reopenOptions),
     close: () => rmSync(stateDir, { recursive: true, force: true }),
   };
 }
@@ -320,6 +332,7 @@ const LIMITS: AcquisitionLimits = {
 function request(
   acquisitionId = `acq-${randomUUID()}`,
   overrides: Partial<AuthorizedAcquireRequest["request"]> = {},
+  limits: AcquisitionLimits = LIMITS,
 ): AuthorizedAcquireRequest {
   return {
     acquisitionId,
@@ -330,7 +343,7 @@ function request(
       ...overrides,
     },
     authority: { principal: "user://test", policyRef: "policy://test" },
-    limits: LIMITS,
+    limits,
   };
 }
 
@@ -605,6 +618,84 @@ test("requirements this provider cannot satisfy reject before any spend", async 
     // Nothing was created and nothing was recorded.
     assert.equal(fixture.client.createCalls, 0);
     assert.deepEqual(fixture.adapter.allocations(), []);
+  } finally {
+    fixture.close();
+  }
+});
+
+test("the network setting reaches creation and policy narrows it", async () => {
+  const blocked = { ...LIMITS, networkEgress: "none" as const };
+  const allowlist = { ...LIMITS, networkEgress: "allowlist" as const };
+  const open = make();
+  const blockedAdapter = make({ allowInternetAccess: false });
+  const narrowed = make();
+  const listed = make();
+  try {
+    // Operator default, unrestricted policy: the flag crosses as true.
+    await open.adapter.acquire(request("acq-open"));
+    await blockedAdapter.adapter.acquire(request("acq-operator-blocked"));
+    // A restrictive policy forces a blocked sandbox even when the
+    // operator default allows internet.
+    await narrowed.adapter.acquire(request("acq-narrowed", {}, blocked));
+
+    assert.deepEqual(open.client.internetFlags, [true]);
+    assert.deepEqual(blockedAdapter.client.internetFlags, [false]);
+    assert.deepEqual(narrowed.client.internetFlags, [false]);
+
+    // E2B exposes no origin allowlist; approximating one with either
+    // boolean would lie, so the acquisition refuses before any spend.
+    const refused = await refuse(() =>
+      listed.adapter.acquire(request("acq-allowlist", {}, allowlist)),
+    );
+    assert.equal(refused?.code, "PolicyDenied");
+    assert.match(String(refused?.message), /allowlist/i);
+    assert.equal(listed.client.createCalls, 0);
+  } finally {
+    open.close();
+    blockedAdapter.close();
+    narrowed.close();
+    listed.close();
+  }
+});
+
+test("the manifest reports the recorded network setting, not later defaults", async () => {
+  const blocked = { ...LIMITS, networkEgress: "none" as const };
+  const fixture = make();
+  try {
+    const lease = await fixture.adapter.acquire(request("acq-recorded", {}, blocked));
+    const recorded = fixture.adapter.manifestOf(lease.environmentId);
+    assert.equal(recorded.enforcement.networkEgress, "blocked");
+    assert.equal(recorded.enforcementFacts?.networkEgress, "none");
+
+    // A fresh adapter instance with a permissive default cannot relabel
+    // an allocation the record says is blocked.
+    const reopened = fixture.reopen({ allowInternetAccess: true });
+    const reread = reopened.manifestOf(lease.environmentId);
+    assert.equal(reread.enforcement.networkEgress, "blocked");
+    assert.equal(reread.enforcementFacts?.networkEgress, "none");
+
+    // A record from before the setting existed was created with the
+    // provider default: it has internet, and no later default may
+    // claim otherwise. Provider inspection cannot prove the setting,
+    // so the record is the only evidence.
+    const statePath = join(
+      fixture.stateDir,
+      "acquisitions",
+      "acq-legacy.json",
+    );
+    const legacy = {
+      acquisitionId: "acq-legacy",
+      environmentId: "env-e2b-legacy",
+      sandboxId: null,
+      template: "base",
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    writeFileSync(statePath, JSON.stringify(legacy));
+    const blockedReopen = fixture.reopen({ allowInternetAccess: false });
+    const legacyManifest = blockedReopen.manifestOf("env-e2b-legacy");
+    assert.equal(legacyManifest.enforcement.networkEgress, "internet-allowed");
+    assert.equal(legacyManifest.enforcementFacts?.networkEgress, "unrestricted");
   } finally {
     fixture.close();
   }
@@ -1159,7 +1250,7 @@ test("remote changes return as proposals and never overwrite the source", async 
 test(
   "live lifecycle against E2B (requires E2B_API_KEY)",
   { skip: process.env.E2B_API_KEY === undefined },
-  async () => {
+  async (t) => {
     const stateDir = mkdtempSync(join(tmpdir(), "porta-e2b-live-"));
     const adapter = new E2BLinuxAdapter({
       stateDir,
@@ -1201,6 +1292,60 @@ test(
       assert.ok(
         Buffer.from(liveRun.stdout.dataBase64 ?? "", "base64").toString("utf8").includes("porta-live"),
       );
+
+      // Outbound access from a subprocess, in both configurations
+      // (SPEC.md section 7). The probe opens one TCP connection with
+      // bash's /dev/tcp under `timeout`, so it depends on no installed
+      // tool and a silent drop cannot hang the run.
+      const probeOutbound = async (target: EnvironmentLease, operationId: string): Promise<boolean> => {
+        const outcome = await target.invoke({
+          operationId,
+          capability: "exec.process@1",
+          operation: "run",
+          input: {
+            command: "bash",
+            args: ["-c", 'timeout 15 bash -c "exec 3<>/dev/tcp/example.com/443"'],
+          },
+          environmentId: target.environmentId,
+          limits: {},
+        });
+        const probe = outcome.result as { exitCode?: number; timedOut: boolean };
+        return !probe.timedOut && probe.exitCode === 0;
+      };
+      assert.equal(
+        await probeOutbound(lease, "op-live-net-open"),
+        true,
+        "the internet-allowed sandbox reaches the internet from a subprocess",
+      );
+
+      // A policy that allows no egress must produce a sandbox whose
+      // subprocesses cannot reach out. An account without the authority
+      // to allocate that sandbox records the check as unverified
+      // instead of passed.
+      const blockedRequest = request(`acq-live-blocked-${randomUUID()}`, {}, {
+        ...LIMITS,
+        networkEgress: "none" as const,
+      });
+      let blocked: EnvironmentLease | null = null;
+      try {
+        blocked = await adapter.acquire(blockedRequest);
+      } catch {
+        t.skip("The account refused the blocked-sandbox allocation; the blocked-network check is unverified.");
+      }
+      if (blocked !== null) {
+        try {
+          const blockedManifest = await blocked.manifest();
+          assert.equal(blockedManifest.enforcementFacts?.networkEgress, "none");
+          assert.equal(
+            await probeOutbound(blocked, "op-live-net-blocked"),
+            false,
+            "the blocked sandbox cannot reach the internet from a subprocess",
+          );
+        } finally {
+          const blockedRelease = await blocked.release();
+          assert.equal(blockedRelease.status, "released");
+        }
+      }
 
       const released = await lease.release();
       assert.equal(released.status, "released");

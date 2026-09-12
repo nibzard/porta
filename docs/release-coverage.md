@@ -390,6 +390,9 @@ deliberate stand-in or a documented limit, not a silent omission.
 3. **E2B credentials.** No credentials exist in this repository, so
    the E2B adapter has no executed run here. Its write-ahead
    acquisition protocol is documented in `docs/adapters/e2b-linux.md`.
+   The opt-in live smoke test checks outbound access from a subprocess
+   in both network configurations when `E2B_API_KEY` is set; without
+   the key it skips, and a skip is unverified, never passed.
 4. **`browser.cdp@1` profile.** The browser capability exposes
    session, navigation, and observation operations. The Chrome DevTools
    Protocol profile is optional in the specification and no adapter

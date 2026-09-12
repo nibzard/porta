@@ -24,14 +24,42 @@ adapter-specific descriptions:
 | Fact | Value | Why |
 | --- | --- | --- |
 | `executionLocation` | `remote` | Sandboxes run in the provider cloud. |
-| `networkEgress` | `unrestricted` | Until sandbox creation carries the network option through (R3), every sandbox reaches the internet; the honest fact is the wide one. |
+| `networkEgress` | `unrestricted` or `none` | Per acquisition: the recorded setting (see below). |
 | `hostFilesystemAccess` | `false` | A Firecracker microVM sees its own filesystem, never the host's. |
 
 The acquire call reads the effective limits and refuses before any
 spend exists when it cannot enforce them: a policy that allows no
-`remote` execution, any egress mode below `unrestricted`, or a
-lifetime ceiling of zero. The lease span it grants never exceeds the
-lifetime ceiling.
+`remote` execution, an egress `allowlist` (see below), or a lifetime
+ceiling of zero. The lease span it grants never exceeds the lifetime
+ceiling.
+
+## Network setting
+
+The provider exposes one network control at creation: the SDK's
+`allowInternetAccess` boolean. The whole sandbox reaches the internet,
+or nothing does — there is no origin allowlist. The setting resolves
+before any spend exists:
+
+| Effective policy | Operator default `allowInternetAccess` | Sandbox setting |
+| --- | --- | --- |
+| `unrestricted` | `true` or `false` | Follows the operator default |
+| `none` | `true` or `false` | `blocked` — policy narrows, never widens |
+| `allowlist` | either | Refused with `PolicyDenied` |
+
+The setting crosses to `Sandbox.create` at creation only. Provider
+inspection cannot read it back, so the acquisition record's `network`
+field is the only evidence of what was enforced. Consequences:
+
+- The manifest is built from the recorded setting, never from the
+  current adapter configuration. Reopening the adapter with a
+  different `allowInternetAccess` default cannot relabel an existing
+  allocation.
+- Records written before the field existed were created with the
+  provider default — internet allowed — and read as
+  `internet-allowed`. No later adapter default relabels them.
+- A blocked sandbox is the enforcement, not a promise: the typed fact
+  reports `networkEgress: "none"` because the sandbox was created that
+  way, and `example.com` stays unreachable from its subprocesses.
 
 ## Durable identity
 
@@ -96,9 +124,11 @@ file.
 The manifest carries what the provider reported after the sandbox
 existed — CPU count and memory from `getInfo`, the sandbox identifier,
 the template, and the envd version — not a guess from configuration.
-Before creation, resource minima cannot be proven, so a request with
-resource requirements rejects at acquisition unless the template's
-quantities are configured truth.
+The one exception is the network setting: the provider cannot report
+it, so the manifest reads it from the acquisition record (see
+"Network setting"). Before creation, resource minima cannot be
+proven, so a request with resource requirements rejects at acquisition
+unless the template's quantities are configured truth.
 
 ## Credentials
 
@@ -108,9 +138,13 @@ detail. Without a key, acquisition refuses with `ProviderUnavailable`
 and nothing is spent or recorded.
 
 The paid smoke test in `src/adapters/e2b-adapter.test.ts` runs only
-when `E2B_API_KEY` is set; without it, it skips. The offline tests run
-against an injected fake client and cover every acceptance criterion
-without spending provider credits.
+when `E2B_API_KEY` is set; without it, it skips. It checks outbound
+access from a subprocess in both configurations — the internet-allowed
+sandbox connects, the blocked one does not — and releases every
+sandbox it allocates. An account that refuses the blocked-sandbox
+allocation marks that check skipped, which is unverified, never
+passed. The offline tests run against an injected fake client and
+cover every acceptance criterion without spending provider credits.
 
 ## Processes
 
