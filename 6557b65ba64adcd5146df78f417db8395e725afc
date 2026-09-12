@@ -1,0 +1,1 @@
+Close the F7 failure-cleanup gap with nested finally blocks. Tests execute the extracted README example with attachment, checkpoint, release, and reopen failures and verify release attempts and closed store connections.
