@@ -18,6 +18,7 @@ const REQUIRED_CASES = [
   "process.output-limits",
   "process.timeout",
   "process.descendant-termination",
+  "process.release-orphaned-group",
   "operations.duplicate-request",
   "operations.mismatched-input",
   "operations.lost-response-after-effects",
@@ -89,7 +90,7 @@ test("the process cases wait for their test authority", async () => {
     // The pure operation cases pass; every case that drives the
     // adapter skips, and the run cannot call itself conformant.
     const gated = report.results.filter((entry) => entry.outcome === "skip");
-    assert.equal(gated.length, 8);
+    assert.equal(gated.length, 9);
     assert.ok(gated.every((entry) => entry.reason === "external-effects-not-authorized"));
     assert.equal(report.summary.failed, 0);
     assert.equal(report.verdict, "incomplete");
@@ -126,7 +127,7 @@ test("the process cases skip, not fails, against an adapter without processes", 
     // exec.process@1 — while the store-level operation cases still run.
     const processArea = report.results.filter((entry) => entry.area === "process");
     const operationsArea = report.results.filter((entry) => entry.area === "operations");
-    assert.equal(processArea.length, 8);
+    assert.equal(processArea.length, 9);
     assert.ok(
       processArea.every(
         (entry) => entry.outcome === "skip" && entry.reason === "capability-not-offered",

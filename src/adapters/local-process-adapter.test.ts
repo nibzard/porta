@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -499,3 +500,164 @@ function acquisitionIdOf(
 ): string | null {
   return parts.acquisitionOfEnvironment(environmentId)?.acquisitionId ?? null;
 }
+
+/** Poll until one predicate holds, or the budget ends. */
+async function waitUntil(
+  predicate: () => boolean,
+  budgetMs = 5000,
+): Promise<boolean> {
+  const deadline = Date.now() + budgetMs;
+  while (Date.now() < deadline) {
+    if (predicate()) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return predicate();
+}
+
+test("release stops descendants orphaned by an exited leader", async () => {
+  const { parts, dir, done } = adapter();
+  try {
+    const lease = await leaseOf(parts);
+    const other = await leaseOf(parts);
+    // An unrelated environment keeps a live process through the first
+    // release; its group must stay untouched.
+    const theirs = await other.invoke(
+      invocation("start", { command: "/bin/sh", args: ["-c", "sleep 30"] }),
+    );
+    const theirPid = Number(
+      (theirs.result as { providerProcessId: string }).providerProcessId,
+    );
+
+    // The shell starts a sleeper and exits at once; the sleeper holds
+    // the process group as an orphan.
+    const started = await lease.invoke(
+      invocation("start", { command: "/bin/sh", args: ["-c", "sleep 300 & exit 0"] }),
+    );
+    const { resourceId, providerProcessId } = started.result as {
+      resourceId: string;
+      providerProcessId: string;
+    };
+    const pid = Number(providerProcessId);
+    assert.ok(pid > 0);
+
+    // Confirmed parent exit: the observer recorded the exit.
+    const exited = await waitUntil(
+      () => parts.processRecord(resourceId)?.exitedAt !== undefined,
+    );
+    assert.equal(exited, true);
+    assert.throws(() => process.kill(pid, 0), "the leader exited first");
+
+    // A new process opens the same supervisor directory and releases.
+    // Nothing is shared but durable state.
+    const reopened = new LocalProcessAdapter({ supervisorDir: dir });
+    const released = await reopened.lease(lease.environmentId).release();
+    assert.equal(released.status, "released");
+
+    // The orphaned group died with the release; nothing survived it.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.throws(() => process.kill(-pid, 0), "the orphaned group stopped");
+    const record = reopened.processRecord(resourceId);
+    assert.equal(record?.terminate?.confirmed, true);
+    assert.equal(record?.terminate?.descendantsStopped, true);
+
+    // A repeated release finds nothing left and still succeeds.
+    const again = await reopened.lease(lease.environmentId).release();
+    assert.equal(again.status, "released");
+
+    // The unrelated environment's group was never touched.
+    assert.doesNotThrow(() => process.kill(-theirPid, 0));
+    const aliveOther = await other.invoke(
+      invocation("inspect", {
+        resourceId: (theirs.result as { resourceId: string }).resourceId,
+      }),
+    );
+    assert.equal((aliveOther.result as { state?: string }).state, "running");
+  } finally {
+    done();
+  }
+});
+
+test("an orphan that ignores the grace signal receives escalation", async () => {
+  const { parts, done } = adapter();
+  try {
+    const lease = await leaseOf(parts);
+    // A shell that ignores SIGTERM passes the ignored disposition on
+    // to its child, so the orphan ignores the graceful signal too.
+    const started = await lease.invoke(
+      invocation("start", {
+        command: "/bin/sh",
+        args: ["-c", 'trap "" TERM; sleep 300 & exit 0'],
+      }),
+    );
+    const { resourceId, providerProcessId } = started.result as {
+      resourceId: string;
+      providerProcessId: string;
+    };
+    const pid = Number(providerProcessId);
+    assert.ok(
+      await waitUntil(() => parts.processRecord(resourceId)?.exitedAt !== undefined),
+      "the leader exited first",
+    );
+
+    const released = await lease.release();
+    assert.equal(released.status, "released");
+
+    // The escalation, not the ignored signal, ended the group.
+    const record = parts.processRecord(resourceId);
+    assert.equal(record?.terminate?.confirmed, true);
+    assert.equal(record?.terminate?.descendantsStopped, true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.throws(() => process.kill(-pid, 0));
+  } finally {
+    done();
+  }
+});
+
+test("a recycled identifier never draws fire and stays cleanup work", async () => {
+  const { parts, done } = adapter();
+  // A stranger this test owns: its own session and group, never part
+  // of any environment. It stands in for the next process the
+  // operating system lands on a recycled identifier.
+  const stranger = spawn("sleep", ["300"], { detached: true, stdio: "ignore" });
+  stranger.unref();
+  const strangerPid = stranger.pid ?? 0;
+  try {
+    assert.ok(strangerPid > 0);
+    const lease = await leaseOf(parts);
+    // The durable record claims the stranger's identifier as its
+    // leader, with start-time evidence that cannot match: exactly
+    // what a reused identifier looks like.
+    parts.saveProcessRecord({
+      resourceId: "proc-recycled",
+      operationId: "op-recycled",
+      environmentId: lease.environmentId,
+      pid: strangerPid,
+      command: "sleep",
+      args: ["300"],
+      startedAt: new Date().toISOString(),
+      leaderStartTicks: 1,
+    });
+
+    const released = await lease.release();
+    assert.equal(released.status, "failed");
+    assert.equal(released.retryable, true);
+
+    // The stranger and its group were never signaled.
+    assert.doesNotThrow(() => process.kill(strangerPid, 0));
+    assert.doesNotThrow(() => process.kill(-strangerPid, 0));
+
+    // The unfinished termination stays visible in the record.
+    const record = parts.processRecord("proc-recycled");
+    assert.equal(record?.terminate?.confirmed, false);
+    assert.equal(record?.terminate?.descendantsStopped, false);
+  } finally {
+    try {
+      process.kill(-strangerPid, "SIGKILL");
+    } catch {
+      // The stranger ended on its own.
+    }
+    done();
+  }
+});

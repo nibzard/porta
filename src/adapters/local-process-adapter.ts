@@ -87,6 +87,19 @@ import { VERSION } from "../version.js";
  * Termination claims are measured, not assumed: a stop counts as
  * confirmed only when the process group is gone, and
  * `descendantsStopped` comes from the same group check.
+ *
+ * Release holds the same measure whatever became of the leader: an
+ * orphaned descendant holds the group exactly like its parent did,
+ * so release stops it with the same grace and escalation. A group
+ * that will not confirm ends the lease but reports the release as
+ * failed, so the unfinished stop stays visible as cleanup work.
+ * Each record carries its leader's kernel start time where Linux
+ * exposes it, and a termination verifies that evidence before it
+ * signals: a recycled process identifier never draws a signal onto
+ * a process this environment never owned. Records older than the
+ * evidence field — and platforms without `/proc` — trust the signal
+ * probe alone; that limit is the platform's and the adapter states
+ * it, never hides it.
  */
 
 /** Provider identity of this adapter. */
@@ -150,6 +163,12 @@ export interface ProcessRecord {
   command: string;
   args: string[];
   startedAt: string;
+  /**
+   * Kernel start time of the recorded leader, in `/proc` clock ticks
+   * (Linux only). It tells the recorded leader apart from a later
+   * process the operating system lands on the same identifier.
+   */
+  leaderStartTicks?: number;
   /** Written by the process that spawned it, when it saw the exit. */
   exitedAt?: string;
   exitCode?: number;
@@ -549,15 +568,32 @@ export class LocalProcessLease implements EnvironmentLease {
   }
 
   async release(): Promise<ReleaseResult> {
-    // Idempotent: every process of the environment stops, and a second
-    // release finds nothing left and still succeeds (SPEC.md 8).
+    // Every owned group stops, whatever became of its leader: an
+    // orphaned descendant holds the group exactly like its parent
+    // did. A group that will not confirm ends the lease but reports
+    // the release as failed, so the stop stays cleanup work instead
+    // of a released claim (SPEC.md sections 8, 8.1).
+    const unresolved: string[] = [];
     for (const record of this.provider.processRecordsOf(this.environmentId)) {
-      if (alive(record.pid)) {
-        await this.terminateGroup(record, "SIGTERM");
+      if (!leaderAlive(record) && !groupAlive(record.pid)) {
+        continue;
+      }
+      const outcome = await this.terminateGroup(record, "SIGTERM");
+      if (!outcome.confirmed || !outcome.descendantsStopped) {
+        unresolved.push(record.resourceId);
       }
     }
     this.provider.markReleased(this.environmentId);
     this.released = true;
+    if (unresolved.length > 0) {
+      return {
+        status: "failed",
+        retryable: true,
+        detail:
+          `The process group of ${unresolved.join(", ")} stayed alive after release; ` +
+          "the unfinished termination stays visible in its record.",
+      };
+    }
     return { status: "released", retryable: false };
   }
 
@@ -598,8 +634,12 @@ export class LocalProcessLease implements EnvironmentLease {
       if (timer !== undefined) {
         clearTimeout(timer);
       }
-      // No descendant of a completed run outlives it.
-      killGroup(child.pid ?? 0, "SIGKILL");
+      // No descendant of a completed run outlives it. The group check
+      // guards the signal: a reaped identifier is free for reuse, and
+      // a fresh group under it would be a stranger's.
+      if (groupAlive(child.pid ?? 0)) {
+        killGroup(child.pid ?? 0, "SIGKILL");
+      }
     }
     const result: ProcessRunResult = {
       ...(exit.signal !== null
@@ -627,6 +667,9 @@ export class LocalProcessLease implements EnvironmentLease {
     // Detached children keep running after this process exits; the
     // record is the durable handle the next process reads.
     child.unref();
+    // Record the leader's kernel identity while it is fresh, so a
+    // later termination never mistakes a recycled identifier for it.
+    const leaderStartTicks = procStartTicks(child.pid ?? 0);
     const record: ProcessRecord = {
       resourceId,
       operationId: request.operationId,
@@ -635,6 +678,7 @@ export class LocalProcessLease implements EnvironmentLease {
       command: input.command,
       args: input.args ?? [],
       startedAt,
+      ...(leaderStartTicks !== null ? { leaderStartTicks } : {}),
     };
     this.provider.saveProcessRecord(record);
     // Observe the exit while this process lives; if it dies first,
@@ -717,18 +761,18 @@ export class LocalProcessLease implements EnvironmentLease {
     record: ProcessRecord,
     signal: string,
   ): Promise<{ confirmed: boolean; descendantsStopped: boolean; alreadyExited: boolean }> {
-    const alreadyExited = !alive(record.pid);
-    if (!alreadyExited) {
+    const alreadyExited = !leaderAlive(record);
+    // Group liveness decides, not leader liveness: descendants that
+    // outlived an exited leader hold the group, and they receive the
+    // same grace and escalation a live leader's group receives.
+    if (groupAlive(record.pid) && maySignalGroup(record)) {
       killGroup(record.pid, signal as NodeJS.Signals);
       if (!(await waitUntilGroupDead(record.pid, TERMINATE_WAIT_MS))) {
         killGroup(record.pid, "SIGKILL");
         await waitUntilGroupDead(record.pid, TERMINATE_WAIT_MS);
       }
-    } else {
-      // The leader is gone; descendants may still hold the group.
-      killGroup(record.pid, "SIGKILL");
     }
-    const confirmed = !alive(record.pid) && !groupAlive(record.pid);
+    const confirmed = !leaderAlive(record) && !groupAlive(record.pid);
     const descendantsStopped = !groupAlive(record.pid);
     const current = this.provider.processRecord(record.resourceId) ?? record;
     this.provider.saveProcessRecord({
@@ -801,7 +845,7 @@ export class LocalProcessLease implements EnvironmentLease {
         ? "terminated"
         : "exited";
     }
-    if (alive(record.pid)) {
+    if (leaderAlive(record)) {
       return "running";
     }
     // The leader is gone but no observer saw the exit; the outcome is
@@ -920,6 +964,62 @@ function alive(pid: number): boolean {
   // parent that may be another blocked process. A zombie holds no
   // resources and runs nothing, so it does not count as alive.
   return !isZombie(pid);
+}
+
+/**
+ * The kernel start time of one pid, in `/proc` clock ticks, or null.
+ *
+ * Linux only: the value is the 22nd field of `/proc/<pid>/stat`.
+ * Nowhere else does the adapter read it.
+ */
+function procStartTicks(pid: number): number | null {
+  const fields = procStatFields(pid);
+  if (fields === null) {
+    return null;
+  }
+  const ticks = Number(fields[19]);
+  return Number.isFinite(ticks) ? ticks : null;
+}
+
+/**
+ * Whether one record's leader is verifiably alive.
+ *
+ * A signal probe alone cannot tell a recycled identifier from the
+ * recorded leader. Where Linux exposed it at start time, the kernel
+ * start time decides: a different start time means the number now
+ * names a process this environment never owned.
+ */
+function leaderAlive(record: ProcessRecord): boolean {
+  if (!alive(record.pid)) {
+    return false;
+  }
+  if (record.leaderStartTicks === undefined) {
+    // No recorded evidence; the probe alone decides. This is the
+    // documented limit of records and platforms without it.
+    return true;
+  }
+  return procStartTicks(record.pid) === record.leaderStartTicks;
+}
+
+/**
+ * Whether one record still proves the group at its identifier is
+ * ours to signal.
+ *
+ * Linux pins a process-group identifier while any member lives, so
+ * when no process holds the identifier, a live group under it can
+ * only be held by this record's own descendants. When a process
+ * holds it, the recorded start time decides: a different start time
+ * means the identifier was reused, and the group under it belongs
+ * to a process this environment never owned. A record without
+ * evidence trusts the signal probe alone — the platform's limit,
+ * stated in the module doc.
+ */
+function maySignalGroup(record: ProcessRecord): boolean {
+  if (record.leaderStartTicks === undefined) {
+    return true;
+  }
+  const current = procStartTicks(record.pid);
+  return current === null || current === record.leaderStartTicks;
 }
 
 /**

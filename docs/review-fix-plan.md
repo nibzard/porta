@@ -1,6 +1,6 @@
 # Review repair plan
 
-Date: 2026-09-12. Status: in progress. R1 through R4 are complete; R5 through R9 remain.
+Date: 2026-09-12. Status: in progress. R1 through R5 are complete; R6 through R9 remain.
 
 This plan covers all eight defects found in the project review. It includes the related documentation and validation work.
 
@@ -202,6 +202,27 @@ Each repair starts with a failing regression test. Use temporary files, loopback
 - Repeated release is idempotent.
 - Unconfirmed termination remains visible as cleanup work.
 - Unrelated process groups remain untouched. Test identifier reuse through controlled process observations rather than signaling unrelated real processes.
+
+> **Status: complete (2026-09-12).** Release reads group liveness, not
+> leader liveness: every owned process group receives the same signal,
+> wait, and SIGKILL escalation whether its leader lives, so
+> descendants orphaned by an exited leader stop with it — including
+> from a reopened adapter. Each record carries its leader's kernel
+> start time where Linux exposes it, and a termination verifies that
+> evidence before it signals: a recycled identifier — or a group
+> under one — never draws a signal onto a process the environment
+> never owned. A group that will not confirm ends the lease but
+> reports the release as failed with the resource named, and the
+> unfinished stop stays in the durable record as cleanup work.
+> Records without the evidence field, and platforms without
+> `/proc`, trust the signal probe alone; that limit is stated in the
+> module contract, never hidden. Coverage:
+> `test:adapters/local-process-adapter` (orphan release after reopen,
+> escalation under an ignored signal, recycled identifier left
+> untouched and reported, unrelated environment's group untouched,
+> idempotent repeat), `conf:process.release-orphaned-group` (a second
+> environment witnesses the orphan before and after release), the
+> conformance workflow re-run (67 cases, 60 pass, 7 skip).
 
 ## R6: Preserve remote executable bits
 

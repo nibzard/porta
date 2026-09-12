@@ -599,6 +599,137 @@ export function processOperationCases(): ConformanceCase[] {
       },
     },
     {
+      id: "process.release-orphaned-group",
+      area: "process",
+      capability: "exec.process@1",
+      summary: "Release stops descendants that outlived an exited leader.",
+      effects: { external: true },
+      async run(context): Promise<ConformanceCaseAnswer> {
+        const unoffered = await notOffered(context);
+        if (unoffered !== null) {
+          return unoffered;
+        }
+        const lease = await acquireOnce(context);
+        const claim = await descendantClaim(lease);
+        if (claim === null || claim === "none") {
+          return {
+            outcome: "skip",
+            reason: "no-descendant-termination",
+            detail: "The provider declares no reach into descendant processes.",
+          };
+        }
+        if (!(await pgrepUsable(lease))) {
+          return {
+            outcome: "skip",
+            reason: "pgrep-unavailable",
+            detail: "The environment offers no pgrep for a third-party check.",
+          };
+        }
+        // The lease dies with its release, so a second environment
+        // witnesses the orphan before and after: its pgrep is the
+        // third-party truth a released lease can no longer run.
+        const witness = await acquireOnce(context);
+        // A unique fractional duration marks the orphan on its own
+        // command line, so pgrep finds it and nothing else.
+        const digits = randomUUID().replace(/\D/g, "").slice(0, 8) || "1";
+        const marker = `987654.${digits}`;
+        const started = await lease.invoke({
+          operationId: `op-${randomUUID()}`,
+          capability: PROCESS_CAPABILITY_ID,
+          operation: "start",
+          input: { command: "sh", args: ["-c", `sleep ${marker} & exit 0`] },
+          environmentId: lease.environmentId,
+          limits: {},
+        });
+        if (started.status !== "completed") {
+          return {
+            outcome: "fail",
+            reason: "the start did not complete",
+            detail: JSON.stringify((started as { error?: unknown }).error),
+          };
+        }
+        const start = started.result as { resourceId: string };
+        // Confirmed parent exit: the leader must leave the running
+        // state before the release is called, or the case would test
+        // a live leader's group instead of an orphaned one.
+        let leaderGone = false;
+        for (let attempt = 0; attempt < 25 && !leaderGone; attempt += 1) {
+          const inspected = await lease.invoke({
+            operationId: `op-${randomUUID()}`,
+            capability: PROCESS_CAPABILITY_ID,
+            operation: "inspect",
+            input: { resourceId: start.resourceId },
+            environmentId: lease.environmentId,
+            limits: {},
+          });
+          const observation = inspected.result as ProcessInspectResult;
+          leaderGone = observation.state !== "running";
+          if (!leaderGone) {
+            await new Promise((resolve) => setTimeout(resolve, 200));
+          }
+        }
+        if (!leaderGone) {
+          return {
+            outcome: "fail",
+            reason: "the leader never exited",
+            detail: "The orphaned-group premise did not establish within five seconds.",
+          };
+        }
+        let seen: boolean;
+        try {
+          const looked = await runProcess(witness, {
+            command: "pgrep",
+            args: ["-f", `sleep ${marker}`],
+          });
+          seen = looked.exitCode === 0;
+        } catch {
+          seen = false;
+        }
+        if (!seen) {
+          return {
+            outcome: "skip",
+            reason: "orphan-not-witnessable",
+            detail:
+              "No second environment observes the orphan, so a third-party check " +
+              "after release is impossible; the claim would rest on the report alone.",
+          };
+        }
+        const released = await lease.release();
+        if (released.status !== "released") {
+          return {
+            outcome: "fail",
+            reason: "the release did not confirm",
+            detail: `${released.status}${released.detail === undefined ? "" : `: ${released.detail}`}`,
+          };
+        }
+        // Third-party truth: the orphan is gone from the process
+        // table the witness shares, not just reported as stopped.
+        let gone = false;
+        for (let attempt = 0; attempt < 5 && !gone; attempt += 1) {
+          const looked = await runProcess(witness, {
+            command: "pgrep",
+            args: ["-f", `sleep ${marker}`],
+          });
+          gone = looked.exitCode === 1;
+          if (!gone) {
+            await new Promise((resolve) => setTimeout(resolve, 200));
+          }
+        }
+        await witness.release();
+        if (!gone) {
+          return {
+            outcome: "fail",
+            reason: "an orphan survived the release",
+            detail: `pgrep still matched sleep ${marker}`,
+          };
+        }
+        return {
+          outcome: "pass",
+          detail: `The leader exited first; the release stopped its orphaned group (${claim}).`,
+        };
+      },
+    },
+    {
       id: "operations.duplicate-request",
       area: "operations",
       summary: "One request key owns one operation, whatever status it holds.",

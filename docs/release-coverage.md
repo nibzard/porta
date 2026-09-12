@@ -74,7 +74,7 @@ node dist/cli/main.js conformance \
 Replace `<repo>` with the checkout path. This run executes every pack.
 The `python` pack skips with reason `capability-not-offered`, because
 the local process adapter offers no `exec.python@1` capability. The
-expected report is 66 cases: 59 pass, 0 fail, 7 skip, and the process
+expected report is 67 cases: 60 pass, 0 fail, 7 skip, and the process
 exits with code 3. Exit 3 means "no failure, but at least one skip":
 skipped support is not established support.
 
@@ -189,9 +189,9 @@ story.
 | --- | --- | --- |
 | Named supporting types MUST be defined by the implementation's schemas under this specification's rules (line 305). | `schema/adapter.ts`, `schema/capability.ts`, and their siblings define every named type. | `test:schema/records` |
 | Adapter invocation context MUST include the operation identifier, deadline, limits, and allocation identity; credentials stay outside public inputs (line 307). | `schema/adapter.ts` `AdapterInvocation` carries exactly those fields. | `test:schema/contracts` |
-| `release` MUST be idempotent; adapters MUST report unsupported binding and cancellation explicitly (line 309). | Adapters' `release` succeeds on repeat; `bind` returns `unsupported`; cancellation reports `best-effort` with a detail. | `conf:acquisition.release-retry`, `test:runtime/release` |
+| `release` MUST be idempotent; adapters MUST report unsupported binding and cancellation explicitly (line 309). | Adapters' `release` succeeds on repeat; `bind` returns `unsupported`; cancellation reports `best-effort` with a detail. The local adapter also stops descendants orphaned by an exited leader — with the same grace and escalation, and from a reopened adapter — and reports a group that will not confirm as a failed release. | `conf:acquisition.release-retry`, `conf:process.release-orphaned-group`, `test:runtime/release`, `test:adapters/local-process-adapter` |
 | Each lease MUST record expiration, renewal support, and enforcement behavior; the runtime MUST stop new invocations after expiration (line 311). | Lease status in `schema/adapter.ts`; `runtime/lifecycle.ts` refuses work past expiry; leases enforce their own expiry. | `conf:acquisition.lease-expiration`, `test:runtime/lifecycle` |
-| Cleanup obligations MUST survive restart and stay visible through inspection (line 315). | Obligations are rows in the control store; `describe()` reports `pendingCleanup`. | `test:runtime/lifecycle`, `conf:replacement.failed-source-cleanup` |
+| Cleanup obligations MUST survive restart and stay visible through inspection (line 315). | Obligations are rows in the control store; `describe()` reports `pendingCleanup`. The local adapter keeps an unconfirmed stop in the durable process record, where a later process reads it. | `test:runtime/lifecycle`, `conf:replacement.failed-source-cleanup`, `test:adapters/local-process-adapter` |
 | An expired or unreachable attachment MAY enter `unavailable` and MUST reject invocations until reconciliation succeeds (line 329). | `runtime/lifecycle.ts` `checkAttachmentAcceptsOperations` returns `LeaseExpired` and `ProviderUnavailable` as separate codes; `reconcileAttachment` restores. | `test:runtime/lifecycle` |
 | Release and replacement MUST serialize on the same attachment mutation lease (line 331). | Both flows take the mutation lease before writing; the fencing token guards the switch. | `test:runtime/release`, `test:runtime/replacement`, `conf:replacement.expired-mutation-lease` |
 
@@ -413,8 +413,8 @@ deliberate stand-in or a documented limit, not a silent omission.
 
 - Clean checkout: `npm install` then `npm test` — 443 tests, 442
   pass, 1 skip, 0 fail.
-- Conformance, local process adapter, all packs, both grants: 66
-  cases, 59 pass, 7 skip (`capability-not-offered`), exit 3.
+- Conformance, local process adapter, all packs, both grants: 67
+  cases, 60 pass, 7 skip (`capability-not-offered`), exit 3.
 - Conformance, Python pack, lightweight adapter, external effects
   granted: 7 cases, 7 pass, exit 0.
 - Acceptance demonstration: part of `npm test`; all assertions pass
