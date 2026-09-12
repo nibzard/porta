@@ -330,6 +330,7 @@ export function materializeTree(
     // locked before its children are written refuses them.
     for (const entry of sorted) {
       const target = join(destination, entry.path);
+      checkDestinationChain(dirname(target));
       const current = lstatOrNull(target);
       if (
         current === null ||
@@ -437,6 +438,7 @@ function materializeEntry(
 ): void {
   const target = join(destination, entry.path);
   try {
+    checkDestinationChain(dirname(target));
     const existing = lstatOrNull(target);
     if (entry.kind === "directory") {
       if (existing !== null) {
@@ -542,6 +544,7 @@ function checkDestinationChain(destination: string): void {
  * control, so a link installed while a blob was read is caught here.
  */
 function ensureDirectoryChain(destination: string, relative: string): void {
+  checkDestinationChain(destination);
   const root = lstatOrNull(destination);
   if (root === null) {
     throw destinationChanged(destination);

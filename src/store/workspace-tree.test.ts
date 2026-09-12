@@ -8,6 +8,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  renameSync,
   lstatSync,
   statSync,
   symlinkSync,
@@ -553,4 +554,35 @@ test("an exclusive create refuses a target installed while blobs are read", () =
     done();
     target.done();
   }
+});
+
+test("existing directories validate implicit ancestors before changing permissions", () => {
+  const target = scratch();
+  const outside = scratch();
+  try {
+    mkdirSync(join(outside.dir, "existing"), { mode: 0o700 });
+    symlinkSync(outside.dir, join(target.dir, "link"));
+    assert.throws(() => materializeTree([
+      { path: "link/existing", kind: "directory", executable: false, contentHash: null },
+    ], target.dir, () => null));
+    assert.equal(statSync(join(outside.dir, "existing")).mode & 0o777, 0o700);
+  } finally { target.done(); outside.done(); }
+});
+
+test("blob retrieval cannot redirect a destination through a replaced ancestor", () => {
+  const target = scratch();
+  const outside = scratch();
+  try {
+    const parent = join(target.dir, "parent");
+    mkdirSync(join(parent, "dest"), {recursive: true});
+    mkdirSync(join(outside.dir, "dest"));
+    assert.throws(() => materializeTree([
+      {path: "file", kind: "file", executable: false, contentHash: "a".repeat(64)},
+    ], join(parent, "dest"), () => {
+      renameSync(parent, join(target.dir, "moved"));
+      symlinkSync(outside.dir, parent);
+      return Buffer.from("payload");
+    }));
+    assert.deepEqual(readdirSync(join(outside.dir, "dest")), []);
+  } finally { target.done(); outside.done(); }
 });
