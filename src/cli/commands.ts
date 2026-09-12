@@ -292,7 +292,9 @@ async function release(parsed: ParsedArguments, io: CliIo): Promise<number> {
     },
   );
   emit(io, outcome);
-  return 0;
+  // An unresolved release is an unresolved outcome, not a command
+  // failure: the record prints and the exit code stays honest.
+  return outcome.status === "unresolved" ? 3 : 0;
 }
 
 /** Print the session journal as newline-delimited JSON. */

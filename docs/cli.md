@@ -205,7 +205,30 @@ the attempt on the cancellation trail.
 
 `release` releases one attachment. The provider must confirm. A
 retry under the same request key reports the recorded release and
-never reaches the provider again.
+never reaches the provider again. A provider that does not confirm
+leaves the outcome `unresolved`: the command prints the record,
+records a cleanup obligation, and exits 3.
+
+## Replacement and recovery
+
+`replace --plan` plans one replacement without side effects. The
+plan reports every class of state — preserved workspace content,
+reconstructed, reattached, and invalidated resources — and names
+what blocks the transition. Planning allocates nothing: no
+destination environment exists and the attachment generation does
+not move.
+
+A full `replace` runs the transition to its switch. The request
+file wraps the replacement request in `request` and the destination
+flow in `destination` (the adapter module, the copy root, and the
+principal). The result reports both generations and the new
+environment; the source environment's release stands as a cleanup
+obligation until a cleanup pass confirms it.
+
+`recover` reopens the session and prints the recovery report:
+durable in-flight operations exactly as stored, and the lease state
+of every attachment. The report says `conversationRestored: false`
+because reopening restores records, never a model conversation.
 
 ## Conflicts change nothing
 

@@ -1309,7 +1309,7 @@
     "id": "T052",
     "title": "Implement CLI replacement, recovery, and events",
     "priority": 3,
-    "status": "todo",
+    "status": "done",
     "details": "Expose replacement plans, execution, durable recovery, and event replay.",
     "depends_on": [
       "T049"
