@@ -85,6 +85,39 @@ class FakeE2BClient implements E2BClient {
   readonly fileWrites: Array<{ path: string; bytes: number }> = [];
   /** Every permission change a session made, newest last. */
   readonly permissionCalls: Array<{ path: string; mode: number }> = [];
+  /** Every rename a session made, newest last. */
+  readonly renameCalls: Array<{ from: string; to: string }> = [];
+  /** Every removal a session made, newest last. */
+  readonly removeCalls: Array<{ path: string }> = [];
+  /**
+   * Scripted provider faults by call position: the Nth rename or
+   * remove attempt throws, after the attempt is recorded. Undefined
+   * never fires.
+   */
+  failOn: { renameAt?: number; removeAt?: number } = {};
+  /**
+   * Deterministic concurrency barrier: hold every file write whose
+   * path contains this fragment until `releaseHeld()` runs. The
+   * promise under `holdArrived` resolves when the first held write
+   * arrives.
+   */
+  holdWritesMatching: string | null = null;
+  private heldArrivedResolve: (() => void) | null = null;
+  private held: Array<() => void> = [];
+  /** Arm the write barrier and return the promise of its first hit. */
+  holdWritesContaining(fragment: string): Promise<void> {
+    this.holdWritesMatching = fragment;
+    return new Promise<void>((resolve) => {
+      this.heldArrivedResolve = resolve;
+    });
+  }
+  /** Release every held write barrier. */
+  releaseHeld(): void {
+    for (const resolve of this.held) {
+      resolve();
+    }
+    this.held = [];
+  }
   /** Scripted outcome of the next foreground command. */
   nextRun: {
     exitCode: number | null;
@@ -189,6 +222,15 @@ class FakeE2BClient implements E2BClient {
         return bytes;
       },
       async writeFile(path, bytes) {
+        const hold = client.holdWritesMatching;
+        if (hold !== null && path.includes(hold)) {
+          if (client.heldArrivedResolve !== null) {
+            const resolve = client.heldArrivedResolve;
+            client.heldArrivedResolve = null;
+            resolve();
+          }
+          await new Promise<void>((resolve) => client.held.push(resolve));
+        }
         client.fileWrites.push({ path, bytes: bytes.byteLength });
         state.files.set(path, bytes);
         state.modes.set(path, state.defaultFileMode);
@@ -236,6 +278,77 @@ class FakeE2BClient implements E2BClient {
       },
       async makeDir(path) {
         state.madeDirs.push(path);
+      },
+      async exists(path) {
+        const prefix = path.endsWith("/") ? path : `${path}/`;
+        return (
+          state.files.has(path) ||
+          state.specials.has(path) ||
+          state.madeDirs.includes(path) ||
+          [...state.files.keys()].some((key) => key.startsWith(prefix)) ||
+          [...state.specials.keys()].some((key) => key.startsWith(prefix)) ||
+          state.madeDirs.some((dir) => dir === path || dir.startsWith(prefix))
+        );
+      },
+      async rename(fromPath, toPath) {
+        client.renameCalls.push({ from: fromPath, to: toPath });
+        if (client.failOn.renameAt === client.renameCalls.length) {
+          throw new Error("rename failed (scripted)");
+        }
+        const prefix = `${fromPath}/`;
+        // Bytes, modes, and specials move with their names; so do made
+        // directories at and under the source.
+        for (const key of [...state.files.keys()]) {
+          if (key === fromPath || key.startsWith(prefix)) {
+            const next =
+              key === fromPath ? toPath : `${toPath}/${key.slice(prefix.length)}`;
+            state.files.set(next, state.files.get(key)!);
+            state.files.delete(key);
+            const mode = state.modes.get(key);
+            if (mode !== undefined) {
+              state.modes.set(next, mode);
+              state.modes.delete(key);
+            }
+          }
+        }
+        for (const key of [...state.specials.keys()]) {
+          if (key === fromPath || key.startsWith(prefix)) {
+            const next =
+              key === fromPath ? toPath : `${toPath}/${key.slice(prefix.length)}`;
+            state.specials.set(next, state.specials.get(key)!);
+            state.specials.delete(key);
+          }
+        }
+        state.madeDirs = state.madeDirs.flatMap((dir) => {
+          if (dir === fromPath) {
+            return [toPath];
+          }
+          if (dir.startsWith(prefix)) {
+            return [`${toPath}/${dir.slice(prefix.length)}`];
+          }
+          return [dir];
+        });
+      },
+      async remove(path) {
+        client.removeCalls.push({ path });
+        if (client.failOn.removeAt === client.removeCalls.length) {
+          throw new Error("remove failed (scripted)");
+        }
+        const prefix = `${path}/`;
+        for (const key of [...state.files.keys()]) {
+          if (key === path || key.startsWith(prefix)) {
+            state.files.delete(key);
+            state.modes.delete(key);
+          }
+        }
+        for (const key of [...state.specials.keys()]) {
+          if (key === path || key.startsWith(prefix)) {
+            state.specials.delete(key);
+          }
+        }
+        state.madeDirs = state.madeDirs.filter(
+          (dir) => dir !== path && !dir.startsWith(prefix),
+        );
       },
     };
   }
@@ -1223,7 +1336,7 @@ test("a round trip preserves executable bits and entry kinds exactly", async () 
     assert.equal(remote.modes.get("/home/user/portable/nested/tool"), 0o755);
     assert.ok(
       fixture.client.permissionCalls.some(
-        (call) => call.path === "/home/user/portable/run.sh" && call.mode === 0o755,
+        (call) => call.path.endsWith("/run.sh") && call.mode === 0o755,
       ),
       "the executable file received an explicit permission call",
     );
@@ -1311,6 +1424,210 @@ test("remote links and special entries refuse before they are followed", async (
     rmSync(staging, { recursive: true, force: true });
     rmSync(blobRoot, { recursive: true, force: true });
     rmSync(harvest, { recursive: true, force: true });
+  }
+});
+
+test("a second push replaces the remote tree instead of merging it", async () => {
+  const fixture = make();
+  const first = mkdtempSync(join(tmpdir(), "porta-swap-one-"));
+  const second = mkdtempSync(join(tmpdir(), "porta-swap-two-"));
+  const empty = mkdtempSync(join(tmpdir(), "porta-swap-empty-"));
+  const blobRoot = mkdtempSync(join(tmpdir(), "porta-swap-blobs-"));
+  const harvest = mkdtempSync(join(tmpdir(), "porta-swap-out-"));
+  const encoder = new TextEncoder();
+  const push = (adapter: E2BLinuxAdapter, environmentId: string, copyRoot: string) =>
+    adapter.pushCopy({
+      environmentId,
+      copyRoot,
+      entries: scanTreeFromDirectory(copyRoot).entries,
+      authority: REMOTE_AUTHORITY,
+    });
+  const pull = (expectedRootHash?: string) => {
+    const blobs = new BlobStore(blobRoot, ControlStore.inMemory());
+    return fixture.adapter.pullCopy({
+      environmentId: lease.environmentId,
+      destRoot: harvest,
+      blobs,
+      authority: REMOTE_AUTHORITY,
+      ...(expectedRootHash === undefined ? {} : { expectedRootHash }),
+    });
+  };
+  let lease: EnvironmentLease;
+  try {
+    // Tree one: a plain file, a nested file, and `swap` as a directory.
+    mkdirSync(join(first, "old"));
+    mkdirSync(join(first, "swap"));
+    writeFileSync(join(first, "keep.txt"), "kept in both");
+    writeFileSync(join(first, "old", "deep.txt"), "deleted later");
+    writeFileSync(join(first, "swap", "nested.txt"), "a directory later");
+    lease = await fixture.adapter.acquire(request("acq-swap"));
+    const base = await push(fixture.adapter, lease.environmentId, first);
+
+    // Tree two: `old/` is gone, `swap` became a file, one file stayed,
+    // and one executable crossed with it.
+    writeFileSync(join(second, "keep.txt"), "kept in both");
+    writeFileSync(join(second, "swap"), "now a plain file");
+    writeFileSync(join(second, "run.sh"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(second, "run.sh"), 0o755);
+    const replaced = await push(fixture.adapter, lease.environmentId, second);
+
+    // The remote tree is exactly tree two: deletions landed, the type
+    // change landed, and the hash answers for it.
+    const round = await pull(replaced.rootHash);
+    assert.equal(round.rootHash, replaced.rootHash);
+    assert.notEqual(round.rootHash, base.rootHash);
+    assert.equal(readFileSync(join(harvest, "swap"), "utf8"), "now a plain file");
+    assert.equal(readFileSync(join(harvest, "keep.txt"), "utf8"), "kept in both");
+    assert.equal(statSync(join(harvest, "run.sh")).mode & 0o777, 0o755);
+    assert.equal(existsSync(join(harvest, "old")), false);
+    assert.equal(existsSync(join(harvest, "swap", "nested.txt")), false);
+
+    // An empty revision publishes an empty managed tree, not the
+    // previous contents.
+    const cleared = await push(fixture.adapter, lease.environmentId, empty);
+    const emptyRound = await pull(cleared.rootHash);
+    assert.equal(emptyRound.entries.length, 0);
+
+    // A path outside the managed family never moves, and no removal
+    // ever touched anything outside it.
+    const remote = fixture.client.sandbox("sbx-1");
+    remote.files.set(
+      "/home/user/unrelated/keep.txt",
+      encoder.encode("not ours to manage"),
+    );
+    await push(fixture.adapter, lease.environmentId, first);
+    assert.equal(
+      new TextDecoder().decode(remote.files.get("/home/user/unrelated/keep.txt")),
+      "not ours to manage",
+    );
+    assert.ok(fixture.client.removeCalls.length > 0, "the swap removed superseded content");
+    for (const call of fixture.client.removeCalls) {
+      assert.match(call.path, /^\/home\/user\/portable/, `removal touched ${call.path}`);
+    }
+  } finally {
+    fixture.close();
+    for (const dir of [first, second, empty, blobRoot, harvest]) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("an interrupted publication leaves the previous copy or a recoverable state", async () => {
+  const fixture = make();
+  const first = mkdtempSync(join(tmpdir(), "porta-recover-one-"));
+  const second = mkdtempSync(join(tmpdir(), "porta-recover-two-"));
+  const blobRoot = mkdtempSync(join(tmpdir(), "porta-recover-blobs-"));
+  const harvest = mkdtempSync(join(tmpdir(), "porta-recover-out-"));
+  const blobs = new BlobStore(blobRoot, ControlStore.inMemory());
+  const push = (copyRoot: string) =>
+    fixture.adapter.pushCopy({
+      environmentId: lease.environmentId,
+      copyRoot,
+      entries: scanTreeFromDirectory(copyRoot).entries,
+      authority: REMOTE_AUTHORITY,
+    });
+  const pull = (expectedRootHash?: string) =>
+    fixture.adapter.pullCopy({
+      environmentId: lease.environmentId,
+      destRoot: harvest,
+      blobs,
+      authority: REMOTE_AUTHORITY,
+      ...(expectedRootHash === undefined ? {} : { expectedRootHash }),
+    });
+  let lease: EnvironmentLease;
+  try {
+    writeFileSync(join(first, "base.txt"), "the previous copy");
+    writeFileSync(join(second, "next.txt"), "the next copy");
+    lease = await fixture.adapter.acquire(request("acq-recover"));
+    const base = await push(first);
+
+    // The swap fails before the published tree moves: the next
+    // transfer rolls the attempt back and the previous copy answers.
+    fixture.client.failOn = { renameAt: fixture.client.renameCalls.length + 1 };
+    const refused = await refuse(() => push(second));
+    assert.equal(refused?.code, "ProviderUnavailable");
+    fixture.client.failOn = {};
+    await pull(base.rootHash);
+    assert.equal(readFileSync(join(harvest, "base.txt"), "utf8"), "the previous copy");
+
+    // The swap fails between the two renames, after the published tree
+    // moved aside: the next transfer finishes the committed
+    // publication instead of serving a half-swapped state. The fault
+    // lands one rename after the attempt that moves the tree aside.
+    fixture.client.failOn = { renameAt: fixture.client.renameCalls.length + 2 };
+    const midSwap = await refuse(() => push(second));
+    assert.equal(midSwap?.code, "ProviderUnavailable");
+    fixture.client.failOn = {};
+    const completed = await pull();
+    assert.equal(completed.entries.length, 1);
+    assert.equal(readFileSync(join(harvest, "next.txt"), "utf8"), "the next copy");
+    assert.equal(existsSync(join(harvest, "base.txt")), false);
+
+    // The recovered state accepts the next publication unchanged.
+    const again = await push(first);
+    const settled = await pull(again.rootHash);
+    assert.equal(settled.rootHash, again.rootHash);
+  } finally {
+    fixture.close();
+    for (const dir of [first, second, blobRoot, harvest]) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("concurrent pushes cannot publish a mixed tree", async () => {
+  const fixture = make();
+  const one = mkdtempSync(join(tmpdir(), "porta-race-one-"));
+  const two = mkdtempSync(join(tmpdir(), "porta-race-two-"));
+  const blobRoot = mkdtempSync(join(tmpdir(), "porta-race-blobs-"));
+  const harvest = mkdtempSync(join(tmpdir(), "porta-race-out-"));
+  const pushFrom = (adapter: E2BLinuxAdapter, copyRoot: string) =>
+    adapter.pushCopy({
+      environmentId: lease.environmentId,
+      copyRoot,
+      entries: scanTreeFromDirectory(copyRoot).entries,
+      authority: REMOTE_AUTHORITY,
+    });
+  let lease: EnvironmentLease;
+  try {
+    writeFileSync(join(one, "a-only.txt"), "only tree one");
+    writeFileSync(join(one, "shared.txt"), "from one");
+    writeFileSync(join(two, "b-only.txt"), "only tree two");
+    writeFileSync(join(two, "shared.txt"), "from two");
+    lease = await fixture.adapter.acquire(request("acq-race"));
+    // A second adapter instance shares the environment, as two
+    // processes over one state directory would.
+    const other = fixture.reopen();
+
+    // Park the first publication part-way through its upload with an
+    // explicit barrier; no timing assumption is involved.
+    const firstWriteHeld = fixture.client.holdWritesContaining("a-only.txt");
+    const first = pushFrom(fixture.adapter, one);
+    await firstWriteHeld;
+    const second = await pushFrom(other, two);
+    fixture.client.releaseHeld();
+    const interrupted = await refuse(() => first);
+
+    // The interrupted publisher cannot claim success, and the served
+    // tree is exactly the one whole publication, never a mix.
+    assert.ok(interrupted !== null, "the interrupted publication succeeded anyway");
+    const round = await fixture.adapter.pullCopy({
+      environmentId: lease.environmentId,
+      destRoot: harvest,
+      blobs: new BlobStore(blobRoot, ControlStore.inMemory()),
+      authority: REMOTE_AUTHORITY,
+      expectedRootHash: second.rootHash,
+    });
+    assert.equal(round.rootHash, second.rootHash);
+    assert.equal(readFileSync(join(harvest, "shared.txt"), "utf8"), "from two");
+    assert.equal(readFileSync(join(harvest, "b-only.txt"), "utf8"), "only tree two");
+    assert.equal(existsSync(join(harvest, "a-only.txt")), false);
+  } finally {
+    fixture.client.releaseHeld();
+    fixture.close();
+    for (const dir of [one, two, blobRoot, harvest]) {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
 

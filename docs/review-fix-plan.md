@@ -1,6 +1,6 @@
 # Review repair plan
 
-Date: 2026-09-12. Status: in progress. R1 through R6 are complete; R7 through R9 remain.
+Date: 2026-09-12. Status: in progress. R1 through R7 are complete; R8 and R9 remain.
 
 This plan covers all eight defects found in the project review. It includes the related documentation and validation work.
 
@@ -296,6 +296,34 @@ Each repair starts with a failing regression test. Use temporary files, loopback
 - Concurrent uploads cannot publish mixed trees. Running work cannot observe a partial publication.
 
 **Design constraint:** Do not implement deletion as an unchecked recursive removal of a caller-supplied remote path. Keep all staging, backup, and publication paths under the fixed managed boundary.
+
+> **Status: complete (2026-09-12).** A push now publishes through a
+> staged swap instead of writing into the live tree. A journal beside
+> the root — `/home/user/portable__journal.json`, inside the reserved
+> `portable__*` family — records the commit intent before the first
+> staged byte. The whole tree uploads into a unique staging directory
+> with canonical modes, hashes to the presented revision from the
+> provider's own listing and bytes, and swaps in through two renames:
+> root to backup, staging to root. The first rename is the commit
+> point. Obsolete entries vanish with the whole-tree replacement, so
+> deletions and file/directory type changes need no case list, and an
+> empty revision publishes an empty tree. The backup, the journal, and
+> any orphaned staging directory leave afterwards; a removal touches
+> only paths the adapter derived from its own constants, never a
+> caller-supplied path. `lastPush` and the report answer only after
+> the published tree verifies by a second hash. Every transfer begins
+> with recovery: the state of the three reserved paths decides — a
+> verified staging with the root gone finishes the committed swap, an
+> unusable staging with the root gone restores the backup, and a
+> standing root cancels the attempt. A publisher whose attempt another
+> took over refuses before the swap, so two instances cannot publish a
+> mixed tree; between the two renames a lookup sees no root at all,
+> never a partial one. Coverage: `test:adapters/e2b-adapter`
+> (replacement-not-merge with deletions and type changes, empty
+> revision, reserved-path removal boundary, previous copy preserved
+> and committed swap finished after injected rename faults, concurrent
+> publishers behind an explicit write barrier), `docs/adapters/e2b-linux.md`.
+> Full suite: 474 tests, 473 pass, 1 skip (live E2B, no key).
 
 ## R8: Export entry type changes
 

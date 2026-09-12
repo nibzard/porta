@@ -9,7 +9,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { dirname, join, posix } from "node:path";
 import {
   CommandExitError,
@@ -50,7 +50,7 @@ import type {
   ReleaseResult,
   AuthorizedContext,
 } from "../schema/adapter.js";
-import type { Identifier } from "../schema/defs.js";
+import type { Identifier, Sha256Hex } from "../schema/defs.js";
 import type {
   EnforcementFacts,
   EnvironmentManifest,
@@ -176,10 +176,62 @@ const DEFAULT_MAX_TIMEOUT_MS = 3_600_000;
 
 /**
  * The portable root of every working copy inside a sandbox. All pushes
- * write under it and all pulls walk it, so the boundary of transferred
- * content is one directory.
+ * publish under it and all pulls walk it, so the boundary of
+ * transferred content is one directory.
  */
 const REMOTE_COPY_ROOT = "/home/user/portable";
+
+/**
+ * The reserved control-path family beside the root. The adapter owns
+ * every path under this prefix; nothing else may live there. All
+ * staging, backup, and journal paths derive from these constants, so a
+ * removal never touches a caller-supplied path.
+ */
+const REMOTE_CONTROL_PREFIX = "/home/user/portable__";
+/** The publication journal: one JSON file, present only mid-publication. */
+const REMOTE_JOURNAL_PATH = `${REMOTE_CONTROL_PREFIX}journal.json`;
+/** The backup that holds the previous tree during one swap. */
+const REMOTE_BACKUP_ROOT = `${REMOTE_CONTROL_PREFIX}backup`;
+/** Name prefix of the unique staging directory of one publication. */
+const REMOTE_STAGING_PREFIX = `${REMOTE_CONTROL_PREFIX}staging_`;
+
+/**
+ * The durable intent of one in-flight publication, kept beside the
+ * tree it publishes. Written before the first staged byte; removed
+ * once the published tree verifies. A crash between writes leaves one
+ * owner for every recovery decision.
+ */
+interface PublicationJournal {
+  /** Unique identity of this publication attempt. */
+  id: string;
+  /** The root hash the staged tree must verify to before publication. */
+  rootHash: Sha256Hex;
+  /** The staging directory this attempt uploads into. */
+  staging: string;
+  at: string;
+}
+
+/** The portable root hash of one walked remote tree. */
+function remoteTreeHash(walked: {
+  directories: string[];
+  files: Array<{ path: string; bytes: Uint8Array; executable: boolean }>;
+}): Sha256Hex {
+  const entries: TreeEntry[] = [
+    ...walked.directories.map((path) => ({
+      path,
+      kind: "directory" as const,
+      executable: false,
+      contentHash: null,
+    })),
+    ...walked.files.map((file) => ({
+      path: file.path,
+      kind: "file" as const,
+      executable: file.executable,
+      contentHash: createHash("sha256").update(file.bytes).digest("hex") as Sha256Hex,
+    })),
+  ];
+  return treeRootHash(entries);
+}
 
 /**
  * Default timeout of one foreground run. The provider default of sixty
@@ -302,6 +354,12 @@ export interface E2BSandboxSession {
   makeDir(path: string): Promise<void>;
   /** Set the permission bits of one remote path. */
   setPermissions(path: string, mode: number): Promise<void>;
+  /** Whether one remote path exists. */
+  exists(path: string): Promise<boolean>;
+  /** Rename one remote file or directory. */
+  rename(fromPath: string, toPath: string): Promise<void>;
+  /** Remove one remote file or directory tree. */
+  remove(path: string): Promise<void>;
 }
 
 /** Production client over the E2B SDK statics. */
@@ -454,6 +512,18 @@ class SdkE2BSession implements E2BSandboxSession {
 
   async makeDir(path: string): Promise<void> {
     await this.sandbox.files.makeDir(path);
+  }
+
+  async exists(path: string): Promise<boolean> {
+    return this.sandbox.files.exists(path);
+  }
+
+  async rename(fromPath: string, toPath: string): Promise<void> {
+    await this.sandbox.files.rename(fromPath, toPath);
+  }
+
+  async remove(path: string): Promise<void> {
+    await this.sandbox.files.remove(path);
   }
 
   async setPermissions(path: string, mode: number): Promise<void> {
@@ -1368,8 +1438,26 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
     const session = await this.guarded(() =>
       this.client.connect(sandboxId, this.apiKey()),
     );
-    await this.guarded(() => session.makeDir(REMOTE_COPY_ROOT));
-    await this.guarded(() => session.setPermissions(REMOTE_COPY_ROOT, 0o755));
+    // One interrupted publication resolves before a new one begins.
+    await this.recoverPublication(session);
+    // The journal is the commit intent: it lands before the first
+    // staged byte, so every crash window has exactly one owner.
+    const publicationId = randomUUID();
+    const staging = `${REMOTE_STAGING_PREFIX}${publicationId}`;
+    const journal: PublicationJournal = {
+      id: publicationId,
+      rootHash: scanned.rootHash,
+      staging,
+      at: new Date().toISOString(),
+    };
+    await this.guarded(() =>
+      session.writeFile(
+        REMOTE_JOURNAL_PATH,
+        new TextEncoder().encode(JSON.stringify(journal)),
+      ),
+    );
+    await this.guarded(() => session.makeDir(staging));
+    await this.guarded(() => session.setPermissions(staging, 0o755));
     let bytesSent = 0;
     const ordered = [...scanned.entries].sort((a, b) =>
       compareTreePaths(a.path, b.path),
@@ -1378,13 +1466,13 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
     // creation mask must not decide the bits of a portable tree
     // (SPEC.md section 11.1).
     for (const entry of ordered.filter((candidate) => candidate.kind === "directory")) {
-      const target = posix.join(REMOTE_COPY_ROOT, entry.path);
+      const target = posix.join(staging, entry.path);
       await this.guarded(() => session.makeDir(target));
       await this.guarded(() => session.setPermissions(target, 0o755));
     }
     for (const entry of ordered.filter((candidate) => candidate.kind === "file")) {
       const bytes = readFileSync(join(input.copyRoot, entry.path));
-      const target = posix.join(REMOTE_COPY_ROOT, entry.path);
+      const target = posix.join(staging, entry.path);
       await this.guarded(() => session.writeFile(target, bytes));
       // The portable executable bit is the whole permission truth: the
       // canonical 0o755 or 0o644, nothing the mask left behind.
@@ -1393,6 +1481,56 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
       );
       bytesSent += bytes.byteLength;
     }
+    // The staged tree must hash to the revision it claims — measured
+    // on the provider, bytes and executable bits together — before
+    // anything replaces the published copy.
+    const stagedHash = await this.remoteTreeRootHash(session, staging);
+    if (stagedHash !== scanned.rootHash) {
+      // Nothing was committed; drop this attempt and keep the previous
+      // copy. Another publisher may own the journal now, so it goes
+      // only while it still names this attempt.
+      await this.removeQuiet(session, staging);
+      await this.cancelJournalIfMine(session, journal);
+      throw integrityFailureError(
+        "the staged remote copy",
+        scanned.rootHash,
+        stagedHash ?? "absent",
+      );
+    }
+    // Another publisher may have resolved this attempt while it
+    // uploaded. Only the attempt the journal still names may swap.
+    const owning = await this.readRemoteJson<PublicationJournal>(
+      session,
+      REMOTE_JOURNAL_PATH,
+    );
+    if (owning?.id !== journal.id) {
+      await this.removeQuiet(session, staging);
+      throw providerUnavailableError(
+        "Another publication took over the managed tree while this one uploaded.",
+        { environmentId: input.environmentId, publicationId: journal.id },
+      );
+    }
+    // The swap publishes the whole tree at once. The first rename is
+    // the commit point: after it, a failure leaves the journal, and
+    // the next transfer finishes the committed publication.
+    if (await this.guarded(() => session.exists(REMOTE_COPY_ROOT))) {
+      await this.guarded(() =>
+        session.rename(REMOTE_COPY_ROOT, REMOTE_BACKUP_ROOT),
+      );
+    }
+    await this.guarded(() => session.rename(staging, REMOTE_COPY_ROOT));
+    await this.removeQuiet(session, REMOTE_BACKUP_ROOT);
+    await this.removeQuiet(session, REMOTE_JOURNAL_PATH);
+    // The report answers for the published tree, measured on the
+    // provider — never for the bytes that merely left.
+    const publishedHash = await this.remoteTreeRootHash(session, REMOTE_COPY_ROOT);
+    if (publishedHash !== scanned.rootHash) {
+      throw integrityFailureError(
+        "the published remote copy",
+        scanned.rootHash,
+        publishedHash ?? "absent",
+      );
+    }
     const report: E2BPushReport = {
       environmentId: input.environmentId,
       remoteRoot: REMOTE_COPY_ROOT,
@@ -1400,6 +1538,7 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
       bytesSent,
       rootHash: scanned.rootHash,
     };
+    // `lastPush` survives only with a verified publication behind it.
     this.writeRecord({
       ...this.recordOfEnvironment(input.environmentId),
       lastPush: {
@@ -1435,6 +1574,9 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
     const session = await this.guarded(() =>
       this.client.connect(sandboxId, this.apiKey()),
     );
+    // A pull never serves a half-finished state: one interrupted
+    // publication resolves before the tree is read.
+    await this.recoverPublication(session);
     const walked = await this.guarded(() => this.walkRemote(session));
     if (walked === null) {
       throw invalidRequestError(
@@ -1484,11 +1626,12 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
    */
   private async walkRemote(
     session: E2BSandboxSession,
+    rootPath: string = REMOTE_COPY_ROOT,
   ): Promise<{
     directories: string[];
     files: Array<{ path: string; bytes: Uint8Array; executable: boolean }>;
   } | null> {
-    const root = await session.listDir(REMOTE_COPY_ROOT);
+    const root = await session.listDir(rootPath);
     if (root === null) {
       return null;
     }
@@ -1496,7 +1639,7 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
     const files: Array<{ path: string; bytes: Uint8Array; executable: boolean }> = [];
     const walk = async (relative: string): Promise<void> => {
       const absolute =
-        relative === "" ? REMOTE_COPY_ROOT : posix.join(REMOTE_COPY_ROOT, relative);
+        relative === "" ? rootPath : posix.join(rootPath, relative);
       const entries = await session.listDir(absolute);
       if (entries === null) {
         // Vanished between listing and reading; the walk stays honest
@@ -1529,7 +1672,7 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
           directories.push(child);
           await walk(child);
         } else {
-          const bytes = await session.readFile(posix.join(REMOTE_COPY_ROOT, child));
+          const bytes = await session.readFile(posix.join(rootPath, child));
           // A listing without bits reports the file as non-executable:
           // support is never assumed from silence.
           const mode = entry.mode ?? 0o644;
@@ -1539,6 +1682,137 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
     };
     await walk("");
     return { directories, files };
+  }
+
+  /**
+   * The portable root hash of one remote tree, or `null` when the root
+   * does not exist. Measured from the provider's own listing and bytes.
+   */
+  private async remoteTreeRootHash(
+    session: E2BSandboxSession,
+    rootPath: string,
+  ): Promise<Sha256Hex | null> {
+    const walked = await this.guarded(() => this.walkRemote(session, rootPath));
+    return walked === null ? null : remoteTreeHash(walked);
+  }
+
+  /**
+   * Resolve one interrupted publication before any transfer reads or
+   * writes the managed tree. The journal beside the tree is the commit
+   * record, and the state of the three reserved paths decides the
+   * outcome — inspection, never an assumed success:
+   *
+   * - The staged tree verifies and the root is gone: the publisher
+   *   moved the old tree aside, so the publication is committed and
+   *   the recovery finishes it.
+   * - The root is gone and the staged tree is unusable: the backup is
+   *   the only whole tree, so the recovery restores it.
+   * - The root still stands: nothing was committed, so the attempt is
+   *   cancelled and the previous copy keeps serving.
+   */
+  private async recoverPublication(session: E2BSandboxSession): Promise<void> {
+    const journal = await this.readRemoteJson<PublicationJournal>(
+      session,
+      REMOTE_JOURNAL_PATH,
+    );
+    if (journal === null) {
+      // No intent on record: leftover staging directories and backups
+      // are orphans no journal names. The published root stays.
+      await this.sweepOrphanedStaging(session);
+      await this.removeQuiet(session, REMOTE_BACKUP_ROOT);
+      return;
+    }
+    const stagedHash = await this.remoteTreeRootHash(session, journal.staging);
+    const rootPresent = await this.guarded(() => session.exists(REMOTE_COPY_ROOT));
+    if (stagedHash === journal.rootHash && !rootPresent) {
+      await this.guarded(() => session.rename(journal.staging, REMOTE_COPY_ROOT));
+      await this.removeQuiet(session, REMOTE_BACKUP_ROOT);
+    } else if (!rootPresent) {
+      await this.removeQuiet(session, journal.staging);
+      if (await this.guarded(() => session.exists(REMOTE_BACKUP_ROOT))) {
+        await this.guarded(() =>
+          session.rename(REMOTE_BACKUP_ROOT, REMOTE_COPY_ROOT),
+        );
+      }
+    } else {
+      await this.removeQuiet(session, journal.staging);
+      await this.removeQuiet(session, REMOTE_BACKUP_ROOT);
+    }
+    await this.removeQuiet(session, REMOTE_JOURNAL_PATH);
+    await this.sweepOrphanedStaging(session);
+  }
+
+  /**
+   * Remove staging directories beside the root. The journal is gone or
+   * resolved by the time this runs, so every staging directory is an
+   * orphan. Only reserved names ever leave.
+   */
+  private async sweepOrphanedStaging(session: E2BSandboxSession): Promise<void> {
+    const parent = posix.dirname(REMOTE_COPY_ROOT);
+    const listed = await this.guarded(() => session.listDir(parent));
+    if (listed === null) {
+      return;
+    }
+    const prefix = posix.basename(REMOTE_STAGING_PREFIX);
+    for (const entry of listed) {
+      if (entry.type === "directory" && entry.name.startsWith(prefix)) {
+        await this.removeQuiet(session, posix.join(parent, entry.name));
+      }
+    }
+  }
+
+  /**
+   * Remove one reserved control path, tolerating a concurrent removal.
+   * Only paths under the reserved prefix ever reach a removal.
+   */
+  private async removeQuiet(session: E2BSandboxSession, path: string): Promise<void> {
+    if (!path.startsWith(REMOTE_CONTROL_PREFIX)) {
+      throw invalidRequestError(
+        "The adapter removes paths only under its reserved control prefix.",
+        { path },
+      );
+    }
+    try {
+      await this.guarded(() => session.remove(path));
+    } catch {
+      // A concurrent recovery may have removed it first; the next
+      // inspection decides what remains.
+    }
+  }
+
+  /**
+   * Remove the journal only while it still names this attempt. Another
+   * publisher may have taken the protocol over; its journal stays.
+   */
+  private async cancelJournalIfMine(
+    session: E2BSandboxSession,
+    journal: PublicationJournal,
+  ): Promise<void> {
+    const current = await this.readRemoteJson<PublicationJournal>(
+      session,
+      REMOTE_JOURNAL_PATH,
+    );
+    if (current?.id === journal.id) {
+      await this.removeQuiet(session, REMOTE_JOURNAL_PATH);
+    }
+  }
+
+  /**
+   * One JSON control file, or `null` when it is absent or unreadable.
+   * An unreadable journal carries no intent the adapter can stand
+   * behind, so recovery treats it as absent and the previous copy
+   * keeps serving.
+   */
+  private async readRemoteJson<T>(
+    session: E2BSandboxSession,
+    path: string,
+  ): Promise<T | null> {
+    try {
+      const bytes = await this.guarded(() => session.readFile(path));
+      return JSON.parse(new TextDecoder().decode(bytes)) as T;
+    } catch {
+      return null;
+    }
   }
 
   // -- Process records ------------------------------------------------------------

@@ -13,7 +13,7 @@ the selection record and its sources are in
 | Platform | linux, x86_64 |
 | Template | `base` by default, configurable |
 | Capability operations | `exec.process@1`: run, start, inspect, terminate |
-| Working copies | Push and pull under `/home/user/portable` |
+| Working copies | Exact-tree publication under `/home/user/portable` |
 
 ## Enforcement facts and limits
 
@@ -187,7 +187,9 @@ Semantics worth knowing:
 ## Working copies
 
 One portable root, `/home/user/portable`, bounds every transferred
-byte in each sandbox.
+byte in each sandbox. The adapter also owns the reserved control
+family beside it, `/home/user/portable__*`: the staging directory, the
+backup, and the publication journal. Nothing else may live there.
 
 A push validates three things before the first byte leaves, in order,
 so a refused push spends nothing (SPEC.md section 11.6):
@@ -201,6 +203,51 @@ so a refused push spends nothing (SPEC.md section 11.6):
    under the authorized ceilings.
 
 The last push is recorded in the acquisition record as provenance.
+
+### Publication
+
+A push never writes into the published tree. It uploads into a unique
+staging directory, verifies it, and swaps it in with one rename:
+
+1. The adapter writes a journal beside the root, at
+   `/home/user/portable__journal.json`. The journal names the staging
+   directory and the target root hash. It is the commit intent, and
+   it lands before the first staged byte.
+2. The whole tree uploads into `/home/user/portable__staging_<id>`
+   with its canonical permission bits.
+3. The staged tree is hashed from the provider's own listing and
+   bytes: kinds, executable bits, and content together. It must equal
+   the revision the caller presented.
+4. The published root moves to `/home/user/portable__backup`, and the
+   staging directory takes its place. The first rename is the commit
+   point.
+5. The backup and the journal leave. The published tree is hashed
+   again, and only then do the report and the recorded `lastPush`
+   answer for it.
+
+Obsolete entries vanish because the swap replaces the whole tree.
+Deletions and file/directory type changes need no case list. An empty
+revision publishes an empty tree. Paths outside the reserved family
+never move: a removal touches only paths the adapter derived from its
+own constants.
+
+An interrupted publication resolves on the next transfer, push or
+pull, from the state the three reserved paths show. It never resolves
+from an assumed success:
+
+- The staged tree verifies and the root is gone. The swap was
+  committed, so the recovery finishes it.
+- The root is gone and the staged tree is unusable. The backup is the
+  only whole tree, so the recovery restores it.
+- The root still stands. Nothing was committed, so the attempt is
+  cancelled and the previous copy keeps serving.
+
+Two publishers cannot mix their trees. One journal names one attempt;
+a publisher whose attempt is gone refuses before the swap, and every
+rename carries one whole tree. A lookup in the instant between the
+two renames sees no root at all; it never sees a mixed tree. The same
+holds for running commands: the published root is always absent or
+whole, never partial.
 
 A pull walks the remote tree, reads every byte, and rebuilds the
 staging root through the content-addressed store — the tree is built
