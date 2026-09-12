@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { inspect } from "node:util";
 import {
   AuthorizedSecretResolver,
   checkRawTransfer,
@@ -87,6 +88,41 @@ test("the resolver never serializes its released values", () => {
   // Detection still finds a released value inside an arbitrary record.
   assert.equal(resolver.containsReleasedValue({ nested: { leak: `echo ${VALUE}` } }), true);
   assert.equal(resolver.containsReleasedValue({ safe: "unrelated text" }), false);
+});
+
+test("resolved secrets expose no value through serialization or enumeration", () => {
+  const { resolver } = makeResolver({ schemaVersion: 1, secrets: [REFERENCE] });
+  const secret = resolver.resolve(REFERENCE);
+
+  // Serialization returns the reference only.
+  assert.deepEqual(JSON.parse(JSON.stringify(secret)), { reference: REFERENCE });
+
+  // Nested serialization exposes only the reference too.
+  const nested = JSON.stringify({ wrapped: secret, list: [secret] });
+  assert.equal(nested.includes(VALUE), false);
+  assert.deepEqual(JSON.parse(nested), {
+    wrapped: { reference: REFERENCE },
+    list: [{ reference: REFERENCE }],
+  });
+
+  // Spread, enumeration, and ordinary inspection carry no value.
+  assert.deepEqual({ ...secret }, { reference: REFERENCE });
+  assert.deepEqual(Object.keys(secret), ["reference"]);
+  assert.deepEqual(Object.values(secret), [REFERENCE]);
+  assert.equal(inspect(secret).includes(VALUE), false);
+
+  // The scoped callback still receives the original value.
+  assert.equal(secret.use((value) => value), VALUE);
+});
+
+test("the resolver exposes no released value through enumeration or inspection", () => {
+  const { resolver } = makeResolver({ schemaVersion: 1, secrets: [REFERENCE] });
+  resolver.resolve(REFERENCE);
+
+  assert.deepEqual({ ...resolver }, {});
+  assert.deepEqual(Object.keys(resolver), []);
+  assert.deepEqual(Object.getOwnPropertyNames(resolver), []);
+  assert.equal(inspect(resolver).includes(VALUE), false);
 });
 
 test("scrub removes released values, credential keys, and shapes", () => {

@@ -36,11 +36,11 @@ const CREDENTIAL_QUERY_RE =
 /** One resolved secret. The value stays out of enumerable state. */
 export class ResolvedSecret {
   readonly reference: string;
-  private readonly secretValue: string;
+  #secretValue: string;
 
   constructor(reference: string, value: string) {
     this.reference = reference;
-    this.secretValue = value;
+    this.#secretValue = value;
   }
 
   /**
@@ -51,17 +51,25 @@ export class ResolvedSecret {
    * the caller keeps.
    */
   use<T>(consumer: (value: string) => T): T {
-    return consumer(this.secretValue);
+    return consumer(this.#secretValue);
+  }
+
+  /**
+   * Serialize to the reference only. JSON.stringify, nested records,
+   * and anything else that walks objects see no value.
+   */
+  toJSON(): { reference: string } {
+    return { reference: this.reference };
   }
 }
 
 /** Resolves authorized secret references at use time. */
 export class AuthorizedSecretResolver {
-  private readonly options: SecretResolverOptions;
-  private readonly released = new Map<string, string>();
+  #options: SecretResolverOptions;
+  #released = new Map<string, string>();
 
   constructor(options: SecretResolverOptions) {
-    this.options = options;
+    this.#options = options;
   }
 
   /**
@@ -72,33 +80,33 @@ export class AuthorizedSecretResolver {
    * as an empty secret.
    */
   resolve(reference: string): ResolvedSecret {
-    const denied = this.options.authority().checkSecretReference(reference);
+    const denied = this.#options.authority().checkSecretReference(reference);
     if (denied !== null) {
       throw denied;
     }
-    const cached = this.released.get(reference);
+    const cached = this.#released.get(reference);
     if (cached !== undefined) {
       return new ResolvedSecret(reference, cached);
     }
-    const value = this.options.lookup(reference);
+    const value = this.#options.lookup(reference);
     if (typeof value !== "string") {
       throw invalidRequestError(
         `Secret reference ${reference} has no value in the configured resolver.`,
         { reference },
       );
     }
-    this.released.set(reference, value);
+    this.#released.set(reference, value);
     return new ResolvedSecret(reference, value);
   }
 
   /** The references released so far. The values stay private. */
   resolvedReferences(): string[] {
-    return [...this.released.keys()].sort();
+    return [...this.#released.keys()].sort();
   }
 
   /** True when a released value appears anywhere inside a JSON value. */
   containsReleasedValue(value: unknown): boolean {
-    const secrets = [...this.released.values()];
+    const secrets = [...this.#released.values()];
     const walk = (candidate: unknown): boolean => {
       if (typeof candidate === "string") {
         return secrets.some((secret) => secret.length > 0 && candidate.includes(secret));
@@ -122,7 +130,7 @@ export class AuthorizedSecretResolver {
    * Secret references themselves survive: references are public.
    */
   scrub(value: unknown): unknown {
-    const secrets = [...this.released.values()].filter((secret) => secret.length > 0);
+    const secrets = [...this.#released.values()].filter((secret) => secret.length > 0);
     const replace = (text: string): string => {
       let out = text;
       for (const secret of secrets) {
