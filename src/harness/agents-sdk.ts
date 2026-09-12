@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
 import { isAbsolute, relative } from "node:path";
 import { invalidRequestError, policyDeniedError } from "../core/errors.js";
+import { isUtcTimestamp } from "../core/time.js";
 import type { PortableError } from "../schema/error.js";
 import type { PolicyAuthority } from "../core/policy.js";
 import type { ManagedSession } from "../runtime/session.js";
@@ -84,7 +85,12 @@ export interface HarnessApproval {
   operations?: string[];
   /** Provider grants the approval covers. */
   providers?: string[];
-  /** Wall-clock expiry; the grant refuses to authorize past it. */
+  /**
+   * Wall-clock expiry as a UTC timestamp with a `Z` suffix, for
+   * example `2026-09-12T10:00:00Z`. The grant refuses to authorize at
+   * or past it; a value that is not a valid UTC timestamp grants
+   * nothing.
+   */
   expiresAt?: string;
 }
 
@@ -182,6 +188,7 @@ export interface AgentsToolkitOptions {
 export function authorityForApproval(
   base: PolicyAuthority,
   approval: HarnessApproval,
+  now: () => number = Date.now,
 ): PolicyAuthority {
   if (approval === null || typeof approval !== "object") {
     throw invalidRequestError("An approval must be one trusted record.");
@@ -196,15 +203,22 @@ export function authorityForApproval(
       { approvedBy: String(approvedBy) },
     );
   }
-  if (
-    approval.expiresAt !== undefined &&
-    Number.isFinite(Date.parse(approval.expiresAt)) &&
-    Date.parse(approval.expiresAt) <= Date.now()
-  ) {
-    throw policyDeniedError("The approval expired; it grants nothing.", {
-      approvedBy,
-      expiresAt: approval.expiresAt,
-    });
+  if (approval.expiresAt !== undefined) {
+    // Validate the runtime type first: only then does the shared UTC
+    // timestamp contract decide, so a malformed value can never slip
+    // past the comparison and grant authority.
+    if (typeof approval.expiresAt !== "string" || !isUtcTimestamp(approval.expiresAt)) {
+      throw invalidRequestError(
+        "The approval expiry is not a valid UTC timestamp, so it grants nothing.",
+        { approvedBy, expiresAt: String(approval.expiresAt) },
+      );
+    }
+    if (Date.parse(approval.expiresAt) <= now()) {
+      throw policyDeniedError("The approval expired; it grants nothing.", {
+        approvedBy,
+        expiresAt: approval.expiresAt,
+      });
+    }
   }
   return base.derive({
     schemaVersion: 1,

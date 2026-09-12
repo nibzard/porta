@@ -277,6 +277,78 @@ test("a trusted approval narrows authority; model text grants nothing", async ()
   }
 });
 
+test("a malformed approval expiry grants nothing and reaches no admission", async () => {
+  const state = await bench();
+  try {
+    const base = baseAuthority();
+    const refuses = (error: unknown): boolean =>
+      (error as { code?: unknown }).code === "InvalidRequest";
+
+    // An expiry that is not a UTC timestamp refuses: malformed text,
+    // an impossible calendar date, an empty value, and non-strings.
+    for (const expiresAt of [
+      "invalid",
+      "2026-02-30T00:00:00Z",
+      "",
+      "2026-09-12 12:00:00",
+      123,
+      null,
+      { moment: "soon" },
+    ] as unknown[]) {
+      assert.throws(
+        () =>
+          authorityForApproval(base, {
+            approvedBy: "user://ada",
+            operations: ["exec.process@1"],
+            ...(expiresAt === undefined ? {} : { expiresAt: expiresAt as never }),
+          }),
+        refuses,
+        `refuses ${JSON.stringify(expiresAt)}`,
+      );
+    }
+
+    // A controlled clock fixes the comparison boundary: an expiry equal
+    // to the current time is expired, not active.
+    const fixed = Date.parse("2026-09-12T12:00:00Z");
+    assert.throws(
+      () =>
+        authorityForApproval(
+          base,
+          { approvedBy: "user://ada", operations: ["exec.process@1"], expiresAt: "2026-09-12T12:00:00Z" },
+          () => fixed,
+        ),
+      (error: unknown) => (error as { code?: unknown }).code === "PolicyDenied",
+    );
+
+    // A valid future expiry grants a narrowed authority.
+    const future = authorityForApproval(
+      base,
+      { approvedBy: "user://ada", operations: ["exec.process@1"], expiresAt: "3026-09-12T12:00:00Z" },
+      () => fixed,
+    );
+    assert.equal(future.checkOperation("exec.process@1", "run"), null);
+    assert.ok(future.checkOperation("workspace.fs@1", "read") !== null);
+
+    // A malformed expiry refuses inside the run tool before admission:
+    // no operation record exists, so nothing can reach dispatch.
+    const run = state.toolkit.tools().find((tool) => tool.name === "portable_run")!;
+    state.granted.push({
+      approvedBy: "user://ada",
+      operations: ["exec.process@1"],
+      expiresAt: "invalid",
+    });
+    const refused = JSON.parse(await run.execute({ command: "true" })) as {
+      status: string;
+      code: string;
+    };
+    assert.equal(refused.status, "refused");
+    assert.equal(refused.code, "InvalidRequest");
+    assert.equal(state.store.listOperationsBySession(state.sessionId).length, 0);
+  } finally {
+    state.done();
+  }
+});
+
 test("remote verification synchronizes local edits before anything runs", async () => {
   const state = await bench();
   try {
