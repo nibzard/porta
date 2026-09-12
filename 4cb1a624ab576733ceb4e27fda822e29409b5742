@@ -1,0 +1,1 @@
+Create the requested repair plan for seven reproduced findings. Include dependencies, regression checks, compatibility constraints, and a final verification gate. All repairs remain pending; this commit changes documentation only.
