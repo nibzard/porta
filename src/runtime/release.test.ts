@@ -38,12 +38,29 @@ const AUTHORITY = PolicyAuthority.fromPolicy({
   schemaVersion: 1,
   providers: ["fake-local"],
   maxEnvironmentLifetimeMs: 24 * HOUR_MS,
+  locations: ["local", "remote"],
+  networkEgress: "unrestricted",
+  hostFilesystemAccess: true,
+  maxResources: {
+    memoryBytes: 4 * 1024 ** 3,
+    storageBytes: 4 * 1024 ** 3,
+    gpuMemoryBytes: 4 * 1024 ** 3,
+  },
 });
 
 const ADMISSION: AdmissionOptions = {
   authority: PolicyAuthority.fromPolicy({
     schemaVersion: 1,
     operations: ["exec.process@1"],
+    locations: ["local", "remote"],
+    networkEgress: "unrestricted",
+    hostFilesystemAccess: true,
+    maxEnvironmentLifetimeMs: 86_400_000,
+    maxResources: {
+      memoryBytes: 4 * 1024 ** 3,
+      storageBytes: 4 * 1024 ** 3,
+      gpuMemoryBytes: 4 * 1024 ** 3,
+    },
   }),
 };
 
@@ -137,7 +154,7 @@ test("a confirmed release invalidates owned handles and journals both phases", a
   const outcome = await fixture.session.release(
     { sessionId: fixture.session.id, attachmentId: attachment.attachmentId, generation: 1 },
     "release-1",
-    { adapter: fixture.adapter, principal: "user://test" },
+    { adapter: fixture.adapter, principal: "user://test", authority: AUTHORITY },
   );
   assert.equal(outcome.status, "released");
   assert.ok(attachment.environmentId !== undefined);
@@ -191,7 +208,7 @@ test("a repeated release makes no second provider call", async () => {
   const first = await fixture.session.release(
     { sessionId: fixture.session.id, attachmentId: attachment.attachmentId, generation: 1 },
     "release-1",
-    { adapter: fixture.adapter, principal: "user://test" },
+    { adapter: fixture.adapter, principal: "user://test", authority: AUTHORITY },
   );
   assert.equal(first.status, "released");
 
@@ -200,7 +217,7 @@ test("a repeated release makes no second provider call", async () => {
   const second = await fixture.session.release(
     { sessionId: fixture.session.id, attachmentId: attachment.attachmentId, generation: 1 },
     "release-2",
-    { adapter: fixture.adapter, principal: "user://test" },
+    { adapter: fixture.adapter, principal: "user://test", authority: AUTHORITY },
   );
   assert.equal(second.status, "already-released");
   assert.equal(fixture.adapter.queues.release.length, 1, "the queued failure is untouched");
@@ -218,7 +235,7 @@ test("an unconfirmed release records an obligation and blocks new work", async (
   const outcome = await fixture.session.release(
     { sessionId: fixture.session.id, attachmentId: attachment.attachmentId, generation: 1 },
     "release-1",
-    { adapter: fixture.adapter, principal: "user://test" },
+    { adapter: fixture.adapter, principal: "user://test", authority: AUTHORITY },
   );
   assert.equal(outcome.status, "unresolved");
   assert.ok(outcome.status === "unresolved" && outcome.obligation.targetId === attachment.environmentId);
@@ -252,6 +269,7 @@ test("an unconfirmed release records an obligation and blocks new work", async (
   const cleanup = await fixture.session.runCleanup({
     adapter: fixture.adapter,
     principal: "user://test",
+    authority: AUTHORITY,
   });
   assert.equal(cleanup.remaining, 0);
   assert.equal(fixture.store.getAttachment(attachment.attachmentId)?.status, "released");
@@ -260,7 +278,7 @@ test("an unconfirmed release records an obligation and blocks new work", async (
   const again = await fixture.session.release(
     { sessionId: fixture.session.id, attachmentId: attachment.attachmentId, generation: 1 },
     "release-2",
-    { adapter: fixture.adapter, principal: "user://test" },
+    { adapter: fixture.adapter, principal: "user://test", authority: AUTHORITY },
   );
   assert.equal(again.status, "already-released");
 });
@@ -273,7 +291,7 @@ test("release refuses stale generations, foreign sessions, and unusable states",
     fixture.session.release(
       { sessionId: fixture.session.id, attachmentId: attachment.attachmentId, generation: 7 },
       "release-1",
-      { adapter: fixture.adapter, principal: "user://test" },
+      { adapter: fixture.adapter, principal: "user://test", authority: AUTHORITY },
     ),
   );
   assert.equal(stale?.code, "StaleHandle");
@@ -282,7 +300,7 @@ test("release refuses stale generations, foreign sessions, and unusable states",
     fixture.session.release(
       { sessionId: "sess-other", attachmentId: attachment.attachmentId, generation: 1 },
       "release-1",
-      { adapter: fixture.adapter, principal: "user://test" },
+      { adapter: fixture.adapter, principal: "user://test", authority: AUTHORITY },
     ),
   );
   assert.equal(foreign?.code, "InvalidRequest");
@@ -291,7 +309,7 @@ test("release refuses stale generations, foreign sessions, and unusable states",
     fixture.session.release(
       { sessionId: fixture.session.id, attachmentId: attachment.attachmentId, generation: 1 },
       "",
-      { adapter: fixture.adapter, principal: "user://test" },
+      { adapter: fixture.adapter, principal: "user://test", authority: AUTHORITY },
     ),
   );
   assert.equal(emptyKey?.code, "InvalidRequest");
@@ -310,7 +328,7 @@ test("release refuses stale generations, foreign sessions, and unusable states",
     fixture.session.release(
       { sessionId: fixture.session.id, attachmentId: acquiringId, generation: 1 },
       "release-1",
-      { adapter: fixture.adapter, principal: "user://test" },
+      { adapter: fixture.adapter, principal: "user://test", authority: AUTHORITY },
     ),
   );
   assert.equal(acquiring?.code, "InvalidRequest");
@@ -329,7 +347,7 @@ test("release serializes on the attachment mutation lease", async () => {
     fixture.session.release(
       { sessionId: fixture.session.id, attachmentId: attachment.attachmentId, generation: 1 },
       "release-1",
-      { adapter: fixture.adapter, principal: "user://test" },
+      { adapter: fixture.adapter, principal: "user://test", authority: AUTHORITY },
     ),
   );
   assert.equal(blocked?.code, "HandoffBlocked");
@@ -339,7 +357,7 @@ test("release serializes on the attachment mutation lease", async () => {
   const after = await fixture.session.release(
     { sessionId: fixture.session.id, attachmentId: attachment.attachmentId, generation: 1 },
     "release-1",
-    { adapter: fixture.adapter, principal: "user://test" },
+    { adapter: fixture.adapter, principal: "user://test", authority: AUTHORITY },
   );
   assert.equal(after.status, "released");
 });
@@ -354,6 +372,7 @@ test("close releases every attachment, reports in-flight work, and closes", asyn
     requestKey: "close-1",
     adapter: fixture.adapter,
     principal: "user://test",
+    authority: AUTHORITY,
   });
   assert.equal(report.status, "closed");
   assert.equal(report.session.status, "closed");
@@ -401,6 +420,7 @@ test("close releases every attachment, reports in-flight work, and closes", asyn
     requestKey: "close-2",
     adapter: fixture.adapter,
     principal: "user://test",
+    authority: AUTHORITY,
   });
   assert.equal(again.status, "closed");
   assert.deepEqual(
@@ -422,6 +442,7 @@ test("close records unresolved releases and settles them on retry", async () => 
     requestKey: "close-1",
     adapter: fixture.adapter,
     principal: "user://test",
+    authority: AUTHORITY,
   });
   assert.equal(first.status, "closed");
   assert.deepEqual(
@@ -461,6 +482,7 @@ test("close records unresolved releases and settles them on retry", async () => 
   const cleanup = await fixture.session.runCleanup({
     adapter: fixture.adapter,
     principal: "user://test",
+    authority: AUTHORITY,
   });
   assert.equal(cleanup.remaining, 0);
   assert.equal(fixture.store.getAttachment(midRelease.attachmentId)?.status, "released");
@@ -484,6 +506,7 @@ test("a throwing release never fails the close sweep", async () => {
     requestKey: "close-1",
     adapter: fixture.adapter,
     principal: "user://test",
+    authority: AUTHORITY,
   });
   assert.equal(report.status, "closed");
   const thrown = report.entries.find((entry) => entry.attachmentId === worker.attachmentId);
@@ -498,6 +521,7 @@ test("a throwing release never fails the close sweep", async () => {
   const cleanup = await fixture.session.runCleanup({
     adapter: fixture.adapter,
     principal: "user://test",
+    authority: AUTHORITY,
   });
   assert.equal(cleanup.remaining, 0);
   assert.equal(fixture.store.getAttachment(worker.attachmentId)?.status, "released");
@@ -515,6 +539,7 @@ test("close records unresolved allocations explicitly", async () => {
     requestKey: "close-1",
     adapter: fixture.adapter,
     principal: "user://test",
+    authority: AUTHORITY,
   });
   assert.equal(report.status, "closed");
   const obligation = fixture.store
@@ -568,7 +593,9 @@ test("reopen never changes the session status and never restores a conversation"
   assert.equal(closing.session.status, "closing");
   assert.equal(closing.conversationRestored, false);
   assert.equal(closing.attachments[0]?.attachment.status, "active");
-  assert.equal(closing.attachments[0]?.lease, "none");
+  // The attachment names the lease end its acquisition recorded, so
+  // the durable record still speaks of a live lease.
+  assert.equal(closing.attachments[0]?.lease, "valid");
   assert.equal(closing.attachments[0]?.needsReconciliation, false);
 
   // After a full close, reopening still reports honestly.
@@ -577,12 +604,13 @@ test("reopen never changes the session status and never restores a conversation"
     requestKey: "close-1",
     adapter: fixture.adapter,
     principal: "user://test",
+    authority: AUTHORITY,
   });
   const closed = await fixture.session.reopen();
   assert.equal(closed.session.status, "closed");
   assert.equal(closed.conversationRestored, false);
   assert.equal(closed.attachments[0]?.attachment.status, "released");
-  assert.equal(closed.attachments[0]?.lease, "none");
+  assert.equal(closed.attachments[0]?.lease, "valid");
 
   // A missing session refuses.
   const missing = await refuse(() =>

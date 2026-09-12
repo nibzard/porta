@@ -44,6 +44,15 @@ const FULL_AUTHORITY: ResourceFlowOptions = {
   authority: PolicyAuthority.fromPolicy({
     schemaVersion: 1,
     operations: ["exec.process@1", "browser.session@1"],
+    locations: ["local", "remote"],
+    networkEgress: "unrestricted",
+    hostFilesystemAccess: true,
+    maxEnvironmentLifetimeMs: 86_400_000,
+    maxResources: {
+      memoryBytes: 4 * 1024 ** 3,
+      storageBytes: 4 * 1024 ** 3,
+      gpuMemoryBytes: 4 * 1024 ** 3,
+    },
   }),
 };
 

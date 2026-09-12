@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { AuthorizedAcquireRequest, EnvironmentLease } from "../schema/adapter.js";
+import type { AcquisitionLimits } from "../schema/policy.js";
 import { environmentManifestSchema } from "../schema/capability.js";
 import { assertValid } from "../schema/validate.js";
 import { PolicyAuthority } from "../core/policy.js";
@@ -302,6 +303,20 @@ function make(options: { client?: FakeE2BClient } = {}): Fixture {
   };
 }
 
+/** Explicit grants every successful acquire in this file carries. */
+const LIMITS: AcquisitionLimits = {
+  executionLocations: ["local", "remote"],
+  networkEgress: "unrestricted",
+  egressAllowlist: [],
+  hostFilesystemAccess: true,
+  maxEnvironmentLifetimeMs: 86_400_000,
+  maxResources: {
+    memoryBytes: 4 * 1024 ** 3,
+    storageBytes: 4 * 1024 ** 3,
+    gpuMemoryBytes: 4 * 1024 ** 3,
+  },
+};
+
 function request(
   acquisitionId = `acq-${randomUUID()}`,
   overrides: Partial<AuthorizedAcquireRequest["request"]> = {},
@@ -315,6 +330,7 @@ function request(
       ...overrides,
     },
     authority: { principal: "user://test", policyRef: "policy://test" },
+    limits: LIMITS,
   };
 }
 

@@ -250,6 +250,16 @@ const AUTHORITY = PolicyAuthority.fromPolicy({
   schemaVersion: 1,
   operations: ["exec.process@1/run"],
   transferDestinations: ["local"],
+  providers: ["fake-local"],
+  locations: ["local", "remote"],
+  networkEgress: "unrestricted",
+  hostFilesystemAccess: true,
+  maxEnvironmentLifetimeMs: 86_400_000,
+  maxResources: {
+    memoryBytes: 4 * 1024 ** 3,
+    storageBytes: 4 * 1024 ** 3,
+    gpuMemoryBytes: 4 * 1024 ** 3,
+  },
 });
 
 /** One facade session with an active worker attachment at generation 1. */

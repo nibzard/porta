@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { AdapterInvocation } from "../schema/adapter.js";
+import type { AcquisitionLimits } from "../schema/policy.js";
 import type { EnvironmentRequest } from "../schema/capability.js";
 import { assertValid } from "../schema/validate.js";
 import { environmentManifestSchema } from "../schema/capability.js";
@@ -50,6 +51,20 @@ function adapter(overrides: Record<string, unknown> = {}): {
   return { parts, dir, done: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
+/** Explicit grants every successful acquire in this file carries. */
+const LIMITS: AcquisitionLimits = {
+  executionLocations: ["local", "remote"],
+  networkEgress: "unrestricted",
+  egressAllowlist: [],
+  hostFilesystemAccess: true,
+  maxEnvironmentLifetimeMs: 86_400_000,
+  maxResources: {
+    memoryBytes: 4 * 1024 ** 3,
+    storageBytes: 4 * 1024 ** 3,
+    gpuMemoryBytes: 4 * 1024 ** 3,
+  },
+};
+
 /** Acquire one lease through the durable protocol. */
 async function leaseOf(parts: LocalProcessAdapter): Promise<LocalProcessLease> {
   const acquired = await parts.acquire({
@@ -60,6 +75,7 @@ async function leaseOf(parts: LocalProcessAdapter): Promise<LocalProcessLease> {
       requires: {},
     } as EnvironmentRequest,
     authority: { principal: "test", policyRef: "policy://test" },
+    limits: LIMITS,
   });
   return acquired as LocalProcessLease;
 }
@@ -108,6 +124,7 @@ test("isolation requirements the host cannot enforce are rejected", async () => 
   try {
     const base = {
       authority: { principal: "test", policyRef: "policy://test" },
+      limits: LIMITS,
     };
     // A sandboxed isolation demand refuses.
     const sandbox = await refuse(() =>

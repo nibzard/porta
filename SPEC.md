@@ -270,6 +270,10 @@ Network restrictions apply to the whole environment, including subprocesses. Omi
 
 A local process adapter MUST declare its actual host access. It MUST reject isolation requirements it cannot enforce.
 
+Offers and acquired manifests MUST carry typed enforcement facts: the execution location, the network egress mode, and whether the environment reaches the host filesystem. Authorization reads only these typed values, never adapter-specific descriptions. A target without typed facts never matches a request. Manifests from older adapters revalidate the same way: missing evidence never becomes an implicit grant.
+
+Every acquire carries the effective acquisition limits derived from the approved policy. The provider MUST reject restrictions it cannot enforce before it allocates, and every lease MUST name its end. A grant without an expiration, or one beyond the lifetime ceiling, is refused at activation.
+
 Credentials MUST be supplied through an authorized secret resolver at execution time. Checkpoints and portable resource references MUST contain references, not secret values.
 
 Providers and their adapters are trusted for declared enforcement. Conformance tests check observable behavior; they do not certify a provider's security boundary.

@@ -50,12 +50,28 @@ function bench(): Bench {
   return { store, sessionId };
 }
 
-/** One policy that admits this adapter and its operations. */
+/**
+ * One policy that admits this adapter and its operations.
+ *
+ * The configured test authority grants every location, open egress,
+ * host access, a day of environment lifetime, and generous resource
+ * ceilings, so the pack runs against any honest adapter. Cases that
+ * observe a denial patch one dimension narrower.
+ */
 function policyOf(context: ConformanceContext, patch: Partial<PortablePolicy> = {}): Authority {
   return PolicyAuthority.fromPolicy({
     schemaVersion: 1,
     providers: [context.adapter.id],
     operations: ["exec.process@1"],
+    locations: ["local", "remote"],
+    networkEgress: "unrestricted",
+    hostFilesystemAccess: true,
+    maxEnvironmentLifetimeMs: 86_400_000,
+    maxResources: {
+      memoryBytes: 4 * 1024 ** 3,
+      storageBytes: 4 * 1024 ** 3,
+      gpuMemoryBytes: 4 * 1024 ** 3,
+    },
     ...patch,
   });
 }
@@ -238,7 +254,11 @@ export function acquisitionPolicyCases(): ConformanceCase[] {
             generation: attached.generation,
           },
           `release-${randomUUID()}`,
-          { adapter: context.adapter, principal: "conformance" },
+          {
+            adapter: context.adapter,
+            principal: "conformance",
+            authority: policyOf(context),
+          },
         );
         const second = await releaseAttachment(
           state.store,
@@ -250,7 +270,11 @@ export function acquisitionPolicyCases(): ConformanceCase[] {
             generation: attached.generation,
           },
           `release-${randomUUID()}`,
-          { adapter: context.adapter, principal: "conformance" },
+          {
+            adapter: context.adapter,
+            principal: "conformance",
+            authority: policyOf(context),
+          },
         );
         if (first.status !== "released" || second.status !== "already-released") {
           return {
@@ -273,6 +297,7 @@ export function acquisitionPolicyCases(): ConformanceCase[] {
           acquisitionId: `acq-${randomUUID()}`,
           request: { name: "worker", providerId: context.adapter.id, requires: {} },
           authority: { principal: "conformance", policyRef: "policy://conformance" },
+          limits: policyOf(context).acquisitionLimits(),
         });
         const renewed = await lease.renew(new Date(Date.now() + 25).toISOString());
         if (renewed.status !== "active") {
@@ -338,7 +363,11 @@ export function acquisitionPolicyCases(): ConformanceCase[] {
                 generation: attached.generation + 5,
               },
               `release-${randomUUID()}`,
-              { adapter: context.adapter, principal: "conformance" },
+              {
+                adapter: context.adapter,
+                principal: "conformance",
+                authority: policyOf(context),
+              },
             ),
           "StaleHandle",
         );
@@ -450,6 +479,7 @@ export function acquisitionPolicyCases(): ConformanceCase[] {
           acquisitionId: `acq-${randomUUID()}`,
           request: { name: "worker", providerId: context.adapter.id, requires: {} },
           authority: { principal: "conformance", policyRef: "policy://conformance" },
+          limits: policyOf(context).acquisitionLimits(),
         });
         const manifest = await lease.manifest();
         const enforcement = Object.keys(manifest.enforcement ?? {});

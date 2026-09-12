@@ -195,6 +195,10 @@ class PortServingAdapter implements EnvironmentAdapter {
 function servingLease(lease: EnvironmentLease): EnvironmentLease {
   return {
     environmentId: lease.environmentId,
+    // The wrapper must keep naming the lease end it inherited: a
+    // grant without an expiration cannot be checked against the
+    // lifetime ceiling.
+    ...(lease.expiresAt !== undefined ? { expiresAt: lease.expiresAt } : {}),
     manifest: async () => {
       const manifest = await lease.manifest();
       return {
@@ -228,6 +232,7 @@ function countDispatches(
 ): EnvironmentLease {
   return {
     environmentId: lease.environmentId,
+    ...(lease.expiresAt !== undefined ? { expiresAt: lease.expiresAt } : {}),
     manifest: () => lease.manifest(),
     invoke: (request) => {
       onInvoke();
@@ -553,6 +558,14 @@ function demonstrationAuthority(): PolicyAuthority {
     ],
     transferDestinations: ["local"],
     networkEgress: "unrestricted",
+    hostFilesystemAccess: true,
+    locations: ["local", "remote"],
+    maxEnvironmentLifetimeMs: 86_400_000,
+    maxResources: {
+      memoryBytes: 4 * 1024 ** 3,
+      storageBytes: 4 * 1024 ** 3,
+      gpuMemoryBytes: 4 * 1024 ** 3,
+    },
     serviceAudiences: ["session"],
   });
 }
@@ -862,6 +875,7 @@ async function demonstrationOf(
     acquisitionId: `acq-${randomUUID()}`,
     request: { name: "inspection", providerId: monty.id, requires: {} },
     authority: { principal, policyRef: "policy://acceptance" },
+    limits: authority.acquisitionLimits(),
   });
   const viaMonty = () => Promise.resolve(montyLease);
   const inspectionAttached = await session.attach({
@@ -894,6 +908,7 @@ async function demonstrationOf(
   await session.release(refOf(inspectionAttached), "release-inspection-1", {
     adapter: monty,
     principal,
+    authority,
   });
 
   // Step 2: attach local native execution, reconstruct the
@@ -989,6 +1004,7 @@ async function demonstrationOf(
     acquisitionId: `acq-${randomUUID()}`,
     request: { name: "browser-driver", providerId: "browser-reference", requires: {} },
     authority: { principal, policyRef: "policy://acceptance" },
+    limits: authority.acquisitionLimits(),
   });
   const viaBrowser = () => Promise.resolve(browserDriverLease);
   const browserAttached = await session.attach({
@@ -1428,10 +1444,15 @@ async function demonstrationOf(
   const firstReconstruction = reconstructionOf(store, firstReplace.transitionId);
   const failureCondition =
     reconstructionFailureConditionOf(store, failed.transitionId) ?? null;
-  const localCleanup = await session.runCleanup({ adapter: local, principal });
+  const localCleanup = await session.runCleanup({
+    adapter: local,
+    principal,
+    authority,
+  });
   const destinationCleanup = await session.runCleanup({
     adapter: destination.adapter,
     principal,
+    authority,
   });
   // One pass settles only the obligations its provider owns; the
   // other provider's stay pending for their own pass (SPEC.md 8).
@@ -1445,7 +1466,7 @@ async function demonstrationOf(
   const released = await session.release(
     { sessionId, attachmentId: compute.attachmentId, generation: generationThree },
     `release-compute-${randomUUID()}`,
-    { adapter: destination.adapter, principal },
+    { adapter: destination.adapter, principal, authority },
   );
   store.close();
 

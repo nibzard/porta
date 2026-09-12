@@ -109,7 +109,16 @@ function policyOf(context: ConformanceContext): Authority {
     schemaVersion: 1,
     providers: [context.adapter.id],
     operations: ["exec.process@1"],
+    locations: ["local", "remote"],
     transferDestinations: ["local"],
+    networkEgress: "unrestricted",
+    hostFilesystemAccess: true,
+    maxEnvironmentLifetimeMs: 86_400_000,
+    maxResources: {
+      memoryBytes: 4 * 1024 ** 3,
+      storageBytes: 4 * 1024 ** 3,
+      gpuMemoryBytes: 4 * 1024 ** 3,
+    },
   });
 }
 

@@ -11,6 +11,7 @@ import type {
   EnvironmentOffer,
   EnvironmentRequest,
 } from "./capability.js";
+import type { AcquisitionLimits } from "./policy.js";
 import type { ResourceRef } from "./resource.js";
 
 /**
@@ -33,11 +34,14 @@ export interface AuthorityEnvelope {
  *
  * `acquisitionId` is the durable request identifier. An adapter either
  * supports idempotent acquisition or reconciles allocations by it.
+ * `limits` carries the effective acquisition limits derived from the
+ * approved policy; an adapter enforces them or refuses the allocation.
  */
 export interface AuthorizedAcquireRequest {
   acquisitionId: Identifier;
   request: EnvironmentRequest;
   authority: AuthorityEnvelope;
+  limits: AcquisitionLimits;
   deadline?: UtcTimestamp;
   extensions?: Extensions;
 }
@@ -46,7 +50,7 @@ export const authorizedAcquireRequestSchema = {
   $id: "https://portable.dev/schema/authorized-acquire-request.json",
   $defs: DEFS,
   type: "object",
-  required: ["acquisitionId", "request", "authority"],
+  required: ["acquisitionId", "request", "authority", "limits"],
   additionalProperties: false,
   properties: {
     acquisitionId: { $ref: "#/$defs/identifier" },
@@ -60,6 +64,7 @@ export const authorizedAcquireRequestSchema = {
         policyRef: { type: "string", minLength: 1, maxLength: 512 },
       },
     },
+    limits: { $ref: "https://portable.dev/schema/acquisition-limits.json" },
     deadline: { $ref: "#/$defs/timestamp" },
     extensions: { $ref: "#/$defs/extensions" },
   },
@@ -314,9 +319,16 @@ export interface EnvironmentAdapter {
   reconcile(acquisitionId: string): Promise<AcquisitionStatus>;
 }
 
-/** Lease over one acquired environment (SPEC.md section 8). */
+/**
+ * Lease over one acquired environment (SPEC.md section 8).
+ *
+ * `expiresAt` states when the provider ends the lease. The adapter
+ * contract grants no lease beyond the acquire limits' lifetime
+ * ceiling; the runtime persists and verifies this value.
+ */
 export interface EnvironmentLease {
   readonly environmentId: string;
+  readonly expiresAt?: UtcTimestamp;
   manifest(): Promise<EnvironmentManifest>;
   invoke(request: AdapterInvocation): Promise<AdapterOperation>;
   inspect(operationId: string): Promise<AdapterOperationStatus>;

@@ -15,6 +15,24 @@ the selection record and its sources are in
 | Capability operations | `exec.process@1`: run, start, inspect, terminate |
 | Working copies | Push and pull under `/home/user/portable` |
 
+## Enforcement facts and limits
+
+Every offer and manifest carries the typed enforcement facts of
+SPEC.md section 7. Authorization reads these values, never the
+adapter-specific descriptions:
+
+| Fact | Value | Why |
+| --- | --- | --- |
+| `executionLocation` | `remote` | Sandboxes run in the provider cloud. |
+| `networkEgress` | `unrestricted` | Until sandbox creation carries the network option through (R3), every sandbox reaches the internet; the honest fact is the wide one. |
+| `hostFilesystemAccess` | `false` | A Firecracker microVM sees its own filesystem, never the host's. |
+
+The acquire call reads the effective limits and refuses before any
+spend exists when it cannot enforce them: a policy that allows no
+`remote` execution, any egress mode below `unrestricted`, or a
+lifetime ceiling of zero. The lease span it grants never exceeds the
+lifetime ceiling.
+
 ## Durable identity
 
 Every acquisition follows a write-ahead protocol over

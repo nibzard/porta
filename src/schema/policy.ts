@@ -53,13 +53,76 @@ export interface PolicyResourceLimits {
   gpuMemoryBytes?: number;
 }
 
-/** Entry of an operations allow list. */
-export const OPERATION_GRANT_PATTERN =
-  "^[a-z0-9][a-z0-9._-]*@[0-9]+(?:/[a-z][a-zA-Z0-9_-]{0,63})?$";
+/**
+ * Effective acquisition limits sent with one authorized acquire
+ * (SPEC.md sections 7 and 8).
+ *
+ * `PolicyAuthority` constructs this record from the approved policy;
+ * request constraints and extensions never widen it. Adapters enforce
+ * these limits or refuse the allocation: an adapter that cannot
+ * enforce a restriction must reject the acquire before allocating.
+ */
+export interface AcquisitionLimits {
+  /** Execution locations this acquisition may use. */
+  executionLocations: ExecutionLocation[];
+  /** The egress mode the environment may not exceed, subprocesses included. */
+  networkEgress: EgressMode;
+  /** Host entries allowed under the `allowlist` mode. */
+  egressAllowlist: string[];
+  /** Whether environment processes may reach the host filesystem. */
+  hostFilesystemAccess: boolean;
+  /** Maximum lease span from the acquire, in whole milliseconds. */
+  maxEnvironmentLifetimeMs: number;
+  /** Resource ceilings of the allocation. */
+  maxResources: PolicyResourceLimits;
+}
 
 /** Allow list entry: a host, an optional `*.` prefix, an optional port. */
 export const EGRESS_HOST_PATTERN =
   "^(?:\\*\\.)?[a-z0-9]([a-z0-9.-]*[a-z0-9])?(?::[0-9]{1,5})?$";
+
+export const acquisitionLimitsSchema = {
+  $id: "https://portable.dev/schema/acquisition-limits.json",
+  $defs: DEFS,
+  type: "object",
+  required: [
+    "executionLocations",
+    "networkEgress",
+    "egressAllowlist",
+    "hostFilesystemAccess",
+    "maxEnvironmentLifetimeMs",
+    "maxResources",
+  ],
+  additionalProperties: false,
+  properties: {
+    executionLocations: {
+      type: "array",
+      uniqueItems: true,
+      items: { enum: ["local", "remote"] },
+    },
+    networkEgress: { enum: ["none", "allowlist", "unrestricted"] },
+    egressAllowlist: {
+      type: "array",
+      uniqueItems: true,
+      items: { type: "string", pattern: EGRESS_HOST_PATTERN },
+    },
+    hostFilesystemAccess: { type: "boolean" },
+    maxEnvironmentLifetimeMs: { type: "integer", minimum: 0 },
+    maxResources: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        memoryBytes: { $ref: "#/$defs/byteSize" },
+        storageBytes: { $ref: "#/$defs/byteSize" },
+        gpuMemoryBytes: { $ref: "#/$defs/byteSize" },
+      },
+    },
+  },
+} as const;
+
+/** Entry of an operations allow list. */
+export const OPERATION_GRANT_PATTERN =
+  "^[a-z0-9][a-z0-9._-]*@[0-9]+(?:/[a-z][a-zA-Z0-9_-]{0,63})?$";
 
 export const policySchema = {
   $id: "https://portable.dev/schema/policy.json",

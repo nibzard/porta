@@ -21,6 +21,15 @@ import type { TreeEntry } from "../store/workspace-tree.js";
 const AUTHORITY = PolicyAuthority.fromPolicy({
   schemaVersion: 1,
   transferDestinations: ["local"],
+  locations: ["local", "remote"],
+  networkEgress: "unrestricted",
+  hostFilesystemAccess: true,
+  maxEnvironmentLifetimeMs: 86_400_000,
+  maxResources: {
+    memoryBytes: 4 * 1024 ** 3,
+    storageBytes: 4 * 1024 ** 3,
+    gpuMemoryBytes: 4 * 1024 ** 3,
+  },
 });
 
 /** A transport that always reports the reference bound unchanged. */
@@ -91,7 +100,21 @@ async function exportedBundle(selfContained = true): Promise<Exported> {
         recovery,
       },
       okTransport,
-      { authority: PolicyAuthority.fromPolicy({ schemaVersion: 1, operations: ["exec.process@1"] }) },
+      {
+        authority: PolicyAuthority.fromPolicy({
+          schemaVersion: 1,
+          operations: ["exec.process@1"],
+          locations: ["local", "remote"],
+          networkEgress: "unrestricted",
+          hostFilesystemAccess: true,
+          maxEnvironmentLifetimeMs: 86_400_000,
+          maxResources: {
+            memoryBytes: 4 * 1024 ** 3,
+            storageBytes: 4 * 1024 ** 3,
+            gpuMemoryBytes: 4 * 1024 ** 3,
+          },
+        }),
+      },
     );
   }
   const digestOf = (text: string) => createHash("sha256").update(text).digest("hex");

@@ -4,6 +4,7 @@ import { PolicyAuthority } from "../../core/policy.js";
 import { operationUnknownError, portableError } from "../../core/errors.js";
 import type { PortableError } from "../../schema/error.js";
 import type { EnvironmentLease, CancellationResult } from "../../schema/adapter.js";
+import type { AcquisitionLimits } from "../../schema/policy.js";
 import type { AttachmentSummary } from "../../schema/session.js";
 import type { EnvironmentManifest } from "../../schema/capability.js";
 import {
@@ -105,12 +106,27 @@ function admit(state: Bench, attached: AttachmentSummary, requestKey: string, in
   });
 }
 
+/** Limits the configured test authority grants to one direct acquire. */
+const TEST_LIMITS: AcquisitionLimits = {
+  executionLocations: ["local", "remote"],
+  networkEgress: "unrestricted",
+  egressAllowlist: [],
+  hostFilesystemAccess: true,
+  maxEnvironmentLifetimeMs: 86_400_000,
+  maxResources: {
+    memoryBytes: 4 * 1024 ** 3,
+    storageBytes: 4 * 1024 ** 3,
+    gpuMemoryBytes: 4 * 1024 ** 3,
+  },
+};
+
 /** Acquire one environment from the loaded adapter. */
 async function acquireOnce(context: ConformanceContext): Promise<EnvironmentLease> {
   return context.adapter.acquire({
     acquisitionId: `acq-${randomUUID()}`,
     request: { name: "worker", providerId: context.adapter.id, requires: {} },
     authority: { principal: "conformance", policyRef: "policy://conformance" },
+    limits: TEST_LIMITS,
   });
 }
 

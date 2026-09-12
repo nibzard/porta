@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { EnvironmentLease } from "../../schema/adapter.js";
+import type { AcquisitionLimits } from "../../schema/policy.js";
 import type { EnvironmentManifest } from "../../schema/capability.js";
 import { matchEnvironment } from "../../core/matching.js";
 import {
@@ -63,12 +64,27 @@ async function expectCode(
   return { outcome: "fail", reason: `expected ${wanted}, the call succeeded` };
 }
 
+/** Limits the configured test authority grants to one direct acquire. */
+const TEST_LIMITS: AcquisitionLimits = {
+  executionLocations: ["local", "remote"],
+  networkEgress: "unrestricted",
+  egressAllowlist: [],
+  hostFilesystemAccess: true,
+  maxEnvironmentLifetimeMs: 86_400_000,
+  maxResources: {
+    memoryBytes: 4 * 1024 ** 3,
+    storageBytes: 4 * 1024 ** 3,
+    gpuMemoryBytes: 4 * 1024 ** 3,
+  },
+};
+
 /** Acquire one environment from the loaded adapter. */
 async function acquireOnce(context: ConformanceContext): Promise<EnvironmentLease> {
   return context.adapter.acquire({
     acquisitionId: `acq-${randomUUID()}`,
     request: { name: "python", providerId: context.adapter.id, requires: {} },
     authority: { principal: "conformance", policyRef: "policy://conformance" },
+    limits: TEST_LIMITS,
   });
 }
 

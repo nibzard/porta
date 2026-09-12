@@ -19,7 +19,7 @@ import type { EventRedactor } from "../store/event-stream.js";
 import { SessionEventStream } from "../store/event-stream.js";
 import { StoreError } from "../store/control-store.js";
 import type { ControlStore } from "../store/control-store.js";
-import { storedRequestOf } from "./acquisition.js";
+import { dispatchedAtOf, storedRequestOf } from "./acquisition.js";
 
 /**
  * Lease renewal and allocation cleanup (SPEC.md sections 8 and 8.1).
@@ -61,6 +61,8 @@ export interface CleanupOptions {
   adapter: EnvironmentAdapter;
   /** Authenticated principal supplied by the embedding application. */
   principal: string;
+  /** The policy authority in force for this call. */
+  authority: PolicyAuthority;
   /** Mutation lease duration in milliseconds. Default 60000. */
   leaseTtlMs?: number;
   /** Redactor applied to journal event data. */
@@ -135,6 +137,7 @@ export async function renewAttachment(
       acquisitionId: acquisition.acquisitionId,
       request,
       authority: { principal: options.principal, policyRef },
+      limits: options.authority.acquisitionLimits(),
     });
     const expiresAt = offsetMs(nowUtcTimestamp(), options.durationMs);
     const status = await lease.renew(expiresAt);
@@ -143,6 +146,19 @@ export async function renewAttachment(
         return { status: "unsupported", attachment };
       }
       const newExpiry = status.expiresAt ?? expiresAt;
+      // Renewal cannot outlive the acquisition's lifetime ceiling:
+      // the span is measured from the moment the acquire was
+      // authorized, so repeated renewals never widen it.
+      const authorizedAt = dispatchedAtOf(acquisition);
+      if (authorizedAt !== undefined) {
+        const grant = options.authority.checkLeaseGrant({
+          authorizedAt,
+          expiresAt: newExpiry,
+        });
+        if (grant !== null) {
+          throw grant;
+        }
+      }
       const next: AttachmentSummary = { ...attachment, leaseExpiresAt: newExpiry };
       fenced(store, sessionId, attachmentId, token, () => {
         store.casAttachment(attachmentId, { status: attachment.status }, next);
@@ -486,6 +502,7 @@ async function settleObligation(
     acquisitionId: acquisition.acquisitionId,
     request,
     authority: { principal: options.principal, policyRef },
+    limits: options.authority.acquisitionLimits(),
   });
   const released = await releaseOf(lease);
   if (released.status !== "released") {

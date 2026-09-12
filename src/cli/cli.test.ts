@@ -83,7 +83,16 @@ async function fixture(): Promise<Fixture> {
       schemaVersion: 1,
       providers: ["fake-local"],
       operations: ["exec.process@1/run"],
+      locations: ["local", "remote"],
       transferDestinations: ["local"],
+      networkEgress: "unrestricted",
+      hostFilesystemAccess: true,
+      maxEnvironmentLifetimeMs: 86_400_000,
+      maxResources: {
+        memoryBytes: 4 * 1024 ** 3,
+        storageBytes: 4 * 1024 ** 3,
+        gpuMemoryBytes: 4 * 1024 ** 3,
+      },
     }),
   );
   const created = await cli([
@@ -141,7 +150,19 @@ async function attachWorker(fx: Fixture): Promise<string> {
     },
     requestKey: "attach-fixture-1",
     principal: "user://cli",
-    authority: PolicyAuthority.fromPolicy({ schemaVersion: 1, providers: ["fake-local"] }),
+    authority: PolicyAuthority.fromPolicy({
+      schemaVersion: 1,
+      providers: ["fake-local"],
+      locations: ["local", "remote"],
+      networkEgress: "unrestricted",
+      hostFilesystemAccess: true,
+      maxEnvironmentLifetimeMs: 86_400_000,
+      maxResources: {
+        memoryBytes: 4 * 1024 ** 3,
+        storageBytes: 4 * 1024 ** 3,
+        gpuMemoryBytes: 4 * 1024 ** 3,
+      },
+    }),
   });
   return attached.attachmentId;
 }

@@ -15,6 +15,7 @@ import {
   invalidRequestError,
   invalidRequestFromValidation,
   leaseExpiredError,
+  policyDeniedError,
   providerUnavailableError,
   unsupportedOperationError,
 } from "../core/errors.js";
@@ -38,6 +39,7 @@ import type {
 } from "../schema/adapter.js";
 import type { AuthorizedContext } from "../schema/adapter.js";
 import type {
+  EnforcementFacts,
   EnvironmentManifest,
   EnvironmentOffer,
 } from "../schema/capability.js";
@@ -97,6 +99,20 @@ const ENFORCEMENT = {
   networkEgress: "unrestricted-inherited",
   supervision: "state-directory",
 } as const;
+
+/**
+ * Typed enforcement facts of this host (SPEC.md 7).
+ *
+ * Local processes run on the caller's own account: they inherit host
+ * networking and reach the whole host filesystem. The adapter can
+ * enforce nothing stricter, so a policy that withholds either one
+ * refuses acquisition here instead of being accepted and ignored.
+ */
+const ENFORCEMENT_FACTS: EnforcementFacts = {
+  executionLocation: "local",
+  networkEgress: "unrestricted",
+  hostFilesystemAccess: true,
+};
 
 /** Options of one local process adapter. */
 export interface LocalProcessAdapterOptions {
@@ -223,12 +239,13 @@ export class LocalProcessAdapter implements EnvironmentAdapter {
     if (unsatisfied !== null) {
       throw unsatisfied;
     }
+    const ttlMs = this.admissibleLeaseMs(request.limits);
     const now = new Date().toISOString();
     this.writeAcquisition({
       acquisitionId: request.acquisitionId,
       environmentId,
       createdAt: now,
-      expiresAt: new Date(Date.parse(now) + this.leaseTtlMs).toISOString(),
+      expiresAt: new Date(Date.parse(now) + ttlMs).toISOString(),
     });
     return this.lease(environmentId);
   }
@@ -248,6 +265,42 @@ export class LocalProcessAdapter implements EnvironmentAdapter {
   }
 
   // -- Supervisor surface --------------------------------------------------------
+
+  /**
+   * The lease span the effective limits admit, or a refusal.
+   *
+   * This host cannot restrict network egress or withhold host
+   * filesystem access: a policy that demands either is refused before
+   * any allocation exists. The lease span is constrained to the
+   * lifetime ceiling where a longer configured default exists.
+   */
+  private admissibleLeaseMs(limits: AuthorizedAcquireRequest["limits"]): number {
+    if (!limits.executionLocations.includes("local")) {
+      throw policyDeniedError(
+        "The local process adapter executes locally; the policy allows no local execution.",
+        { dimension: "locations", allowed: limits.executionLocations },
+      );
+    }
+    if (limits.networkEgress !== "unrestricted") {
+      throw policyDeniedError(
+        "The local process adapter inherits host networking; it cannot enforce restricted egress.",
+        { dimension: "networkEgress", allowed: limits.networkEgress },
+      );
+    }
+    if (!limits.hostFilesystemAccess) {
+      throw policyDeniedError(
+        "Local processes run under the caller's account; host filesystem access cannot be withheld.",
+        { dimension: "hostFilesystemAccess" },
+      );
+    }
+    if (limits.maxEnvironmentLifetimeMs <= 0) {
+      throw policyDeniedError(
+        "The policy grants no environment lifetime.",
+        { dimension: "maxEnvironmentLifetimeMs", allowedMs: limits.maxEnvironmentLifetimeMs },
+      );
+    }
+    return Math.min(this.leaseTtlMs, limits.maxEnvironmentLifetimeMs);
+  }
 
   /** The lease of one allocated environment. */
   lease(environmentId: string): LocalProcessLease {
@@ -353,6 +406,7 @@ export class LocalProcessAdapter implements EnvironmentAdapter {
         { id: PROCESS_CAPABILITY_ID, attributes: processCapabilityDescriptor().attributes },
       ],
       enforcement: { ...ENFORCEMENT, supervisorDir: this.supervisorDirPath },
+      enforcementFacts: { ...ENFORCEMENT_FACTS },
     };
   }
 
@@ -364,6 +418,7 @@ export class LocalProcessAdapter implements EnvironmentAdapter {
       platform: { os: process.platform, arch: process.arch },
       capabilities: [processCapabilityDescriptor()],
       enforcement: { ...ENFORCEMENT, supervisorDir: this.supervisorDirPath },
+      enforcementFacts: { ...ENFORCEMENT_FACTS },
       adapterVersion: VERSION,
     };
   }
@@ -414,6 +469,11 @@ export class LocalProcessLease implements EnvironmentLease {
     private readonly provider: LocalProcessAdapter,
     readonly environmentId: string,
   ) {}
+
+  /** When the acquisition record says the lease ends. */
+  get expiresAt(): string {
+    return this.provider.expiryOf(this.environmentId);
+  }
 
   async manifest(): Promise<EnvironmentManifest> {
     return this.provider.manifestOf(this.environmentId);

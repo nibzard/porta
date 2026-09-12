@@ -4,6 +4,7 @@ import {
   type Extensions,
   type Identifier,
 } from "./defs.js";
+import type { EgressMode, ExecutionLocation } from "./policy.js";
 
 /** Side-effect classification for one operation (SPEC.md section 6.2). */
 export type EffectKind = "none" | "workspace" | "external" | "mixed";
@@ -88,6 +89,38 @@ export interface ResourceSummary {
   gpuMemoryBytes?: number;
 }
 
+/**
+ * Typed enforcement facts of an offer or manifest (SPEC.md sections
+ * 6.3 and 7).
+ *
+ * The free-form `enforcement` record describes enforcement in the
+ * adapter's own vocabulary; these facts carry the values policy
+ * checks authorize against. Descriptions explain, facts authorize.
+ * A target without facts is denied under a policy that needs them:
+ * missing evidence never becomes an implicit grant.
+ */
+export interface EnforcementFacts {
+  /** Where the environment executes. */
+  executionLocation: ExecutionLocation;
+  /** The egress mode actually enforced, subprocesses included. */
+  networkEgress: EgressMode;
+  /** Whether environment processes can reach the host filesystem. */
+  hostFilesystemAccess: boolean;
+}
+
+export const enforcementFactsSchema = {
+  $id: "https://portable.dev/schema/enforcement-facts.json",
+  $defs: DEFS,
+  type: "object",
+  required: ["executionLocation", "networkEgress", "hostFilesystemAccess"],
+  additionalProperties: false,
+  properties: {
+    executionLocation: { enum: ["local", "remote"] },
+    networkEgress: { enum: ["none", "allowlist", "unrestricted"] },
+    hostFilesystemAccess: { type: "boolean" },
+  },
+} as const;
+
 export const resourceSummarySchema = {
   $id: "https://portable.dev/schema/resource-summary.json",
   $defs: DEFS,
@@ -113,7 +146,10 @@ export interface EnvironmentManifest {
   platform: { os: string; arch: string };
   capabilities: CapabilityDescriptor[];
   resources?: ResourceSummary;
+  /** Adapter-specific enforcement descriptions. Never authorization input. */
   enforcement: Record<string, unknown>;
+  /** Typed facts policy checks authorize against (SPEC.md section 7). */
+  enforcementFacts?: EnforcementFacts;
   adapterVersion: string;
   providerRuntimeVersion?: string;
   extensions?: Extensions;
@@ -150,6 +186,7 @@ export const environmentManifestSchema = {
     },
     resources: { $ref: "https://portable.dev/schema/resource-summary.json" },
     enforcement: { $ref: "#/$defs/jsonObject" },
+    enforcementFacts: { $ref: "https://portable.dev/schema/enforcement-facts.json" },
     adapterVersion: { type: "string", minLength: 1, maxLength: 64 },
     providerRuntimeVersion: { type: "string", minLength: 1, maxLength: 128 },
     extensions: { $ref: "#/$defs/extensions" },
@@ -261,6 +298,8 @@ export interface EnvironmentOffer {
   }>;
   resources?: ResourceSummary;
   enforcement?: Record<string, unknown>;
+  /** Typed facts policy checks authorize against (SPEC.md section 7). */
+  enforcementFacts?: EnforcementFacts;
   extensions?: Extensions;
 }
 
@@ -296,6 +335,7 @@ export const environmentOfferSchema = {
     },
     resources: { $ref: "https://portable.dev/schema/resource-summary.json" },
     enforcement: { $ref: "#/$defs/jsonObject" },
+    enforcementFacts: { $ref: "https://portable.dev/schema/enforcement-facts.json" },
     extensions: { $ref: "#/$defs/extensions" },
   },
 } as const;

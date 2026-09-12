@@ -44,7 +44,16 @@ function baseAuthority(): PolicyAuthority {
     schemaVersion: 1,
     providers: ["local-process"],
     operations: ["exec.process@1", "workspace.fs@1"],
+    locations: ["local", "remote"],
     transferDestinations: ["local"],
+    networkEgress: "unrestricted",
+    hostFilesystemAccess: true,
+    maxEnvironmentLifetimeMs: 86_400_000,
+    maxResources: {
+      memoryBytes: 4 * 1024 ** 3,
+      storageBytes: 4 * 1024 ** 3,
+      gpuMemoryBytes: 4 * 1024 ** 3,
+    },
   });
 }
 

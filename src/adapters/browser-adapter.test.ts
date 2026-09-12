@@ -35,6 +35,7 @@ import type {
   AdapterInvocation,
   AuthorizedAcquireRequest,
 } from "../schema/adapter.js";
+import type { AcquisitionLimits } from "../schema/policy.js";
 
 function isPortableCode(value: unknown): value is { code: string; details?: unknown } {
   return (
@@ -138,11 +139,26 @@ function ownerExtensions(owner: BrowserOwner): Record<string, unknown> {
   };
 }
 
+/** Explicit grants every successful acquire in this file carries. */
+const LIMITS: AcquisitionLimits = {
+  executionLocations: ["local", "remote"],
+  networkEgress: "unrestricted",
+  egressAllowlist: [],
+  hostFilesystemAccess: true,
+  maxEnvironmentLifetimeMs: 86_400_000,
+  maxResources: {
+    memoryBytes: 4 * 1024 ** 3,
+    storageBytes: 4 * 1024 ** 3,
+    gpuMemoryBytes: 4 * 1024 ** 3,
+  },
+};
+
 function acquireRequest(acquisitionId: string): AuthorizedAcquireRequest {
   return {
     acquisitionId,
     request: { name: "browser", requires: {} },
     authority: { principal: "tester", policyRef: "policy://test" },
+    limits: LIMITS,
   };
 }
 

@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   invalidRequestError,
+  leaseExpiredError,
   providerUnavailableError,
   requestConflictError,
+  requirementUnsatisfiedError,
   staleHandleError,
 } from "../core/errors.js";
 import type { PolicyAuthority } from "../core/policy.js";
@@ -13,6 +15,7 @@ import { environmentRequestSchema } from "../schema/capability.js";
 import type { EnvironmentManifest, EnvironmentRequest } from "../schema/capability.js";
 import type {
   AcquisitionStatus,
+  AuthorizedAcquireRequest,
   EnvironmentAdapter,
   EnvironmentLease,
 } from "../schema/adapter.js";
@@ -90,6 +93,7 @@ export interface ReconcileOptions {
 const REQUEST_KEY = "portable.runtime.request";
 const INPUT_HASH_KEY = "portable.runtime.input-hash";
 const ATTACHMENT_KEY = "portable.runtime.attachment-id";
+const DISPATCHED_AT_KEY = "portable.runtime.dispatched-at";
 
 const DEFAULT_LEASE_TTL_MS = 60_000;
 
@@ -99,6 +103,8 @@ interface AcquisitionSlot {
   attachmentId: string;
   request: EnvironmentRequest | undefined;
   inputHash: string;
+  /** When this runtime authorized the acquire; the lease-span reference. */
+  dispatchedAt: string | undefined;
   state: AcquisitionStatus["state"];
 }
 
@@ -109,7 +115,10 @@ interface FlowContext {
   sessionId: string;
   slot: AcquisitionSlot;
   adapter: EnvironmentAdapter;
+  authority: PolicyAuthority;
   fencingToken: number;
+  /** The provider discovery selected for this acquisition, when it ran here. */
+  selectedProviderId?: string | undefined;
   /** The environment lease, when the adapter answered this flow directly. */
   environmentLease?: EnvironmentLease | undefined;
   /** The environment the provider allocated, when that is known. */
@@ -266,6 +275,7 @@ function reserveSlot(
       }
       const acquisitionId = `acq-${randomUUID()}`;
       const attachmentId = `att-${randomUUID()}`;
+      const dispatchedAt = nowUtcTimestamp();
       store.insertAttachment({
         sessionId,
         attachmentId,
@@ -284,6 +294,7 @@ function reserveSlot(
             [REQUEST_KEY]: options.request,
             [INPUT_HASH_KEY]: inputHash,
             [ATTACHMENT_KEY]: attachmentId,
+            [DISPATCHED_AT_KEY]: dispatchedAt,
           },
         },
         attachmentId,
@@ -294,6 +305,7 @@ function reserveSlot(
           attachmentId,
           request: options.request,
           inputHash,
+          dispatchedAt,
           state: "pending" as const,
         },
         fresh: true,
@@ -313,11 +325,13 @@ function slotOf(record: AcquisitionStatus): AcquisitionSlot | null {
     return null;
   }
   const request = extensions[REQUEST_KEY];
+  const dispatchedAt = extensions[DISPATCHED_AT_KEY];
   return {
     acquisitionId: record.acquisitionId,
     attachmentId,
     request: isEnvironmentRequest(request) ? request : undefined,
     inputHash,
+    dispatchedAt: typeof dispatchedAt === "string" ? dispatchedAt : undefined,
     state: record.state,
   };
 }
@@ -349,6 +363,12 @@ function recoverAllocated(store: ControlStore, slot: AcquisitionSlot): Attachmen
       { kind: "attachment-status", value: attachment.status },
     );
   }
+  const expiresAt = attachment.leaseExpiresAt;
+  if (expiresAt !== undefined && Date.parse(expiresAt) <= Date.now()) {
+    // An expired lease admits nothing, not even the recovery of an
+    // allocated slot under a repeated request key.
+    throw leaseExpiredError(`environment ${attachment.environmentId}`, expiresAt);
+  }
   return attachment;
 }
 
@@ -365,13 +385,19 @@ async function startAcquisition(
 ): Promise<AttachmentSummary> {
   const context = openContext(store, sessionId, options, slot, leaseTtlMs);
   try {
-    // Discovery selects exactly one provider before anything is spent.
+    // Discovery selects exactly one policy-admissible provider before
+    // anything is spent. The selection is pinned: the manifest must
+    // prove the same provider after allocation.
     const offers = await context.adapter.describe();
-    matchEnvironment(slot.request!, offers);
+    const selected = matchEnvironment(slot.request!, offers, {
+      authority: options.authority,
+    });
+    context.selectedProviderId = selected.providerId;
     const authorized = {
       acquisitionId: slot.acquisitionId,
       request: slot.request!,
       authority: { principal: options.principal, policyRef },
+      limits: options.authority.acquisitionLimits(),
     };
     const outcome = await raceAcquire(options.adapter, authorized, options.responseTimeoutMs);
     if (outcome.settled) {
@@ -437,6 +463,7 @@ function openContext(
       sessionId,
       slot,
       adapter: options.adapter,
+      authority: options.authority,
       fencingToken: lease.fencingToken,
     };
   } catch (error) {
@@ -488,6 +515,54 @@ async function resolveThroughAdapter(context: FlowContext): Promise<AttachmentSu
 // -- Activation ----------------------------------------------------------------
 
 /**
+ * Check one acquired manifest and lease grant against the trusted
+ * policy before activation.
+ *
+ * The manifest must prove the selected provider, enforcement facts
+ * within the policy, and actual resources under the ceilings; the
+ * lease grant must stay inside the lifetime ceiling from the moment
+ * this runtime authorized the acquire. Any refusal surfaces here, so
+ * the caller records a release obligation for the allocation.
+ */
+function checkActivationPolicy(
+  context: FlowContext,
+  manifest: EnvironmentManifest,
+  expiresAt: string | undefined,
+): void {
+  if (
+    context.selectedProviderId !== undefined &&
+    manifest.providerId !== context.selectedProviderId
+  ) {
+    // Discovery pinned one provider; the allocation answers to it.
+    throw requirementUnsatisfiedError(
+      `Provider ${manifest.providerId} is not the selected ${context.selectedProviderId}.`,
+      { providerId: manifest.providerId, selected: context.selectedProviderId },
+    );
+  }
+  const denial = context.authority.checkAcquisitionTarget({
+    providerId: manifest.providerId,
+    facts: manifest.enforcementFacts,
+    resources: manifest.resources,
+  });
+  if (denial !== null) {
+    throw denial;
+  }
+  if (context.slot.dispatchedAt === undefined) {
+    throw invalidRequestError(
+      `Acquisition ${context.slot.acquisitionId} records no dispatch time; its lease span cannot be verified.`,
+      { acquisitionId: context.slot.acquisitionId },
+    );
+  }
+  const grant = context.authority.checkLeaseGrant({
+    authorizedAt: context.slot.dispatchedAt,
+    expiresAt,
+  });
+  if (grant !== null) {
+    throw grant;
+  }
+}
+
+/**
  * Consume a lease the adapter returned.
  *
  * The manifest is validated before activation. A failed validation
@@ -501,16 +576,21 @@ async function consumeLease(
   context.environmentLease = lease;
   const manifest = await lease.manifest();
   context.environmentId = manifest.environmentId;
-  return activate(context, manifest, undefined);
+  return activate(context, manifest, lease.expiresAt);
 }
 
 /**
  * Activate one validated environment (SPEC.md sections 5.2 and 5.3).
  *
- * The acquisition, the attachment, and the journal event commit in one
- * fenced transaction: the mutation lands only while the caller still
- * holds the current mutation lease. A worker whose lease expired cannot
- * commit, even with a successful provider response in hand.
+ * The manifest answers to the request, the policy, and the pinned
+ * provider selection before activation: the manifest is the proof,
+ * the offer was only a hint. The lease grant answers to the lifetime
+ * ceiling from the moment this runtime authorized the acquire. The
+ * acquisition, the attachment, and the journal event then commit in
+ * one fenced transaction: the mutation lands only while the caller
+ * still holds the current mutation lease. A worker whose lease
+ * expired cannot commit, even with a successful provider response in
+ * hand.
  */
 function activate(
   context: FlowContext,
@@ -518,6 +598,7 @@ function activate(
   expiresAt: string | undefined,
 ): AttachmentSummary {
   validateManifest(context.slot.request!, manifest);
+  checkActivationPolicy(context, manifest, expiresAt);
   const attachment = currentAttachment(context);
   const next: AttachmentSummary = {
     ...attachment,
@@ -727,7 +808,7 @@ type AcquireOutcome = { settled: true; lease: EnvironmentLease } | { settled: fa
  */
 async function raceAcquire(
   adapter: EnvironmentAdapter,
-  authorized: { acquisitionId: string; request: EnvironmentRequest; authority: { principal: string; policyRef: string } },
+  authorized: AuthorizedAcquireRequest,
   timeoutMs: number | undefined,
 ): Promise<AcquireOutcome> {
   if (timeoutMs === undefined) {
@@ -805,6 +886,7 @@ function extensionsOf(slot: AcquisitionSlot): Record<string, unknown> {
     [REQUEST_KEY]: slot.request,
     [INPUT_HASH_KEY]: slot.inputHash,
     [ATTACHMENT_KEY]: slot.attachmentId,
+    ...(slot.dispatchedAt !== undefined ? { [DISPATCHED_AT_KEY]: slot.dispatchedAt } : {}),
   };
 }
 
@@ -823,6 +905,15 @@ function obligationExtensionsOf(slot: AcquisitionSlot): Record<string, unknown> 
 export function storedRequestOf(record: AcquisitionStatus): EnvironmentRequest | undefined {
   const request = (record.extensions ?? {})[REQUEST_KEY];
   return isEnvironmentRequest(request) ? request : undefined;
+}
+
+/**
+ * When this runtime authorized the acquire behind one record; the
+ * reference point of every lifetime check on that acquisition.
+ */
+export function dispatchedAtOf(record: AcquisitionStatus): string | undefined {
+  const dispatchedAt = (record.extensions ?? {})[DISPATCHED_AT_KEY];
+  return typeof dispatchedAt === "string" ? dispatchedAt : undefined;
 }
 
 // -- Helpers -----------------------------------------------------------------

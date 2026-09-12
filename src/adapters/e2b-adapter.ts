@@ -25,6 +25,7 @@ import {
   invalidRequestFromValidation,
   isPortableError,
   leaseExpiredError,
+  policyDeniedError,
   providerUnavailableError,
   staleHandleError,
   unsupportedOperationError,
@@ -49,7 +50,11 @@ import type {
   AuthorizedContext,
 } from "../schema/adapter.js";
 import type { Identifier } from "../schema/defs.js";
-import type { EnvironmentManifest, EnvironmentOffer } from "../schema/capability.js";
+import type {
+  EnforcementFacts,
+  EnvironmentManifest,
+  EnvironmentOffer,
+} from "../schema/capability.js";
 import type { ResourceRef } from "../schema/resource.js";
 import { checkTargetSatisfies, manifestTarget } from "../core/matching.js";
 import {
@@ -142,6 +147,21 @@ const DEFAULT_SANDBOX_TIMEOUT_MS = 15 * 60_000;
 
 /** Default lease lifetime of one acquisition. */
 const DEFAULT_LEASE_TTL_MS = 15 * 60_000;
+
+/**
+ * Typed enforcement facts of this provider (SPEC.md 7).
+ *
+ * Sandboxes run remotely in Firecracker microVMs without host
+ * filesystem access. Until sandbox creation carries the network
+ * option through (R3), every sandbox this adapter creates has
+ * internet access, so the honest fact is `unrestricted` and a policy
+ * that restricts egress refuses acquisition here.
+ */
+const ENFORCEMENT_FACTS: EnforcementFacts = {
+  executionLocation: "remote",
+  networkEgress: "unrestricted",
+  hostFilesystemAccess: false,
+};
 
 /** Provider hard cap of one timeout: twenty-four hours. */
 const PROVIDER_MAX_TIMEOUT_MS = 86_400_000;
@@ -610,6 +630,7 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
         networkEgress: this.allowInternetAccess ? "internet-allowed" : "blocked",
         releaseSemantics: "kill-discards-state",
       },
+      enforcementFacts: { ...ENFORCEMENT_FACTS },
     };
   }
 
@@ -660,6 +681,7 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
     if (unsatisfied !== null) {
       throw unsatisfied;
     }
+    const ttlMs = this.admissibleLeaseMs(request.limits);
     // The intent record exists before any provider call: a crash past
     // this point recovers by identity (SPEC.md section 8).
     const record: E2BAcquisitionRecord = {
@@ -668,7 +690,7 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
       sandboxId: null,
       template: this.template,
       createdAt: now,
-      expiresAt: new Date(Date.parse(now) + this.leaseTtlMs).toISOString(),
+      expiresAt: new Date(Date.parse(now) + ttlMs).toISOString(),
     };
     this.writeRecord(record);
     await this.guarded(() => this.createSandbox(record, apiKey));
@@ -794,6 +816,38 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
   manifestOf(environmentId: string): EnvironmentManifest {
     const record = this.recordOfEnvironment(environmentId);
     return this.buildManifest(environmentId, record);
+  }
+
+  /**
+   * The lease span the effective limits admit, or a refusal.
+   *
+   * Sandboxes run remotely. Until creation carries the network option
+   * through (R3), this adapter cannot enforce a restricted egress
+   * policy, so anything below `unrestricted` refuses before any
+   * spend exists. The lease span is constrained to the lifetime
+   * ceiling.
+   */
+  private admissibleLeaseMs(limits: AuthorizedAcquireRequest["limits"]): number {
+    if (!limits.executionLocations.includes("remote")) {
+      throw policyDeniedError(
+        "The E2B provider executes remotely; the policy allows no remote execution.",
+        { dimension: "locations", allowed: limits.executionLocations },
+      );
+    }
+    if (limits.networkEgress !== "unrestricted") {
+      throw policyDeniedError(
+        "The E2B adapter cannot yet enforce restricted network egress at creation; " +
+          "restricted policies refuse instead of being accepted and ignored.",
+        { dimension: "networkEgress", allowed: limits.networkEgress },
+      );
+    }
+    if (limits.maxEnvironmentLifetimeMs <= 0) {
+      throw policyDeniedError(
+        "The policy grants no environment lifetime.",
+        { dimension: "maxEnvironmentLifetimeMs", allowedMs: limits.maxEnvironmentLifetimeMs },
+      );
+    }
+    return Math.min(this.leaseTtlMs, limits.maxEnvironmentLifetimeMs);
   }
 
   /** Extend one environment's lease to an absolute time. */
@@ -1557,6 +1611,7 @@ export class E2BLinuxAdapter implements EnvironmentAdapter {
         releaseSemantics: "kill-discards-state",
         renewal: "provider-settimeout",
       },
+      enforcementFacts: { ...ENFORCEMENT_FACTS },
       adapterVersion: VERSION,
       ...(record?.resources !== undefined
         ? { providerRuntimeVersion: record.resources.envdVersion }
@@ -1615,6 +1670,11 @@ export class E2BLinuxLease implements EnvironmentLease {
     private readonly provider: E2BLinuxAdapter,
     readonly environmentId: string,
   ) {}
+
+  /** When the acquisition record says the lease ends. */
+  get expiresAt(): string {
+    return this.provider.recordOfEnvironment(this.environmentId).expiresAt;
+  }
 
   async manifest(): Promise<EnvironmentManifest> {
     return this.provider.manifestOf(this.environmentId);

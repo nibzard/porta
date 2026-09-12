@@ -36,6 +36,15 @@ const OPTIONS: AdmissionOptions = {
   authority: PolicyAuthority.fromPolicy({
     schemaVersion: 1,
     operations: ["exec.process@1", "fs.workspace@1/write"],
+    locations: ["local", "remote"],
+    networkEgress: "unrestricted",
+    hostFilesystemAccess: true,
+    maxEnvironmentLifetimeMs: 86_400_000,
+    maxResources: {
+      memoryBytes: 4 * 1024 ** 3,
+      storageBytes: 4 * 1024 ** 3,
+      gpuMemoryBytes: 4 * 1024 ** 3,
+    },
   }),
 };
 

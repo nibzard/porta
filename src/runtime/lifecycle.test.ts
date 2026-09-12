@@ -25,6 +25,14 @@ const AUTHORITY = PolicyAuthority.fromPolicy({
   schemaVersion: 1,
   providers: ["fake-local"],
   maxEnvironmentLifetimeMs: 24 * HOUR_MS,
+  locations: ["local", "remote"],
+  networkEgress: "unrestricted",
+  hostFilesystemAccess: true,
+  maxResources: {
+    memoryBytes: 4 * 1024 ** 3,
+    storageBytes: 4 * 1024 ** 3,
+    gpuMemoryBytes: 4 * 1024 ** 3,
+  },
 });
 
 /** One active attachment to work on, plus its handles. */
@@ -107,7 +115,9 @@ test("a provider without renewal support changes nothing", async () => {
     durationMs: HOUR_MS,
   });
   assert.equal(outcome.status, "unsupported");
-  assert.equal(outcome.attachment.leaseExpiresAt, undefined);
+  // Unsupported renewal changes no lease term: the attachment keeps
+  // naming the end its acquisition grant carried.
+  assert.match(outcome.attachment.leaseExpiresAt ?? "", /^\d{4}-\d{2}-\d{2}T/);
   assert.equal((await session.describe()).attachments[0]?.status, "active");
 });
 
@@ -250,6 +260,7 @@ test("cleanup survives restart and spares unrelated attachments", async () => {
     const report = await resumed.runCleanup({
       adapter,
       principal: "user://cleanup",
+      authority: AUTHORITY,
     });
     assert.equal(report.outcomes.length, 1);
     assert.equal(report.outcomes[0]?.outcome, "satisfied");
@@ -292,10 +303,19 @@ test("a cleanup pass settles only the providers its adapter offers", async () =>
         providerId: "fake-remote",
         platform: { os: "linux", arch: "x64" },
         capabilities: [{ id: "exec.process@1", attributes: { engine: "fake-process" } }],
+        enforcementFacts: {
+          executionLocation: "local",
+          networkEgress: "none",
+          hostFilesystemAccess: false,
+        },
       },
     ],
   });
-  const foreign = await session.runCleanup({ adapter: stranger, principal: "user://cleanup" });
+  const foreign = await session.runCleanup({
+    adapter: stranger,
+    principal: "user://cleanup",
+    authority: AUTHORITY,
+  });
   assert.equal(foreign.outcomes.length, 1);
   assert.equal(foreign.outcomes[0]?.outcome, "pending");
   assert.match(foreign.outcomes[0]?.reason ?? "", /belongs to provider fake-local/);
@@ -303,7 +323,11 @@ test("a cleanup pass settles only the providers its adapter offers", async () =>
   assert.equal(stranger.queues.release.length, 0, "the foreign provider was never called");
 
   // The pass of the owning provider settles it.
-  const owned = await session.runCleanup({ adapter, principal: "user://cleanup" });
+  const owned = await session.runCleanup({
+    adapter,
+    principal: "user://cleanup",
+    authority: AUTHORITY,
+  });
   assert.equal(owned.outcomes.length, 1);
   assert.equal(owned.outcomes[0]?.outcome, "satisfied");
   assert.equal(owned.remaining, 0);
@@ -338,7 +362,11 @@ test("an unresolved allocation never clears without provider truth", async () =>
   })();
   assert.ok(isPortableCode(lost) && lost.code === "ProviderUnavailable");
 
-  const report = await session.runCleanup({ adapter, principal: "user://cleanup" });
+  const report = await session.runCleanup({
+    adapter,
+    principal: "user://cleanup",
+    authority: AUTHORITY,
+  });
   assert.equal(report.outcomes.length, 1);
   // Still unknown at the provider: the obligation stays visible.
   assert.equal(report.outcomes[0]?.outcome, "pending");

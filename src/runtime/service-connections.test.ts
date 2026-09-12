@@ -86,9 +86,18 @@ const okTransport: BindTransport = {
 function basePolicy(): PortablePolicy {
   return {
     schemaVersion: 1,
+    providers: ["adapter.service-aware"],
     operations: ["exec.process@1", "browser.session@1", "service.port@1"],
     transferDestinations: ["local"],
+    locations: ["local", "remote"],
     networkEgress: "unrestricted",
+    hostFilesystemAccess: true,
+    maxEnvironmentLifetimeMs: 86_400_000,
+    maxResources: {
+      memoryBytes: 4 * 1024 ** 3,
+      storageBytes: 4 * 1024 ** 3,
+      gpuMemoryBytes: 4 * 1024 ** 3,
+    },
     serviceAudiences: ["session", "public"],
   };
 }
@@ -226,6 +235,9 @@ function expose(
  * capabilities, so candidate bindings of both pass their guards.
  */
 class ServiceAwareLease implements EnvironmentLease {
+  /** The fake grant: fifteen minutes, inside every policy ceiling. */
+  readonly expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
+
   constructor(
     private readonly provider: ServiceAwareAdapter,
     readonly environmentId: string,
@@ -296,6 +308,11 @@ class ServiceAwareAdapter implements EnvironmentAdapter {
       platform: { os: "linux", arch: "x64" },
       capabilities: [processCapabilityDescriptor(), serviceCapabilityDescriptor()],
       enforcement: {},
+      enforcementFacts: {
+        executionLocation: "local",
+        networkEgress: "none",
+        hostFilesystemAccess: false,
+      },
       adapterVersion: "1.0.0-test",
     };
     this.environments.set(environmentId, manifest);
@@ -311,6 +328,11 @@ class ServiceAwareAdapter implements EnvironmentAdapter {
         { id: PROCESS_CAPABILITY_ID, attributes: processCapabilityDescriptor().attributes },
         { id: SERVICE_CAPABILITY_ID, attributes: service.attributes },
       ],
+      enforcementFacts: {
+        executionLocation: "local",
+        networkEgress: "none",
+        hostFilesystemAccess: false,
+      },
     };
   }
 }

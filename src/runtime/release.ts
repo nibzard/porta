@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { invalidRequestError, staleHandleError } from "../core/errors.js";
+import type { PolicyAuthority } from "../core/policy.js";
 import { nowUtcTimestamp } from "../core/time.js";
 import type {
   AcquisitionStatus,
@@ -44,6 +45,8 @@ export interface ReleaseOptions {
   adapter: EnvironmentAdapter;
   /** Authenticated principal supplied by the embedding application. */
   principal: string;
+  /** The policy authority in force for this call. */
+  authority: PolicyAuthority;
   /** Mutation lease duration in milliseconds. Default 60000. */
   leaseTtlMs?: number;
   /** Redactor applied to journal event data. */
@@ -227,6 +230,7 @@ export async function releaseAttachment(
       acquisitionId: acquisition.acquisitionId,
       request,
       authority: { principal: options.principal, policyRef },
+      limits: options.authority.acquisitionLimits(),
     });
     const result = await lease.release();
     if (result.status === "released") {

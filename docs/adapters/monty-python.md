@@ -20,6 +20,23 @@ binding.
 The adapter reports the installed engine version in every offer and
 manifest under `enforcement.engineVersion`.
 
+## Enforcement facts and acquisition limits
+
+Every offer and manifest carries the typed enforcement facts of
+SPEC.md section 7:
+
+| Fact | Value | Why |
+| --- | --- | --- |
+| `executionLocation` | `local` | The worker subprocesses run on the host. |
+| `networkEgress` | `none` | The interpreter has no network reachability. |
+| `hostFilesystemAccess` | `false` | Workers see only the authorized copy mounts, never the host filesystem. |
+
+The acquire call reads the effective limits. A policy that allows no
+`local` execution refuses before any worker exists, and the lease span
+never exceeds the lifetime ceiling. Stricter egress and host access
+policies are satisfied, because the engine enforces them by
+construction.
+
 ## Verified subset
 
 Monty interprets a Python-subset language. The adapter declares the

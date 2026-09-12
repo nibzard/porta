@@ -57,6 +57,16 @@ const AUTHORITY: ResourceFlowOptions = {
     operations: ["exec.process@1"],
     // The destination materializes a local working copy.
     transferDestinations: ["local"],
+    providers: ["fake-local"],
+    locations: ["local", "remote"],
+    networkEgress: "unrestricted",
+    hostFilesystemAccess: true,
+    maxEnvironmentLifetimeMs: 86_400_000,
+    maxResources: {
+      memoryBytes: 4 * 1024 ** 3,
+      storageBytes: 4 * 1024 ** 3,
+      gpuMemoryBytes: 4 * 1024 ** 3,
+    },
   }),
 };
 
@@ -1529,6 +1539,7 @@ test("a committed switch never turns back and its cleanup retries independently"
     const pass = await runCleanup(parts.store, parts.sessionId, "policy://test", {
       adapter,
       principal: "tester",
+      authority: AUTHORITY.authority,
     });
     assert.deepEqual(
       pass.outcomes.map((outcome) => outcome.outcome),
@@ -1647,6 +1658,7 @@ test("acquisition serving links follow the merge across repeated switches", asyn
     const pass = await runCleanup(parts.store, parts.sessionId, "policy://test", {
       adapter,
       principal: "tester",
+      authority: AUTHORITY.authority,
     });
     assert.deepEqual(
       pass.outcomes.map((outcome) => outcome.outcome),
@@ -1665,7 +1677,7 @@ test("acquisition serving links follow the merge across repeated switches", asyn
       "policy://test",
       { ...attachment, generation: 3 },
       "release-after-merge-1",
-      { adapter, principal: "tester" },
+      { adapter, principal: "tester", authority: AUTHORITY.authority },
     );
     assert.equal(released.status, "released");
     assert.equal(parts.store.getAcquisition(secondAcquisition.acquisitionId)!.state, "released");

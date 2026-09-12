@@ -68,7 +68,16 @@ function example(): Example {
     JSON.stringify({
       schemaVersion: 1,
       providers: ["local-process"],
+      locations: ["local", "remote"],
       transferDestinations: ["local"],
+      networkEgress: "unrestricted",
+      hostFilesystemAccess: true,
+      maxEnvironmentLifetimeMs: 86_400_000,
+      maxResources: {
+        memoryBytes: 4 * 1024 ** 3,
+        storageBytes: 4 * 1024 ** 3,
+        gpuMemoryBytes: 4 * 1024 ** 3,
+      },
     }),
   );
   const indexUrl = new URL("../index.js", import.meta.url).href;

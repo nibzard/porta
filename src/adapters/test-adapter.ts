@@ -32,10 +32,13 @@ import type { UtcTimestamp } from "../schema/defs.js";
  * Deterministic test adapter (SPEC.md sections 8 and 21).
  *
  * The adapter runs entirely in process: no external accounts, no paid
- * allocations, no clocks, and no randomness. Every channel answers from a
+ * allocations, and no randomness. Every channel answers from a
  * scripted queue and falls back to a documented default, so tests
  * reproduce lost responses, delayed completion, expiration, and release
- * failure by queuing directives rather than by timing races.
+ * failure by queuing directives rather than by timing races. The one
+ * clock use is the default lease span: a fresh allocation grants
+ * fifteen minutes from the allocation, like a bounded provider lease,
+ * instead of an unbounded future date.
  *
  * Server-side truth lives in maps the test inspects directly: an
  * invocation whose response is lost still records its effect, which is
@@ -128,6 +131,9 @@ interface PendingInvocation {
 
 const FAR_FUTURE = "2999-01-01T00:00:00Z";
 
+/** Default lease span of one fake allocation: fifteen minutes. */
+const DEFAULT_LEASE_MS = 15 * 60_000;
+
 /** The default offer: a local process environment with a lite engine. */
 function defaultOffers(): EnvironmentOffer[] {
   return [
@@ -146,6 +152,11 @@ function defaultOffers(): EnvironmentOffer[] {
       ],
       resources: { memoryBytes: 1 << 30, storageBytes: 1 << 30 },
       enforcement: { "network.egress": "none", "host.filesystem": true },
+      enforcementFacts: {
+        executionLocation: "local",
+        networkEgress: "none",
+        hostFilesystemAccess: false,
+      },
     },
   ];
 }
@@ -250,6 +261,11 @@ export class FakeEnvironmentAdapter implements EnvironmentAdapter, FakeInternals
       status: operation.status,
       effects: operation.effects,
     }));
+  }
+
+  /** How many acquisitions the provider allocated, failed or not. */
+  allocationCount(): number {
+    return this.allocations.size;
   }
 
   // -- EnvironmentAdapter ----------------------------------------------------
@@ -397,13 +413,16 @@ export class FakeEnvironmentAdapter implements EnvironmentAdapter, FakeInternals
       ],
       ...(offer.resources !== undefined ? { resources: offer.resources } : {}),
       enforcement: offer.enforcement ?? {},
+      ...(offer.enforcementFacts !== undefined
+        ? { enforcementFacts: structuredClone(offer.enforcementFacts) }
+        : {}),
       adapterVersion: "1.0.0-fake",
     };
     this.environments.set(id, manifest);
     this.allocations.set(acquisitionId, {
       state: "allocated",
       environmentId: id,
-      expiresAt: expiresAt ?? FAR_FUTURE,
+      expiresAt: expiresAt ?? new Date(Date.now() + DEFAULT_LEASE_MS).toISOString(),
     });
     return id;
   }
@@ -424,6 +443,11 @@ export class FakeEnvironmentLease implements EnvironmentLease {
     this.provider = provider;
     this.environmentId = environmentId;
     this.recordedManifest = manifest;
+  }
+
+  /** When the allocation record says the lease ends. */
+  get expiresAt(): UtcTimestamp {
+    return this.provider.expiryOf(this.environmentId) ?? FAR_FUTURE;
   }
 
   async manifest(): Promise<EnvironmentManifest> {

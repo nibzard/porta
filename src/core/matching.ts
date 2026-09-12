@@ -4,6 +4,7 @@ import {
   invalidRequestFromValidation,
   requirementUnsatisfiedError,
 } from "./errors.js";
+import type { PolicyAuthority } from "./policy.js";
 import { capabilityIdSatisfies, checkUnknownConstraints } from "./compatibility.js";
 import {
   ValidationError,
@@ -18,6 +19,7 @@ import {
 } from "../schema/capability.js";
 import type {
   CapabilityDescriptor,
+  EnforcementFacts,
   EnvironmentManifest,
   EnvironmentOffer,
   EnvironmentRequest,
@@ -72,6 +74,8 @@ export interface MatchTarget {
   }>;
   resources?: ResourceSummary | undefined;
   enforcement?: Record<string, unknown> | undefined;
+  /** Typed enforcement facts policy checks authorize against. */
+  facts?: EnforcementFacts | undefined;
 }
 
 /** Options for selecting one environment. */
@@ -82,6 +86,12 @@ export interface MatchOptions {
    * the enforcement keys the offers declare is used.
    */
   recognizedConstraints?: readonly string[];
+  /**
+   * The trusted policy every candidate must satisfy before selection.
+   * Offers the policy denies never reach matching, so a request that
+   * omits its provider cannot bypass the provider allowlist.
+   */
+  authority?: PolicyAuthority | undefined;
 }
 
 /** The single environment a request selected. */
@@ -107,6 +117,7 @@ export function offerTarget(offer: EnvironmentOffer): MatchTarget {
     })),
     resources: offer.resources,
     enforcement: offer.enforcement,
+    facts: offer.enforcementFacts,
   };
 }
 
@@ -128,6 +139,7 @@ export function manifestTarget(manifest: EnvironmentManifest): MatchTarget {
     })),
     resources: manifest.resources,
     enforcement: manifest.enforcement,
+    facts: manifest.enforcementFacts,
   };
 }
 
@@ -165,6 +177,7 @@ export function validateCapabilityDescriptors(
  * Select the single environment that satisfies a request.
  *
  * Throws `InvalidRequest` for malformed requests and matchers,
+ * `PolicyDenied` when the trusted policy excluded every candidate,
  * `RequirementUnsatisfied` when no target qualifies, and
  * `AmbiguousEnvironment` when several do and the request names no
  * provider. Each non-matching target contributes its reason to the
@@ -186,14 +199,39 @@ export function matchEnvironment(
     throw constraintProblem;
   }
 
-  const candidates =
-    request.providerId === undefined
-      ? targets
-      : targets.filter((target) => target.providerId === request.providerId);
+  // Policy runs before selection: an offer the policy denies never
+  // reaches matching, so an omitted provider cannot bypass the
+  // allowlist (SPEC.md section 7).
+  const candidates: MatchTarget[] = [];
+  const policyDenials: Array<{ providerId: string; error: PortableError }> = [];
+  for (const target of targets) {
+    if (options.authority === undefined) {
+      candidates.push(target);
+      continue;
+    }
+    const denial = options.authority.checkAcquisitionTarget({
+      providerId: target.providerId,
+      facts: target.facts,
+      resources: target.resources,
+    });
+    if (denial === null) {
+      candidates.push(target);
+    } else {
+      policyDenials.push({ providerId: target.providerId, error: denial });
+    }
+  }
 
-  const failures: MatchFailure[] = [];
+  const named =
+    request.providerId === undefined
+      ? candidates
+      : candidates.filter((target) => target.providerId === request.providerId);
+
+  const failures: MatchFailure[] = policyDenials.map((entry) => ({
+    providerId: entry.providerId,
+    reason: entry.error.message,
+  }));
   const matches: MatchTarget[] = [];
-  for (const target of candidates) {
+  for (const target of named) {
     const problem = checkTargetSatisfies(request, target);
     if (problem === null) {
       matches.push(target);
@@ -203,6 +241,11 @@ export function matchEnvironment(
   }
 
   if (matches.length === 0) {
+    if (candidates.length === 0 && policyDenials.length > 0) {
+      // Every offered environment was excluded by the trusted policy
+      // alone: the refusal names the policy, not the requirements.
+      throw policyDenials[0]!.error;
+    }
     throw requirementUnsatisfiedError(
       request.providerId === undefined
         ? "No configured environment satisfies the request."
@@ -210,7 +253,7 @@ export function matchEnvironment(
       {
         providerId: request.providerId,
         failures,
-        consideredProviders: candidates.map((target) => target.providerId),
+        consideredProviders: named.map((target) => target.providerId),
       },
     );
   }

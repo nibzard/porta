@@ -1,10 +1,10 @@
 ---
 active: true
-iteration: 63
-session_id: bc8021f3-4f37-47bf-b630-f0a2d6ef0f79
+iteration: 1
+session_id: 63f2a2da-c801-4709-8107-468e81da36b4
 max_iterations: 0
 completion_promise: null
-started_at: "2026-09-11T12:30:33Z"
+started_at: "2026-09-12T16:42:34Z"
 ---
 
-pick one task from to-do.json and implement it fully, you are done when there are no open remaining tasks
+choose one item of work from docs/review-fix-plan.md and implement it, continue working until full plan is implemented

@@ -13,6 +13,7 @@ import {
   invalidRequestError,
   invalidRequestFromValidation,
   leaseExpiredError,
+  policyDeniedError,
   providerUnavailableError,
   unsupportedOperationError,
 } from "../core/errors.js";
@@ -32,7 +33,11 @@ import type {
   ReleaseResult,
   AuthorizedContext,
 } from "../schema/adapter.js";
-import type { EnvironmentManifest, EnvironmentOffer } from "../schema/capability.js";
+import type {
+  EnforcementFacts,
+  EnvironmentManifest,
+  EnvironmentOffer,
+} from "../schema/capability.js";
 import type { ResourceRef } from "../schema/resource.js";
 import { checkTargetSatisfies, manifestTarget } from "../core/matching.js";
 import {
@@ -101,6 +106,18 @@ export const MONTY_VERIFIED_IMPORTS = [
 
 /** Default lease lifetime: fifteen minutes. */
 const DEFAULT_LEASE_TTL_MS = 15 * 60_000;
+
+/**
+ * Typed enforcement facts of this engine (SPEC.md 7).
+ *
+ * The interpreter workers run locally, hold no network, and see only
+ * the authorized copy mounts — never the host filesystem.
+ */
+const ENFORCEMENT_FACTS: EnforcementFacts = {
+  executionLocation: "local",
+  networkEgress: "none",
+  hostFilesystemAccess: false,
+};
 
 /** Default memory bound of one worker: 256 MiB. */
 const DEFAULT_WORKER_MEMORY_BYTES = 256 * 1024 * 1024;
@@ -223,12 +240,13 @@ export class MontyPythonAdapter implements EnvironmentAdapter {
     if (unsatisfied !== null) {
       throw unsatisfied;
     }
+    const ttlMs = this.admissibleLeaseMs(request.limits);
     const now = new Date().toISOString();
     const record: AcquisitionRecord = {
       acquisitionId: request.acquisitionId,
       environmentId,
       createdAt: now,
-      expiresAt: new Date(Date.parse(now) + this.leaseTtlMs).toISOString(),
+      expiresAt: new Date(Date.parse(now) + ttlMs).toISOString(),
     };
     this.acquisitions.set(record.acquisitionId, record);
     this.byEnvironment.set(record.environmentId, record.acquisitionId);
@@ -267,6 +285,31 @@ export class MontyPythonAdapter implements EnvironmentAdapter {
 
   // -- Adapter surface ------------------------------------------------------------
 
+  /**
+   * The lease span the effective limits admit, or a refusal.
+   *
+   * The engine workers run locally; a policy that allows no local
+   * execution is refused before any worker exists. The engine has no
+   * network and no host filesystem, so stricter egress and host
+   * access policies are satisfied, and the lease span is constrained
+   * to the lifetime ceiling.
+   */
+  private admissibleLeaseMs(limits: AuthorizedAcquireRequest["limits"]): number {
+    if (!limits.executionLocations.includes("local")) {
+      throw policyDeniedError(
+        "The Monty engine executes locally; the policy allows no local execution.",
+        { dimension: "locations", allowed: limits.executionLocations },
+      );
+    }
+    if (limits.maxEnvironmentLifetimeMs <= 0) {
+      throw policyDeniedError(
+        "The policy grants no environment lifetime.",
+        { dimension: "maxEnvironmentLifetimeMs", allowedMs: limits.maxEnvironmentLifetimeMs },
+      );
+    }
+    return Math.min(this.leaseTtlMs, limits.maxEnvironmentLifetimeMs);
+  }
+
   /** The declarations every environment of this adapter carries. */
   attributes(): PythonAttributeDeclarations {
     return {
@@ -287,6 +330,7 @@ export class MontyPythonAdapter implements EnvironmentAdapter {
       platform: { os: process.platform, arch: process.arch },
       capabilities: [{ id: PYTHON_CAPABILITY_ID, attributes: { ...this.attributes() } }],
       enforcement: this.enforcement(),
+      enforcementFacts: { ...ENFORCEMENT_FACTS },
     };
   }
 
@@ -298,6 +342,7 @@ export class MontyPythonAdapter implements EnvironmentAdapter {
       platform: { os: process.platform, arch: process.arch },
       capabilities: [pythonCapabilityDescriptor(this.attributes())],
       enforcement: this.enforcement(),
+      enforcementFacts: { ...ENFORCEMENT_FACTS },
       adapterVersion: VERSION,
     };
   }
@@ -520,6 +565,11 @@ export class MontyPythonLease implements EnvironmentLease {
     private readonly provider: MontyPythonAdapter,
     readonly environmentId: string,
   ) {}
+
+  /** When the acquisition record says the lease ends. */
+  get expiresAt(): string {
+    return this.provider.expiryOf(this.environmentId);
+  }
 
   async manifest(): Promise<EnvironmentManifest> {
     return this.provider.manifestOf(this.environmentId);

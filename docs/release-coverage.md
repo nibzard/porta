@@ -178,192 +178,194 @@ story.
 | Version one MUST represent the listed limits: providers, operations, lifetimes, transfer destinations, network egress, and service audiences (line 258). | `schema/policy.ts` declares the policy record; `core/policy.ts` enforces every limit. | `test:core/policy` |
 | An unspecified permission MUST inherit the configured policy; it MUST NOT default to broader access (line 267). | `core/policy.ts` resolves each check against the policy record; absence of a grant is refusal. | `test:core/policy` |
 | A local process adapter MUST declare its actual host access and reject isolation requirements it cannot enforce (line 271). | `adapters/local-process-adapter.ts` declares `ENFORCEMENT` (no isolation, full host filesystem, inherited network) and rejects unsatisfiable requirements at acquisition. | `conf:matching.declared-restrictions`, `docs/adapters` |
-| Credentials MUST arrive through an authorized secret resolver at execution time; checkpoints and references carry references, not values (line 273). | `core/secrets.ts` resolves and scrubs; bundle export refuses credential-shaped values. | `test:core/secrets`, `conf:bundle.credential-references` |
-| Revocation blocks new admissions at once, cancels existing operations where possible, and reports unconfirmed cancellation (line 277). | `runtime/revocation.ts` updates policy, issues cancellations, and records unconfirmed stops as unknown. | `test:runtime/revocation` |
+| Offers and manifests MUST carry typed enforcement facts; a target without them never matches, and missing evidence never becomes an implicit grant (line 273). | `schema/capability.ts` types `enforcementFacts` on offers and manifests; `core/policy.ts` `checkAcquisitionTarget` denies any target without facts, at match and again at activation. | `test:runtime/acquisition`, `conf:acquisition-policy` |
+| Every acquire MUST carry the effective acquisition limits; a provider rejects restrictions it cannot enforce before allocating, and every lease names its end (line 275). | `PolicyAuthority.acquisitionLimits()` builds the `limits` field of `AuthorizedAcquireRequest`; each adapter refuses unsatisfiable limits before allocation; `checkLeaseGrant` refuses a grant without an expiration or beyond the ceiling. | `test:runtime/acquisition`, `test:adapters`, `docs/adapters` |
+| Credentials MUST arrive through an authorized secret resolver at execution time; checkpoints and references carry references, not values (line 277). | `core/secrets.ts` resolves and scrubs; bundle export refuses credential-shaped values. | `test:core/secrets`, `conf:bundle.credential-references` |
+| Revocation blocks new admissions at once, cancels existing operations where possible, and reports unconfirmed cancellation (line 281). | `runtime/revocation.ts` updates policy, issues cancellations, and records unconfirmed stops as unknown. | `test:runtime/revocation` |
 
 ### 8. Environment adapters and leases
 
 | Requirement | Implementation | Evidence |
 | --- | --- | --- |
-| Named supporting types MUST be defined by the implementation's schemas under this specification's rules (line 301). | `schema/adapter.ts`, `schema/capability.ts`, and their siblings define every named type. | `test:schema/records` |
-| Adapter invocation context MUST include the operation identifier, deadline, limits, and allocation identity; credentials stay outside public inputs (line 303). | `schema/adapter.ts` `AdapterInvocation` carries exactly those fields. | `test:schema/contracts` |
-| `release` MUST be idempotent; adapters MUST report unsupported binding and cancellation explicitly (line 305). | Adapters' `release` succeeds on repeat; `bind` returns `unsupported`; cancellation reports `best-effort` with a detail. | `conf:acquisition.release-retry`, `test:runtime/release` |
-| Each lease MUST record expiration, renewal support, and enforcement behavior; the runtime MUST stop new invocations after expiration (line 307). | Lease status in `schema/adapter.ts`; `runtime/lifecycle.ts` refuses work past expiry; leases enforce their own expiry. | `conf:acquisition.lease-expiration`, `test:runtime/lifecycle` |
-| Cleanup obligations MUST survive restart and stay visible through inspection (line 311). | Obligations are rows in the control store; `describe()` reports `pendingCleanup`. | `test:runtime/lifecycle`, `conf:replacement.failed-source-cleanup` |
-| An expired or unreachable attachment MAY enter `unavailable` and MUST reject invocations until reconciliation succeeds (line 325). | `runtime/lifecycle.ts` `checkAttachmentAcceptsOperations` returns `LeaseExpired` and `ProviderUnavailable` as separate codes; `reconcileAttachment` restores. | `test:runtime/lifecycle` |
-| Release and replacement MUST serialize on the same attachment mutation lease (line 327). | Both flows take the mutation lease before writing; the fencing token guards the switch. | `test:runtime/release`, `test:runtime/replacement`, `conf:replacement.expired-mutation-lease` |
+| Named supporting types MUST be defined by the implementation's schemas under this specification's rules (line 305). | `schema/adapter.ts`, `schema/capability.ts`, and their siblings define every named type. | `test:schema/records` |
+| Adapter invocation context MUST include the operation identifier, deadline, limits, and allocation identity; credentials stay outside public inputs (line 307). | `schema/adapter.ts` `AdapterInvocation` carries exactly those fields. | `test:schema/contracts` |
+| `release` MUST be idempotent; adapters MUST report unsupported binding and cancellation explicitly (line 309). | Adapters' `release` succeeds on repeat; `bind` returns `unsupported`; cancellation reports `best-effort` with a detail. | `conf:acquisition.release-retry`, `test:runtime/release` |
+| Each lease MUST record expiration, renewal support, and enforcement behavior; the runtime MUST stop new invocations after expiration (line 311). | Lease status in `schema/adapter.ts`; `runtime/lifecycle.ts` refuses work past expiry; leases enforce their own expiry. | `conf:acquisition.lease-expiration`, `test:runtime/lifecycle` |
+| Cleanup obligations MUST survive restart and stay visible through inspection (line 315). | Obligations are rows in the control store; `describe()` reports `pendingCleanup`. | `test:runtime/lifecycle`, `conf:replacement.failed-source-cleanup` |
+| An expired or unreachable attachment MAY enter `unavailable` and MUST reject invocations until reconciliation succeeds (line 329). | `runtime/lifecycle.ts` `checkAttachmentAcceptsOperations` returns `LeaseExpired` and `ProviderUnavailable` as separate codes; `reconcileAttachment` restores. | `test:runtime/lifecycle` |
+| Release and replacement MUST serialize on the same attachment mutation lease (line 331). | Both flows take the mutation lease before writing; the fencing token guards the switch. | `test:runtime/release`, `test:runtime/replacement`, `conf:replacement.expired-mutation-lease` |
 
 ### 9. Invocation and operation journal
 
 | Requirement | Implementation | Evidence |
 | --- | --- | --- |
-| The runtime MUST record acceptance before dispatch and outcomes before acknowledging (line 357). | `runtime/admission.ts` commits the record first; `runtime/outcomes.ts` commits the settlement before the call returns. | `test:runtime/admission`, `demo` |
-| `(sessionId, requestKey)` MUST identify one request; a different input hash returns `RequestConflict` (line 359). | Admission checks the stored input hash under the store's uniqueness constraint. | `conf:operations.duplicate-request`, `conf:operations.mismatched-input` |
-| A repeated request returns the existing operation and MUST NOT blindly redispatch (line 361). | The admission path returns the stored record without a second dispatch. | `conf:operations.duplicate-request` |
-| A timeout does not establish cancellation; a lost response after dispatch MUST yield `unknown` unless reconciliation resolves it (line 376). | `runtime/cancellation.ts` records the attempt as unconfirmed; `runtime/outcomes.ts` marks the outcome unknown. | `conf:operations.unconfirmed-cancellation`, `conf:operations.lost-response-after-effects` |
-| An unknown record MAY resolve later; the journal MUST retain the original uncertainty and the evidence (line 378). | `runtime/outcomes.ts` `reconcileOperation` appends reconciliation trails and never rewrites history. | `conf:operations.reconciliation-history` |
-| Journal entries MUST be append-only and ordered, with identifier, sequence, timestamp, and event type (line 382). | `store/event-stream.ts` appends numbered events inside each state transaction. | `test:store/event-stream`, `conf:events.state-transaction-consistency` |
-| Output chunks MUST identify operation, stream, and sequence; standard output and error stay separate (line 384). | `runtime/output.ts` shapes chunk records with stream identity. | `test:runtime/output`, `conf:process.binary-output` |
-| Sequence order within one stream MUST be preserved (line 386). | Assembly follows chunk sequence per stream. | `test:runtime/output` |
-| Output limits MUST be explicit; truncation MUST report omitted bytes and whether execution continued (line 388). | `runtime/output.ts` and the local adapter's `Capture` report `truncated` and `omittedBytes`. | `conf:process.output-limits` |
-| Artifact records MUST include digest, byte size, media type, and authorized retrieval location (line 390). | `store/blob-store.ts` records digests and sizes; artifact records carry media type and location. | `test:store/blob-store`, `test:runtime/provenance` |
-| Operation metadata MUST NOT contain secret values (line 392). | `core/secrets.ts` scrubs metadata; export policy governs raw outputs. | `test:core/secrets`, `conf:bundle.credential-references` |
+| The runtime MUST record acceptance before dispatch and outcomes before acknowledging (line 361). | `runtime/admission.ts` commits the record first; `runtime/outcomes.ts` commits the settlement before the call returns. | `test:runtime/admission`, `demo` |
+| `(sessionId, requestKey)` MUST identify one request; a different input hash returns `RequestConflict` (line 363). | Admission checks the stored input hash under the store's uniqueness constraint. | `conf:operations.duplicate-request`, `conf:operations.mismatched-input` |
+| A repeated request returns the existing operation and MUST NOT blindly redispatch (line 365). | The admission path returns the stored record without a second dispatch. | `conf:operations.duplicate-request` |
+| A timeout does not establish cancellation; a lost response after dispatch MUST yield `unknown` unless reconciliation resolves it (line 380). | `runtime/cancellation.ts` records the attempt as unconfirmed; `runtime/outcomes.ts` marks the outcome unknown. | `conf:operations.unconfirmed-cancellation`, `conf:operations.lost-response-after-effects` |
+| An unknown record MAY resolve later; the journal MUST retain the original uncertainty and the evidence (line 382). | `runtime/outcomes.ts` `reconcileOperation` appends reconciliation trails and never rewrites history. | `conf:operations.reconciliation-history` |
+| Journal entries MUST be append-only and ordered, with identifier, sequence, timestamp, and event type (line 386). | `store/event-stream.ts` appends numbered events inside each state transaction. | `test:store/event-stream`, `conf:events.state-transaction-consistency` |
+| Output chunks MUST identify operation, stream, and sequence; standard output and error stay separate (line 388). | `runtime/output.ts` shapes chunk records with stream identity. | `test:runtime/output`, `conf:process.binary-output` |
+| Sequence order within one stream MUST be preserved (line 390). | Assembly follows chunk sequence per stream. | `test:runtime/output` |
+| Output limits MUST be explicit; truncation MUST report omitted bytes and whether execution continued (line 392). | `runtime/output.ts` and the local adapter's `Capture` report `truncated` and `omittedBytes`. | `conf:process.output-limits` |
+| Artifact records MUST include digest, byte size, media type, and authorized retrieval location (line 394). | `store/blob-store.ts` records digests and sizes; artifact records carry media type and location. | `test:store/blob-store`, `test:runtime/provenance` |
+| Operation metadata MUST NOT contain secret values (line 396). | `core/secrets.ts` scrubs metadata; export policy governs raw outputs. | `test:core/secrets`, `conf:bundle.credential-references` |
 
 ### 10. Resource references
 
 | Requirement | Implementation | Evidence |
 | --- | --- | --- |
-| Resolving a resource MUST check authorization, owner generation, resource status, and lease validity (line 408). | `runtime/resources.ts` performs all four checks. | `test:runtime/resources`, `conf:resources.stale-generation` |
-| The provider resource identifier MAY stay stable; the runtime MUST NOT make an old binding valid again (line 412). | Replacement invalidates bindings; reattachment mints a new binding record. | `conf:resources.stale-generation` |
-| Dependent service bindings MUST be invalidated and recreated explicitly (line 416). | The switch invalidates service bindings; `reconnectBrowserService` recreates them on request. | `test:runtime/service-connections`, `conf:resources.invalidated-service-connection`, `demo` |
-| Reference serialization MUST omit tokens, signed URLs, and cookies (line 418). | `core/secrets.ts` refuses credential-shaped values in serialized references. | `conf:bundle.credential-references` |
+| Resolving a resource MUST check authorization, owner generation, resource status, and lease validity (line 412). | `runtime/resources.ts` performs all four checks. | `test:runtime/resources`, `conf:resources.stale-generation` |
+| The provider resource identifier MAY stay stable; the runtime MUST NOT make an old binding valid again (line 416). | Replacement invalidates bindings; reattachment mints a new binding record. | `conf:resources.stale-generation` |
+| Dependent service bindings MUST be invalidated and recreated explicitly (line 420). | The switch invalidates service bindings; `reconnectBrowserService` recreates them on request. | `test:runtime/service-connections`, `conf:resources.invalidated-service-connection`, `demo` |
+| Reference serialization MUST omit tokens, signed URLs, and cookies (line 422). | `core/secrets.ts` refuses credential-shaped values in serialized references. | `conf:bundle.credential-references` |
 
 ### 11. Workspace specification
 
 | Requirement | Implementation | Evidence |
 | --- | --- | --- |
-| Version one MUST support binary content and UTF-8 paths (line 424). | `store/workspace-tree.ts` stores bytes and paths without text assumptions. | `conf:workspace.binary-roundtrip`, `conf:workspace.unicode-paths` |
-| Paths MUST be relative with `/` separators and no empty, `.`, or `..` segments; absolute paths and null bytes MUST be rejected (line 426). | `runtime/workspace.ts` validates every path. | `conf:workspace.invalid-paths` |
-| Version one MUST reject symbolic links, hard links, device files, and sockets with explicit errors, never dereferencing them (line 428). | The importer refuses them with a naming reason. | `conf:workspace.unsupported-links` |
-| Materialization MUST reject collisions and unrepresentable paths; adapters MUST NOT silently rename (line 432). | `runtime/workspace.ts` materialization stops on collision. | `test:runtime/materialize` |
-| Blobs MUST be addressed by SHA-256; tree manifests MUST sort entries by UTF-8 path bytes (line 454). | `store/workspace-tree.ts` computes digests and sorts entries. | `test:store/workspace-tree` |
-| The root digest MUST hash the sorted entry array exactly as specified, with original Unicode sequences kept (line 458). | `store/workspace-tree.ts` implements the encoding rule. | `test:store/workspace-tree`, `conf:workspace.unicode-paths` |
-| Importers MUST validate every referenced blob before publishing (line 460). | Publication follows blob verification. | `conf:workspace.hash-mismatch` |
-| Acceptance MUST compare the head with the proposal base in one transaction; a mismatch returns `WorkspaceConflict` without moving the head (line 470). | `runtime/proposal.ts` performs the compare-and-set. | `conf:workspace-authority.concurrent-proposals`, `demo` |
-| Version one MUST NOT merge automatically (line 472). | No merge code exists; a new proposal against the current head is the only path. | `test:runtime/proposal` |
-| A checkpoint requires a stable source through a lock or snapshot (line 478). | `Session.checkpoint` requires a stability declaration. | `conf:workspace-authority.stability-declaration` |
-| Without a lock or snapshot, the runtime MUST refuse a consistency-guaranteed checkpoint (line 480). | The stability declaration names its kind; reading files twice is not an accepted kind. | `conf:workspace-authority.stability-declaration` |
-| The bridge MUST stage contents and keep a recovery journal before changing destination files (line 484). | `runtime/workspace.ts` stages and journals; a crash completes from the stage. | `conf:workspace-authority.interrupted-export`, `conf:workspace-authority.checkpoint-lock` |
-| Export MUST fail when local files differ from the recorded base, without overwriting them (line 486). | The bridge compares before applying. | `conf:workspace-authority.local-edits-during-export` |
-| Every workspace-backed invocation MUST record its base revision and working copy identifier (line 490). | `runtime/provenance.ts` records both. | `test:runtime/provenance`, `demo` |
-| A command on a modified copy MUST NOT claim it tested the unmodified base (line 492). | Provenance reports `copyModified`. | `test:runtime/provenance`, `demo` |
-| Verification runs MUST exclude unrelated writers and record input and output tree hashes; input changes MUST be reported (line 494). | `prepareVerificationRun` and `settleVerificationRun` enforce and record. | `test:runtime/provenance`, `demo` |
-| Results MUST record command arguments, adapter version, manifest digest, and dependency identifiers (line 496). | The provenance record carries every field. | `test:runtime/provenance` |
-| Transfers MUST validate destination policy before sending bytes (line 502). | `runtime/export.ts` checks policy first. | `test:runtime/export` |
-| The importer MUST enforce limits on file count, file size, and total size before publishing (line 504). | Import options carry the limits; publication follows the checks. | `conf:workspace.size-limits` |
-| Exclusion rules MUST be explicit and stored with import provenance (line 506). | Import options name exclusions; the record keeps them. | `test:runtime/workspace` |
-| Excluded content is not preserved; required dependencies MUST be reconstructed or stored as artifacts (line 508). | Reconstruction recipes rebuild dependencies on the destination. | `test:runtime/reconstruction`, `demo` |
+| Version one MUST support binary content and UTF-8 paths (line 428). | `store/workspace-tree.ts` stores bytes and paths without text assumptions. | `conf:workspace.binary-roundtrip`, `conf:workspace.unicode-paths` |
+| Paths MUST be relative with `/` separators and no empty, `.`, or `..` segments; absolute paths and null bytes MUST be rejected (line 430). | `runtime/workspace.ts` validates every path. | `conf:workspace.invalid-paths` |
+| Version one MUST reject symbolic links, hard links, device files, and sockets with explicit errors, never dereferencing them (line 432). | The importer refuses them with a naming reason. | `conf:workspace.unsupported-links` |
+| Materialization MUST reject collisions and unrepresentable paths; adapters MUST NOT silently rename (line 436). | `runtime/workspace.ts` materialization stops on collision. | `test:runtime/materialize` |
+| Blobs MUST be addressed by SHA-256; tree manifests MUST sort entries by UTF-8 path bytes (line 458). | `store/workspace-tree.ts` computes digests and sorts entries. | `test:store/workspace-tree` |
+| The root digest MUST hash the sorted entry array exactly as specified, with original Unicode sequences kept (line 462). | `store/workspace-tree.ts` implements the encoding rule. | `test:store/workspace-tree`, `conf:workspace.unicode-paths` |
+| Importers MUST validate every referenced blob before publishing (line 464). | Publication follows blob verification. | `conf:workspace.hash-mismatch` |
+| Acceptance MUST compare the head with the proposal base in one transaction; a mismatch returns `WorkspaceConflict` without moving the head (line 474). | `runtime/proposal.ts` performs the compare-and-set. | `conf:workspace-authority.concurrent-proposals`, `demo` |
+| Version one MUST NOT merge automatically (line 476). | No merge code exists; a new proposal against the current head is the only path. | `test:runtime/proposal` |
+| A checkpoint requires a stable source through a lock or snapshot (line 482). | `Session.checkpoint` requires a stability declaration. | `conf:workspace-authority.stability-declaration` |
+| Without a lock or snapshot, the runtime MUST refuse a consistency-guaranteed checkpoint (line 484). | The stability declaration names its kind; reading files twice is not an accepted kind. | `conf:workspace-authority.stability-declaration` |
+| The bridge MUST stage contents and keep a recovery journal before changing destination files (line 488). | `runtime/workspace.ts` stages and journals; a crash completes from the stage. | `conf:workspace-authority.interrupted-export`, `conf:workspace-authority.checkpoint-lock` |
+| Export MUST fail when local files differ from the recorded base, without overwriting them (line 490). | The bridge compares before applying. | `conf:workspace-authority.local-edits-during-export` |
+| Every workspace-backed invocation MUST record its base revision and working copy identifier (line 494). | `runtime/provenance.ts` records both. | `test:runtime/provenance`, `demo` |
+| A command on a modified copy MUST NOT claim it tested the unmodified base (line 496). | Provenance reports `copyModified`. | `test:runtime/provenance`, `demo` |
+| Verification runs MUST exclude unrelated writers and record input and output tree hashes; input changes MUST be reported (line 498). | `prepareVerificationRun` and `settleVerificationRun` enforce and record. | `test:runtime/provenance`, `demo` |
+| Results MUST record command arguments, adapter version, manifest digest, and dependency identifiers (line 500). | The provenance record carries every field. | `test:runtime/provenance` |
+| Transfers MUST validate destination policy before sending bytes (line 506). | `runtime/export.ts` checks policy first. | `test:runtime/export` |
+| The importer MUST enforce limits on file count, file size, and total size before publishing (line 508). | Import options carry the limits; publication follows the checks. | `conf:workspace.size-limits` |
+| Exclusion rules MUST be explicit and stored with import provenance (line 510). | Import options name exclusions; the record keeps them. | `test:runtime/workspace` |
+| Excluded content is not preserved; required dependencies MUST be reconstructed or stored as artifacts (line 512). | Reconstruction recipes rebuild dependencies on the destination. | `test:runtime/reconstruction`, `demo` |
 
 ### 12. State classes and reconstruction
 
 | Requirement | Implementation | Evidence |
 | --- | --- | --- |
-| Recipes MUST declare input revision, required capabilities, operations, outputs, and failure conditions (line 519). | `schema/handoff.ts` defines the recipe shape; validation rejects incomplete recipes. | `test:runtime/replacement`, `test:schema/records` |
-| Recipes MUST use ordinary authorized invocations and MUST NOT run implicitly while parsing a bundle (line 521). | `runtime/reconstruction.ts` dispatches through admission; `runtime/bundle-import.ts` never executes recipes. | `conf:bundle.import-without-execution`, `test:runtime/reconstruction` |
-| Version one MUST support invalidation of native state; snapshot restoration is optional (line 523). | The switch records invalidated bindings per resource; no native snapshot restore exists. | `test:runtime/replacement`, `demo` |
+| Recipes MUST declare input revision, required capabilities, operations, outputs, and failure conditions (line 523). | `schema/handoff.ts` defines the recipe shape; validation rejects incomplete recipes. | `test:runtime/replacement`, `test:schema/records` |
+| Recipes MUST use ordinary authorized invocations and MUST NOT run implicitly while parsing a bundle (line 525). | `runtime/reconstruction.ts` dispatches through admission; `runtime/bundle-import.ts` never executes recipes. | `conf:bundle.import-without-execution`, `test:runtime/reconstruction` |
+| Version one MUST support invalidation of native state; snapshot restoration is optional (line 527). | The switch records invalidated bindings per resource; no native snapshot restore exists. | `test:runtime/replacement`, `demo` |
 
 ### 13. Replacement protocol
 
 | Requirement | Implementation | Evidence |
 | --- | --- | --- |
-| `planReplace` MUST report preserved, reconstructed, reattached, and invalidated state and allocate nothing (line 543). | `runtime/session.ts` `planReplace` reads durable state only. | `test:runtime/replacement` |
-| An execution request MUST reject invalidation of a resource in `requiredResources` (line 545). | Request validation in `runtime/replacement.ts`. | `test:runtime/replacement` |
-| An unknown operation outcome blocks replacement; a timeout MUST NOT bypass the block (line 557). | The fence refuses an unknown outcome under every policy. | `conf:replacement.unknown-operations` |
-| Background writers of the managed copy MUST stop before checkpointing (line 559). | The fence quiesces active operations; recipe failure conditions name them. | `test:runtime/replacement`, `conf:replacement.phase-failures` |
+| `planReplace` MUST report preserved, reconstructed, reattached, and invalidated state and allocate nothing (line 547). | `runtime/session.ts` `planReplace` reads durable state only. | `test:runtime/replacement` |
+| An execution request MUST reject invalidation of a resource in `requiredResources` (line 549). | Request validation in `runtime/replacement.ts`. | `test:runtime/replacement` |
+| An unknown operation outcome blocks replacement; a timeout MUST NOT bypass the block (line 561). | The fence refuses an unknown outcome under every policy. | `conf:replacement.unknown-operations` |
+| Background writers of the managed copy MUST stop before checkpointing (line 563). | The fence quiesces active operations; recipe failure conditions name them. | `test:runtime/replacement`, `conf:replacement.phase-failures` |
 | The switch MUST verify source generation, fencing token, and the validated destination record, then atomically record the new generation, invalidations, and events (lines 565 and 567). | The switch transaction in `runtime/replacement.ts` checks all three and commits as one unit. | `conf:replacement.expired-mutation-lease`, `conf:replacement.duplicate-switch` |
-| Unrelated attachments MUST NOT change generation (line 574). | The transaction touches only the named attachment. | `test:runtime/replacement`, `demo` |
-| Replacement transfers a revision but MUST NOT advance the workspace head (line 576). | The head moves only through proposal acceptance. | `test:runtime/replacement`, `demo` |
-| Recovery MUST NOT reactivate the old generation after a committed switch (line 590). | A committed switch is terminal; only new requests move state. | `conf:replacement.duplicate-switch` |
-| Surviving effects of an abort MUST be listed in the failure report (line 592). | `abortReplacement` returns `survivingEffects`. | `test:runtime/replacement`, `demo` |
-| Version one MUST support compute replacement and MAY reject browser replacement while preserving the browser (line 594). | Compute replacement is complete; browsers are preserved and reconnected, never replaced. | `conf:resources.browser-survival`, `demo` |
+| Unrelated attachments MUST NOT change generation (line 578). | The transaction touches only the named attachment. | `test:runtime/replacement`, `demo` |
+| Replacement transfers a revision but MUST NOT advance the workspace head (line 580). | The head moves only through proposal acceptance. | `test:runtime/replacement`, `demo` |
+| Recovery MUST NOT reactivate the old generation after a committed switch (line 594). | A committed switch is terminal; only new requests move state. | `conf:replacement.duplicate-switch` |
+| Surviving effects of an abort MUST be listed in the failure report (line 596). | `abortReplacement` returns `survivingEffects`. | `test:runtime/replacement`, `demo` |
+| Version one MUST support compute replacement and MAY reject browser replacement while preserving the browser (line 598). | Compute replacement is complete; browsers are preserved and reconnected, never replaced. | `conf:resources.browser-survival`, `demo` |
 
 ### 14. Initial capability profiles
 
 | Requirement | Implementation | Evidence |
 | --- | --- | --- |
-| Commands MUST accept argument arrays; shell interpretation only on explicit shell invocation (line 602). | `exec.process@1` run input takes `args`. | `conf:process.argument-preservation` |
-| Working directories MUST resolve inside the authorized copy unless host access is explicit (line 604). | `resolveProcessCwd` in `runtime/process-capability.ts`. | `conf:process.working-directory` |
-| `terminate` MUST state whether termination and descendant stops are confirmed (line 608). | The terminate result carries `confirmed` and `descendantsStopped`. | `conf:process.descendant-termination` |
-| Adapters MUST describe signals, descendant termination, binary output, and process lifetime; unsupported requirements MUST fail matching (line 610). | Process attributes in `runtime/process-capability.ts`; matching enforces them. | `conf:matching.declared-restrictions` |
-| The Python descriptor MUST declare engine, subset, imports, persistent-state behavior, and limits (line 618). | `runtime/python-capability.ts`. | `conf:python.declared-subset` |
-| Matching MUST distinguish lightweight interpreter semantics from full Python (line 620). | The subset requirement refuses providers that declare a lesser subset. | `conf:python.full-python-requirement` |
-| Evaluation calls MUST be isolated; interpreter locals MUST NOT become portable state (line 622). | Every evaluate call runs standalone. | `conf:python.state-isolation` |
-| Filesystem writes MUST be atomic per file; read-only copies MUST reject mutations (line 628). | `runtime/workspace-capability.ts`. | `test:runtime/workspace-capability` |
-| Binary reads and writes MUST use an explicit encoding or artifact transfer; path validation applies to every operation (line 630). | Same module. | `test:runtime/workspace-capability` |
-| `create` returns a browser resource; the descriptor MUST declare persistence, reattachment, interactions, and network constraints (line 638). | `runtime/browser-capability.ts` and `adapters/browser-adapter.ts`. | `test:runtime/browser-capability` |
-| Closing compute MUST NOT close a browser of another attachment; provider browser expiry MUST be reported (line 640). | Browser lifetime is independent; `observeSession` reports provider state. | `conf:resources.browser-survival`, `conf:resources.expired-browser`, `demo` |
-| Cookies and browser state stay provider-owned; Portable MUST NOT export them (line 642). | Browser sessions carry provider identifiers only; export scrubs the rest. | `conf:bundle.credential-references` |
-| Service exposure MUST require explicit authorization; credentials resolve at use time and stay out of bundles (line 648). | `runtime/service-connections.ts` authority checks. | `test:runtime/service-connections` |
-| `expose` identifies process, port, protocol, audience, and expiration; public exposure MUST be explicit (line 656). | The expose input carries every field; the audience names the grant. | `test:runtime/service-connections` |
-| `connect` MUST validate exposure and consumer network policy (line 658). | `connectService` checks both. | `test:runtime/service-connections` |
-| The service reference MUST identify its compute generation; replacing or releasing that generation invalidates it (line 660). | Service bindings name their owner generation; the switch and release invalidate. | `conf:resources.invalidated-service-connection`, `demo` |
+| Commands MUST accept argument arrays; shell interpretation only on explicit shell invocation (line 606). | `exec.process@1` run input takes `args`. | `conf:process.argument-preservation` |
+| Working directories MUST resolve inside the authorized copy unless host access is explicit (line 608). | `resolveProcessCwd` in `runtime/process-capability.ts`. | `conf:process.working-directory` |
+| `terminate` MUST state whether termination and descendant stops are confirmed (line 612). | The terminate result carries `confirmed` and `descendantsStopped`. | `conf:process.descendant-termination` |
+| Adapters MUST describe signals, descendant termination, binary output, and process lifetime; unsupported requirements MUST fail matching (line 614). | Process attributes in `runtime/process-capability.ts`; matching enforces them. | `conf:matching.declared-restrictions` |
+| The Python descriptor MUST declare engine, subset, imports, persistent-state behavior, and limits (line 622). | `runtime/python-capability.ts`. | `conf:python.declared-subset` |
+| Matching MUST distinguish lightweight interpreter semantics from full Python (line 624). | The subset requirement refuses providers that declare a lesser subset. | `conf:python.full-python-requirement` |
+| Evaluation calls MUST be isolated; interpreter locals MUST NOT become portable state (line 626). | Every evaluate call runs standalone. | `conf:python.state-isolation` |
+| Filesystem writes MUST be atomic per file; read-only copies MUST reject mutations (line 632). | `runtime/workspace-capability.ts`. | `test:runtime/workspace-capability` |
+| Binary reads and writes MUST use an explicit encoding or artifact transfer; path validation applies to every operation (line 634). | Same module. | `test:runtime/workspace-capability` |
+| `create` returns a browser resource; the descriptor MUST declare persistence, reattachment, interactions, and network constraints (line 642). | `runtime/browser-capability.ts` and `adapters/browser-adapter.ts`. | `test:runtime/browser-capability` |
+| Closing compute MUST NOT close a browser of another attachment; provider browser expiry MUST be reported (line 644). | Browser lifetime is independent; `observeSession` reports provider state. | `conf:resources.browser-survival`, `conf:resources.expired-browser`, `demo` |
+| Cookies and browser state stay provider-owned; Portable MUST NOT export them (line 646). | Browser sessions carry provider identifiers only; export scrubs the rest. | `conf:bundle.credential-references` |
+| Service exposure MUST require explicit authorization; credentials resolve at use time and stay out of bundles (line 652). | `runtime/service-connections.ts` authority checks. | `test:runtime/service-connections` |
+| `expose` identifies process, port, protocol, audience, and expiration; public exposure MUST be explicit (line 660). | The expose input carries every field; the audience names the grant. | `test:runtime/service-connections` |
+| `connect` MUST validate exposure and consumer network policy (line 662). | `connectService` checks both. | `test:runtime/service-connections` |
+| The service reference MUST identify its compute generation; replacing or releasing that generation invalidates it (line 664). | Service bindings name their owner generation; the switch and release invalidate. | `conf:resources.invalidated-service-connection`, `demo` |
 
 ### 15. Library interface
 
 | Requirement | Implementation | Evidence |
 | --- | --- | --- |
-| Public records MUST remain JSON-serializable (line 690). | Every record validates against JSON Schema; `schema/validate.ts` enforces it. | `test:schema/records`, `test:schema/contracts` |
-| Long operations MUST expose durable identifiers before completion; cancelling a local wait MUST NOT cancel the remote operation (line 692). | Admission returns the operation identifier at once; cancellation is a separate explicit call. | `test:runtime/cancellation`, `test:cli/operations` |
-| Typed helpers MAY wrap `invoke` but MUST preserve authorization, journaling, and errors (line 694). | The exported helpers in `runtime/session.ts` route through the same admission path. | `test:runtime/session`, `test:cli/examples` |
+| Public records MUST remain JSON-serializable (line 694). | Every record validates against JSON Schema; `schema/validate.ts` enforces it. | `test:schema/records`, `test:schema/contracts` |
+| Long operations MUST expose durable identifiers before completion; cancelling a local wait MUST NOT cancel the remote operation (line 696). | Admission returns the operation identifier at once; cancellation is a separate explicit call. | `test:runtime/cancellation`, `test:cli/operations` |
+| Typed helpers MAY wrap `invoke` but MUST preserve authorization, journaling, and errors (line 698). | The exported helpers in `runtime/session.ts` route through the same admission path. | `test:runtime/session`, `test:cli/examples` |
 
 ### 16. CLI contract
 
 | Requirement | Implementation | Evidence |
 | --- | --- | --- |
-| The CLI MUST call the same library contracts and MUST NOT keep separate lifecycle rules (line 698). | `cli/commands.ts` binds one store and calls `PortableRuntime` methods only. | `test:cli/cli`, `test:cli/main.e2e` |
-| Structured requests SHOULD use files or standard input; the CLI MUST NOT require shell interpolation of JSON or secrets (line 718). | Commands read request files or standard input. | `test:cli/cli` |
-| Each command MUST identify the session explicitly or through documented configuration; it MUST NOT guess (line 726). | `--session` or the local configuration; ambiguity refuses. | `test:cli/cli`, `docs/cli.md` |
+| The CLI MUST call the same library contracts and MUST NOT keep separate lifecycle rules (line 702). | `cli/commands.ts` binds one store and calls `PortableRuntime` methods only. | `test:cli/cli`, `test:cli/main.e2e` |
+| Structured requests SHOULD use files or standard input; the CLI MUST NOT require shell interpolation of JSON or secrets (line 722). | Commands read request files or standard input. | `test:cli/cli` |
+| Each command MUST identify the session explicitly or through documented configuration; it MUST NOT guess (line 730). | `--session` or the local configuration; ambiguity refuses. | `test:cli/cli`, `docs/cli.md` |
 
 ### 17. Harness integration
 
 | Requirement | Implementation | Evidence |
 | --- | --- | --- |
-| The first integration MUST route managed execution through Portable (line 730). | `harness/agents-sdk.ts` exposes `portable_environment`, `portable_checkpoint`, and `portable_run` tools. | `test:harness/agents-sdk`, `docs/harness.md` |
-| The integration MUST define whether built-in shell and file operations use a local bridge or stay excluded (line 732). | The toolkit routes local-bridge commands and documents exclusions. | `docs/harness.md` |
-| Before remote verification, the integration MUST synchronize local edits through the checkpoint contract (line 734). | `portable_checkpoint` publishes a revision before remote runs. | `test:harness/agents-sdk`, `demo` |
-| Environment changes MUST reach the agent through a tool result or explicit context update (line 736). | Tool results carry capability and revision state. | `test:harness/agents-sdk` |
-| A harness approval MUST become bounded authority; Portable MUST NOT infer approval from generated text (line 738). | Approvals translate into a policy record the embedding supplies. | `test:harness/agents-sdk`, `docs/harness.md` |
-| The integration MUST demonstrate session reopening without claiming conversation restoration (line 740). | `reopen()` reports `conversationRestored: false` and the retained state. | `test:harness/agents-sdk`, `demo` |
+| The first integration MUST route managed execution through Portable (line 734). | `harness/agents-sdk.ts` exposes `portable_environment`, `portable_checkpoint`, and `portable_run` tools. | `test:harness/agents-sdk`, `docs/harness.md` |
+| The integration MUST define whether built-in shell and file operations use a local bridge or stay excluded (line 736). | The toolkit routes local-bridge commands and documents exclusions. | `docs/harness.md` |
+| Before remote verification, the integration MUST synchronize local edits through the checkpoint contract (line 738). | `portable_checkpoint` publishes a revision before remote runs. | `test:harness/agents-sdk`, `demo` |
+| Environment changes MUST reach the agent through a tool result or explicit context update (line 740). | Tool results carry capability and revision state. | `test:harness/agents-sdk` |
+| A harness approval MUST become bounded authority; Portable MUST NOT infer approval from generated text (line 742). | Approvals translate into a policy record the embedding supplies. | `test:harness/agents-sdk`, `docs/harness.md` |
+| The integration MUST demonstrate session reopening without claiming conversation restoration (line 744). | `reopen()` reports `conversationRestored: false` and the retained state. | `test:harness/agents-sdk`, `demo` |
 
 ### 18. Events and errors
 
 | Requirement | Implementation | Evidence |
 | --- | --- | --- |
-| State changes and events MUST commit atomically; consumers resume by sequence and tolerate duplicates (line 767). | `store/event-stream.ts` `commitWith` joins event and state in one transaction. | `conf:events.state-transaction-consistency`, `conf:events.resume-by-sequence`, `conf:events.duplicate-delivery` |
-| Replacement events MUST include generations, environments, capability changes, selected revision, and dispositions (line 769). | `schema/event-payload.ts` defines the replacement payload. | `test:schema/event-payload`, `test:runtime/replacement` |
-| Errors MUST distinguish invalid input, policy denial, unsupported semantics, and temporary provider failure, and MUST NOT expose credentials (line 785). | `core/errors.ts` codes; scrubbing in `core/secrets.ts`. | `test:core/errors`, `test:core/secrets` |
+| State changes and events MUST commit atomically; consumers resume by sequence and tolerate duplicates (line 771). | `store/event-stream.ts` `commitWith` joins event and state in one transaction. | `conf:events.state-transaction-consistency`, `conf:events.resume-by-sequence`, `conf:events.duplicate-delivery` |
+| Replacement events MUST include generations, environments, capability changes, selected revision, and dispositions (line 773). | `schema/event-payload.ts` defines the replacement payload. | `test:schema/event-payload`, `test:runtime/replacement` |
+| Errors MUST distinguish invalid input, policy denial, unsupported semantics, and temporary provider failure, and MUST NOT expose credentials (line 789). | `core/errors.ts` codes; scrubbing in `core/secrets.ts`. | `test:core/errors`, `test:core/secrets` |
 
 ### 19. Portable state bundle
 
 | Requirement | Implementation | Evidence |
 | --- | --- | --- |
-| The manifest MUST include schema version, session, revision and root hash, attachment generations, artifact inventory, and dispositions (line 802). | `schema/bundle.ts`. | `test:schema/records`, `test:runtime/bundle` |
-| An export MUST declare blob inclusion; reference-only exports identify retrieval locations (line 804). | `runtime/bundle.ts` records the mode. | `test:runtime/bundle` |
-| The optional harness context reference stays opaque; import MUST NOT claim interpretation (line 806). | `harnessContextRef` crosses uninterpreted. | `test:runtime/bundle`, `test:runtime/bundle-import` |
-| Import MUST validate paths, hashes, sizes, schema versions, and policy before materializing, and MUST NOT execute recipes (line 808). | `runtime/bundle-import.ts`. | `conf:bundle.tampered-content`, `conf:bundle.import-without-execution` |
-| A bundle MUST NOT create a second authoritative controller (line 812). | Import refuses when the source session exists in the store. | `conf:bundle.no-competing-controller` |
+| The manifest MUST include schema version, session, revision and root hash, attachment generations, artifact inventory, and dispositions (line 806). | `schema/bundle.ts`. | `test:schema/records`, `test:runtime/bundle` |
+| An export MUST declare blob inclusion; reference-only exports identify retrieval locations (line 808). | `runtime/bundle.ts` records the mode. | `test:runtime/bundle` |
+| The optional harness context reference stays opaque; import MUST NOT claim interpretation (line 810). | `harnessContextRef` crosses uninterpreted. | `test:runtime/bundle`, `test:runtime/bundle-import` |
+| Import MUST validate paths, hashes, sizes, schema versions, and policy before materializing, and MUST NOT execute recipes (line 812). | `runtime/bundle-import.ts`. | `conf:bundle.tampered-content`, `conf:bundle.import-without-execution` |
+| A bundle MUST NOT create a second authoritative controller (line 816). | Import refuses when the source session exists in the store. | `conf:bundle.no-competing-controller` |
 
 ### 20. Extensions and compatibility
 
 | Requirement | Implementation | Evidence |
 | --- | --- | --- |
-| Objects MAY carry an `extensions` map; optional data MUST NOT change core semantics (line 816). | Extension maps are declared across schemas and ignored when unknown. | `test:schema/records`, `test:core/compatibility` |
-| A correctness-affecting extension MUST be declared in `requiredExtensions`; a consumer that lacks it MUST reject (line 818). | `core/compatibility.ts`. | `conf:bundle.unknown-required-extension` |
-| Provider-native access MAY exist as an authorized extension and MUST disclose what it cannot enforce (line 820). | Adapter enforcement declarations name the gaps (for example, the local adapter's `isolation: none`). | `conf:matching.declared-restrictions`, `docs/adapters` |
-| Published contracts MUST include schemas, semantics, and a conformance profile (line 822). | Each capability module pairs schemas with a conformance pack. | The pack files under `src/conformance/cases/` |
+| Objects MAY carry an `extensions` map; optional data MUST NOT change core semantics (line 820). | Extension maps are declared across schemas and ignored when unknown. | `test:schema/records`, `test:core/compatibility` |
+| A correctness-affecting extension MUST be declared in `requiredExtensions`; a consumer that lacks it MUST reject (line 822). | `core/compatibility.ts`. | `conf:bundle.unknown-required-extension` |
+| Provider-native access MAY exist as an authorized extension and MUST disclose what it cannot enforce (line 824). | Adapter enforcement declarations name the gaps (for example, the local adapter's `isolation: none`). | `conf:matching.declared-restrictions`, `docs/adapters` |
+| Published contracts MUST include schemas, semantics, and a conformance profile (line 826). | Each capability module pairs schemas with a conformance pack. | The pack files under `src/conformance/cases/` |
 
 ### 21. Conformance requirements
 
 | Requirement | Implementation | Evidence |
 | --- | --- | --- |
-| Results MUST identify specification version, adapter version, provider configuration, tested profiles, and skips (line 826). | `conformance/runner.ts` builds and validates the report. | `test:conformance/runner`, the workflows above |
-| Skips MUST NOT count as support; paid or external-effect tests MUST run only under configured authority (line 828). | The runner refuses by default and marks skips `established: false`. | `test:conformance/runner`, `test:conformance/cases/python` |
-| Replacement tests MUST inject crashes before and after the switch and verify stale controllers cannot commit (line 844). | `conformance/cases/replacement-resources.ts`. | `conf:replacement.controller-restart`, `conf:replacement.expired-mutation-lease` |
+| Results MUST identify specification version, adapter version, provider configuration, tested profiles, and skips (line 830). | `conformance/runner.ts` builds and validates the report. | `test:conformance/runner`, the workflows above |
+| Skips MUST NOT count as support; paid or external-effect tests MUST run only under configured authority (line 832). | The runner refuses by default and marks skips `established: false`. | `test:conformance/runner`, `test:conformance/cases/python` |
+| Replacement tests MUST inject crashes before and after the switch and verify stale controllers cannot commit (line 848). | `conformance/cases/replacement-resources.ts`. | `conf:replacement.controller-restart`, `conf:replacement.expired-mutation-lease` |
 
 ### 22. First release deliverables
 
 | Requirement | Implementation | Evidence |
 | --- | --- | --- |
-| The release MUST include the runtime and schemas, the stores, the CLI, the three adapters, the browser adapter and service connectivity, recovery with reconciliation and visible cleanup, the conformance tests, and the demonstration (line 850). | `src/index.ts` and the modules it exports; `cli/`; `adapters/`; `conformance/`; `acceptance/`. | `npm test` runs every suite; the workflows above |
-| Each selected provider MUST satisfy its profile or document an explicit unsupported requirement (line 860). | The providers that run locally satisfy their packs; the remote Linux provider's status appears below. | "Unsupported requirements" |
-| The demonstration MUST show old compute handles failing and the browser handle valid (line 874). | Step 6 and step 7 assertions. | `demo` |
-| The demonstration MUST show the workspace conflict and identify the earlier revision (line 876). | The conflict evidence block. | `demo` |
+| The release MUST include the runtime and schemas, the stores, the CLI, the three adapters, the browser adapter and service connectivity, recovery with reconciliation and visible cleanup, the conformance tests, and the demonstration (line 854). | `src/index.ts` and the modules it exports; `cli/`; `adapters/`; `conformance/`; `acceptance/`. | `npm test` runs every suite; the workflows above |
+| Each selected provider MUST satisfy its profile or document an explicit unsupported requirement (line 864). | The providers that run locally satisfy their packs; the remote Linux provider's status appears below. | "Unsupported requirements" |
+| The demonstration MUST show old compute handles failing and the browser handle valid (line 878). | Step 6 and step 7 assertions. | `demo` |
+| The demonstration MUST show the workspace conflict and identify the earlier revision (line 880). | The conflict evidence block. | `demo` |
 
 ### 23. Deferred work
 
 | Requirement | Implementation | Evidence |
 | --- | --- | --- |
-| Later additions MUST preserve explicit state validity, authorized execution, and workspace provenance (line 894). | No deferred feature exists in version one; the constraint governs future work and this document states it. | This section |
+| Later additions MUST preserve explicit state validity, authorized execution, and workspace provenance (line 898). | No deferred feature exists in version one; the constraint governs future work and this document states it. | This section |
 
 ## Unsupported requirements
 

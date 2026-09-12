@@ -198,6 +198,14 @@ const acquireRequest: AuthorizedAcquireRequest = {
   acquisitionId: "acq_01",
   request: environmentRequest,
   authority: { principal: "user://local/alice", policyRef: "policy://local/default" },
+  limits: {
+    executionLocations: ["local"],
+    networkEgress: "allowlist",
+    egressAllowlist: ["example.org"],
+    hostFilesystemAccess: false,
+    maxEnvironmentLifetimeMs: 3_600_000,
+    maxResources: { memoryBytes: 1_073_741_824 },
+  },
   deadline: "2026-09-11T12:05:00Z",
 };
 

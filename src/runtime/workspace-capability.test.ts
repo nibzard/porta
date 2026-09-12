@@ -34,6 +34,15 @@ function isPortableCode(value: unknown): value is { code: string; details?: unkn
 const LOCAL_AUTHORITY = PolicyAuthority.fromPolicy({
   schemaVersion: 1,
   transferDestinations: ["local"],
+  locations: ["local", "remote"],
+  networkEgress: "unrestricted",
+  hostFilesystemAccess: true,
+  maxEnvironmentLifetimeMs: 86_400_000,
+  maxResources: {
+    memoryBytes: 4 * 1024 ** 3,
+    storageBytes: 4 * 1024 ** 3,
+    gpuMemoryBytes: 4 * 1024 ** 3,
+  },
 });
 
 /** One runtime, an in-memory store, a blob tree, and scratch roots. */

@@ -1,16 +1,19 @@
 import { invalidRequestFromValidation, policyDeniedError } from "./errors.js";
 import type { PortableError } from "../schema/error.js";
 import { ValidationError, assertValid, jsonRoundTrip } from "../schema/validate.js";
-import { policySchema } from "../schema/policy.js";
+import { acquisitionLimitsSchema, policySchema } from "../schema/policy.js";
 import type {
+  AcquisitionLimits,
   EgressMode,
   ExecutionLocation,
   PortablePolicy,
   PolicyResourceLimits,
 } from "../schema/policy.js";
 import type {
+  EnforcementFacts,
   EnvironmentRequest,
   ResourceRequirements,
+  ResourceSummary,
 } from "../schema/capability.js";
 
 /**
@@ -352,8 +355,12 @@ export class PolicyAuthority {
    * Check an environment request before acquisition.
    *
    * Reads the provider selection, the locality preference, and the
-   * resource minima. Constraint and extension fields are ignored: they
-   * are model-controlled input and never carry authority.
+   * resource minima. A preference for a location the policy does not
+   * allow is denied up front: a preference never authorizes fallback
+   * to a weaker constraint (SPEC.md section 6.4). The actual execution
+   * location is still checked against the acquired facts. Constraint
+   * and extension fields are ignored: they are model-controlled input
+   * and never carry authority.
    */
   checkEnvironmentRequest(request: EnvironmentRequest): PortableError | null {
     if (request.providerId !== undefined) {
@@ -373,6 +380,146 @@ export class PolicyAuthority {
       const resources = this.checkResources(request.resources);
       if (resources !== null) {
         return resources;
+      }
+    }
+    return null;
+  }
+
+  // -- Acquisition targets and leases ---------------------------------------------
+
+  /**
+   * Check one acquisition target — an offer or an acquired manifest —
+   * against the trusted policy.
+   *
+   * The provider must be allowed even when the request omitted it.
+   * Typed enforcement facts must be present and within the policy:
+   * missing evidence never becomes an implicit grant. Declared
+   * resource quantities must stay under the ceilings.
+   */
+  checkAcquisitionTarget(target: {
+    providerId: string;
+    facts: EnforcementFacts | undefined;
+    resources?: ResourceSummary | undefined;
+  }): PortableError | null {
+    const provider = this.checkProvider(target.providerId);
+    if (provider !== null) {
+      return provider;
+    }
+    if (target.facts === undefined) {
+      return denied(
+        "enforcementFacts",
+        `Provider ${target.providerId} declares no typed enforcement facts; access cannot be verified.`,
+        { providerId: target.providerId },
+      );
+    }
+    if (!this.limits.locations.has(target.facts.executionLocation)) {
+      return denied(
+        "locations",
+        `Execution location ${target.facts.executionLocation} is not allowed.`,
+        { location: target.facts.executionLocation },
+      );
+    }
+    if (EGRESS_RANK[target.facts.networkEgress] > EGRESS_RANK[this.limits.networkEgress]) {
+      return denied(
+        "networkEgress",
+        `Enforced egress ${target.facts.networkEgress} exceeds the allowed mode ${this.limits.networkEgress}.`,
+        { enforced: target.facts.networkEgress, allowed: this.limits.networkEgress },
+      );
+    }
+    if (target.facts.hostFilesystemAccess && !this.limits.hostFilesystemAccess) {
+      return denied(
+        "hostFilesystemAccess",
+        "The environment reaches the host filesystem; the policy does not grant that.",
+        { enforced: target.facts.hostFilesystemAccess },
+      );
+    }
+    return this.checkActualResources(target.resources);
+  }
+
+  /**
+   * Check one lease grant against the lifetime ceiling.
+   *
+   * The adapter contract grants no lease beyond
+   * `maxEnvironmentLifetimeMs` from the acquire, and every grant
+   * names its end. A grant without an expiration, one already past,
+   * or one beyond the ceiling is denied.
+   */
+  checkLeaseGrant(grant: {
+    authorizedAt: string;
+    expiresAt: string | undefined;
+  }): PortableError | null {
+    if (grant.expiresAt === undefined) {
+      return denied(
+        "maxEnvironmentLifetimeMs",
+        "The provider granted no lease expiration; the lifetime ceiling cannot be verified.",
+      );
+    }
+    const span = Date.parse(grant.expiresAt) - Date.parse(grant.authorizedAt);
+    if (!Number.isFinite(span)) {
+      return denied("maxEnvironmentLifetimeMs", "The lease expiration is not a moment.", {
+        expiresAt: grant.expiresAt,
+      });
+    }
+    if (span <= 0) {
+      return denied("maxEnvironmentLifetimeMs", "The lease is already expired.", {
+        expiresAt: grant.expiresAt,
+      });
+    }
+    if (span > this.limits.maxEnvironmentLifetimeMs) {
+      return denied(
+        "maxEnvironmentLifetimeMs",
+        `The lease span of ${span} ms exceeds the allowed ${this.limits.maxEnvironmentLifetimeMs} ms.`,
+        { grantedMs: span, allowedMs: this.limits.maxEnvironmentLifetimeMs },
+      );
+    }
+    return null;
+  }
+
+  /**
+   * The effective acquisition limits of this authority
+   * (SPEC.md sections 7 and 8).
+   *
+   * The record is validated and JSON-serializable, so it travels with
+   * an authorized acquire request. Nothing derived from a request can
+   * widen it: only `fromPolicy` and `derive` build one, and `derive`
+   * can only narrow.
+   */
+  acquisitionLimits(): AcquisitionLimits {
+    const limits: AcquisitionLimits = {
+      executionLocations: [...this.limits.locations].sort(),
+      networkEgress: this.limits.networkEgress,
+      egressAllowlist: [...this.limits.egressAllowlist].sort(),
+      hostFilesystemAccess: this.limits.hostFilesystemAccess,
+      maxEnvironmentLifetimeMs: this.limits.maxEnvironmentLifetimeMs,
+      maxResources: { ...this.limits.maxResources },
+    };
+    return jsonRoundTrip(acquisitionLimitsSchema, limits) as AcquisitionLimits;
+  }
+
+  /**
+   * Check the resources one environment actually reported.
+   *
+   * Reported quantities must stay under the ceilings. An unreported
+   * dimension makes no claim; request minima are checked separately,
+   * and adapters that allocate bounded resources must report them.
+   */
+  private checkActualResources(reported: ResourceSummary | undefined): PortableError | null {
+    if (reported === undefined) {
+      return null;
+    }
+    const caps = this.limits.maxResources;
+    const dimensions: Array<[string, number | undefined, number]> = [
+      ["memoryBytes", reported.memoryBytes, caps.memoryBytes],
+      ["storageBytes", reported.storageBytes, caps.storageBytes],
+      ["gpuMemoryBytes", reported.gpuMemoryBytes, caps.gpuMemoryBytes],
+    ];
+    for (const [dimension, actual, allowed] of dimensions) {
+      if (actual !== undefined && actual > allowed) {
+        return denied(
+          "maxResources",
+          `Resource ${dimension} allocated ${actual} bytes above the allowed ${allowed} bytes.`,
+          { dimension, allocatedBytes: actual, allowedBytes: allowed },
+        );
       }
     }
     return null;
@@ -408,18 +555,6 @@ function normalize(policy: PortablePolicy): EffectiveLimits {
     secrets: new Set(policy.secrets ?? []),
     serviceAudiences: new Set(policy.serviceAudiences ?? []),
   };
-}
-
-/** The location a locality preference ranks first, or null when absent. */
-function localityOf(request: EnvironmentRequest): ExecutionLocation | null {
-  switch (request.preferences?.locality) {
-    case "local-first":
-      return "local";
-    case "remote-first":
-      return "remote";
-    default:
-      return null;
-  }
 }
 
 /** Intersect two sets into a new one. */
@@ -480,4 +615,16 @@ function denied(
   details?: Record<string, unknown>,
 ): PortableError {
   return policyDeniedError(message, { dimension, ...details });
+}
+
+/** The location a locality preference ranks first, or null when absent. */
+function localityOf(request: EnvironmentRequest): ExecutionLocation | null {
+  switch (request.preferences?.locality) {
+    case "local-first":
+      return "local";
+    case "remote-first":
+      return "remote";
+    default:
+      return null;
+  }
 }

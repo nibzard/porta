@@ -125,6 +125,9 @@ class ScriptedDriver implements BrowserDriver {
  * capabilities, so candidate bindings of both pass their guards.
  */
 class ServiceAwareLease implements EnvironmentLease {
+  /** The grant this lease names: a quarter hour from its making. */
+  readonly expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
+
   constructor(
     private readonly provider: ServiceAwareAdapter,
     readonly environmentId: string,
@@ -195,6 +198,11 @@ class ServiceAwareAdapter implements EnvironmentAdapter {
       platform: { os: "linux", arch: "x64" },
       capabilities: [processCapabilityDescriptor(), serviceCapabilityDescriptor()],
       enforcement: {},
+      enforcementFacts: {
+        executionLocation: "local",
+        networkEgress: "none",
+        hostFilesystemAccess: false,
+      },
       adapterVersion: "1.0.0-test",
     };
     this.environments.set(environmentId, manifest);
@@ -209,6 +217,11 @@ class ServiceAwareAdapter implements EnvironmentAdapter {
         { id: PROCESS_CAPABILITY_ID, attributes: processCapabilityDescriptor().attributes },
         { id: SERVICE_CAPABILITY_ID, attributes: serviceCapabilityDescriptor().attributes },
       ],
+      enforcementFacts: {
+        executionLocation: "local",
+        networkEgress: "none",
+        hostFilesystemAccess: false,
+      },
     };
   }
 }
@@ -223,6 +236,15 @@ function basePolicy(): PortablePolicy {
     transferDestinations: ["local"],
     networkEgress: "unrestricted",
     serviceAudiences: ["session"],
+    providers: ["adapter.service-aware"],
+    locations: ["local", "remote"],
+    hostFilesystemAccess: true,
+    maxEnvironmentLifetimeMs: 86_400_000,
+    maxResources: {
+      memoryBytes: 4 * 1024 ** 3,
+      storageBytes: 4 * 1024 ** 3,
+      gpuMemoryBytes: 4 * 1024 ** 3,
+    },
   };
 }
 
@@ -313,6 +335,18 @@ async function seed(): Promise<Fixture> {
     acquisitionId: `acq-${randomUUID()}`,
     request: { name: "browser-env", requires: {} },
     authority: { principal: "tester", policyRef: "policy://test" },
+    limits: {
+      executionLocations: ["local", "remote"],
+      networkEgress: "unrestricted",
+      egressAllowlist: [],
+      hostFilesystemAccess: true,
+      maxEnvironmentLifetimeMs: 86_400_000,
+      maxResources: {
+        memoryBytes: 4 * 1024 ** 3,
+        storageBytes: 4 * 1024 ** 3,
+        gpuMemoryBytes: 4 * 1024 ** 3,
+      },
+    },
   })) as BrowserLease;
   const answered = await lease.invoke({
     operationId: `op-${randomUUID()}`,

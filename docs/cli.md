@@ -43,13 +43,20 @@ record.
    inside it.
 2. Write one file into the workspace folder.
 3. Write a policy file that allows the local process provider and
-   local workspace transfers:
+   local workspace transfers. The local process provider runs on the
+   host with inherited networking, so the policy must grant local
+   execution, unrestricted egress, and host filesystem access
+   explicitly — an omitted permission denies, it never defaults open:
 
 ```json
 {
   "schemaVersion": 1,
   "providers": ["local-process"],
-  "transferDestinations": ["local"]
+  "transferDestinations": ["local"],
+  "locations": ["local"],
+  "networkEgress": "unrestricted",
+  "hostFilesystemAccess": true,
+  "maxEnvironmentLifetimeMs": 86400000
 }
 ```
 

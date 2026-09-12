@@ -15,6 +15,17 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LocalProcessAdapter } from "../adapters/local-process-adapter.js";
 import { MontyPythonAdapter } from "../adapters/monty-python-adapter.js";
+import type { AcquisitionLimits } from "../schema/policy.js";
+
+/** Limits the acceptance authority grants: local execution, one day. */
+const LIMITS: AcquisitionLimits = {
+  executionLocations: ["local"],
+  networkEgress: "unrestricted",
+  egressAllowlist: [],
+  hostFilesystemAccess: true,
+  maxEnvironmentLifetimeMs: 86_400_000,
+  maxResources: {},
+};
 
 /**
  * The executable acceptance fixture (SPEC.md sections 22 and 22.1).
@@ -91,6 +102,7 @@ test("the data inspection runs on the lightweight engine", async () => {
     acquisitionId: `acq-${randomUUID()}`,
     request: { name: "inspection", providerId: adapter.id, requires: {} },
     authority: { principal: "user://acceptance", policyRef: "policy://acceptance" },
+    limits: LIMITS,
   });
   try {
     const source = await readFile(join(FIXTURE, "inspection", "summarize.py"), "utf8");
@@ -134,6 +146,7 @@ test("the declared recipes reconstruct the dependency and the native test passes
       acquisitionId: `acq-${randomUUID()}`,
       request: { name: "worker", providerId: adapter.id, requires: {} },
       authority: { principal: "user://acceptance", policyRef: "policy://acceptance" },
+      limits: LIMITS,
     });
     try {
       for (const step of dependencies.steps) {

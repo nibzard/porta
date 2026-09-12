@@ -289,7 +289,7 @@ async function replace(parsed: ParsedArguments, io: CliIo): Promise<number> {
 
 /** Release one attachment and print its outcome. */
 async function release(parsed: ParsedArguments, io: CliIo): Promise<number> {
-  const { session } = await openInvocation(parsed);
+  const { session, config } = await openInvocation(parsed);
   const outcome = await session.release(
     {
       sessionId: session.id,
@@ -300,6 +300,7 @@ async function release(parsed: ParsedArguments, io: CliIo): Promise<number> {
     {
       adapter: await loadAdapter(valueOf(parsed, "--adapter")),
       principal: valueOf(parsed, "--principal"),
+      authority: loadAuthority(config),
     },
   );
   emit(io, outcome);

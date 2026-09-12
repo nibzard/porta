@@ -15,6 +15,7 @@ import type {
   AdapterInvocation,
   AuthorizedAcquireRequest,
 } from "../schema/adapter.js";
+import type { AcquisitionLimits } from "../schema/policy.js";
 import type { ResourceRef } from "../schema/resource.js";
 
 function isPortableCode(value: unknown): value is { code: string } {
@@ -25,11 +26,26 @@ function isPortableCode(value: unknown): value is { code: string } {
   );
 }
 
+/** Explicit grants every successful acquire in this file carries. */
+const LIMITS: AcquisitionLimits = {
+  executionLocations: ["local", "remote"],
+  networkEgress: "unrestricted",
+  egressAllowlist: [],
+  hostFilesystemAccess: true,
+  maxEnvironmentLifetimeMs: 86_400_000,
+  maxResources: {
+    memoryBytes: 4 * 1024 ** 3,
+    storageBytes: 4 * 1024 ** 3,
+    gpuMemoryBytes: 4 * 1024 ** 3,
+  },
+};
+
 function acquireRequest(acquisitionId: string): AuthorizedAcquireRequest {
   return {
     acquisitionId,
     request: { name: "worker", requires: { "exec.process@1": {} } },
     authority: { principal: "user://test", policyRef: "policy://test" },
+    limits: LIMITS,
   };
 }
 
@@ -296,6 +312,7 @@ test("malformed inputs are invalid requests before any effect", async () => {
       acquisitionId: "",
       request: { name: "worker", requires: {} },
       authority: { principal: "user://test", policyRef: "policy://test" },
+      limits: LIMITS,
     }),
     (error: unknown) => isPortableCode(error) && error.code === "InvalidRequest",
   );

@@ -25,9 +25,10 @@ import {
   operationRecordSchema,
   outputChunkSchema,
 } from "./operation.js";
-import { policySchema } from "./policy.js";
+import { acquisitionLimitsSchema, policySchema } from "./policy.js";
 import {
   capabilityDescriptorSchema,
+  enforcementFactsSchema,
   environmentManifestSchema,
   environmentOfferSchema,
   environmentRequestSchema,
@@ -104,6 +105,7 @@ const ALL_SCHEMAS = [
   capabilityDescriptorSchema,
   resourceSummarySchema,
   resourceRequirementsSchema,
+  enforcementFactsSchema,
   environmentManifestSchema,
   environmentRequestSchema,
   environmentOfferSchema,
@@ -133,6 +135,7 @@ const ALL_SCHEMAS = [
   cleanupObligationSchema,
   bundleManifestSchema,
   policySchema,
+  acquisitionLimitsSchema,
 ] as const;
 
 for (const schema of ALL_SCHEMAS) {

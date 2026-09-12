@@ -3,6 +3,7 @@ import {
   invalidRequestError,
   invalidRequestFromValidation,
   leaseExpiredError,
+  policyDeniedError,
   unsupportedOperationError,
 } from "../core/errors.js";
 import { ValidationError, assertValid } from "../schema/validate.js";
@@ -25,6 +26,7 @@ import type {
 } from "../schema/adapter.js";
 import type { AuthorizedContext } from "../schema/adapter.js";
 import type {
+  EnforcementFacts,
   EnvironmentManifest,
   EnvironmentOffer,
 } from "../schema/capability.js";
@@ -236,6 +238,19 @@ export interface BrowserAdapterOptions {
 /** Default lease lifetime: fifteen minutes. */
 const DEFAULT_LEASE_TTL_MS = 15 * 60_000;
 
+/**
+ * Typed enforcement facts of this provider (SPEC.md 7).
+ *
+ * Sessions run in the local driver process against an origin
+ * allowlist; the driver blocks private address ranges by default and
+ * the provider reaches no host filesystem.
+ */
+const ENFORCEMENT_FACTS: EnforcementFacts = {
+  executionLocation: "local",
+  networkEgress: "allowlist",
+  hostFilesystemAccess: false,
+};
+
 /** Default inline capture ceiling: sixty-four KiB. */
 const DEFAULT_INLINE_IMAGE_BYTES = 64 * 1024;
 
@@ -299,12 +314,13 @@ export class BrowserAdapter implements EnvironmentAdapter {
     if (unsatisfied !== null) {
       throw unsatisfied;
     }
+    const ttlMs = this.admissibleLeaseMs(request.limits);
     const now = new Date().toISOString();
     const record: BrowserAcquisitionRecord = {
       acquisitionId: request.acquisitionId,
       environmentId,
       createdAt: now,
-      expiresAt: new Date(Date.parse(now) + this.leaseTtlMs).toISOString(),
+      expiresAt: new Date(Date.parse(now) + ttlMs).toISOString(),
     };
     this.acquisitions.set(record.acquisitionId, record);
     this.byEnvironment.set(record.environmentId, record.acquisitionId);
@@ -341,6 +357,39 @@ export class BrowserAdapter implements EnvironmentAdapter {
 
   // -- Adapter surface ------------------------------------------------------------
 
+  /**
+   * The lease span the effective limits admit, or a refusal.
+   *
+   * Sessions run locally in this process, so a policy that allows no
+   * local execution is refused. A driver without network enforcement
+   * support cannot advertise a network the policy closes entirely:
+   * `none` refuses, and the allowlist contract itself is enforced by
+   * the driver before requests leave it (R4 tightens redirects and
+   * dependencies). The lease span is constrained to the lifetime
+   * ceiling.
+   */
+  private admissibleLeaseMs(limits: AuthorizedAcquireRequest["limits"]): number {
+    if (!limits.executionLocations.includes("local")) {
+      throw policyDeniedError(
+        "The browser provider executes locally; the policy allows no local execution.",
+        { dimension: "locations", allowed: limits.executionLocations },
+      );
+    }
+    if (limits.networkEgress === "none") {
+      throw policyDeniedError(
+        "The browser driver enforces an origin allowlist; it cannot close the network entirely.",
+        { dimension: "networkEgress", allowed: limits.networkEgress },
+      );
+    }
+    if (limits.maxEnvironmentLifetimeMs <= 0) {
+      throw policyDeniedError(
+        "The policy grants no environment lifetime.",
+        { dimension: "maxEnvironmentLifetimeMs", allowedMs: limits.maxEnvironmentLifetimeMs },
+      );
+    }
+    return Math.min(this.leaseTtlMs, limits.maxEnvironmentLifetimeMs);
+  }
+
   /** The declarations every environment of this adapter carries. */
   attributes(): BrowserAttributeDeclarations {
     return {
@@ -363,6 +412,7 @@ export class BrowserAdapter implements EnvironmentAdapter {
       platform: { os: process.platform, arch: process.arch },
       capabilities: [{ id: descriptor.id, attributes: descriptor.attributes }],
       enforcement: this.enforcement(),
+      enforcementFacts: { ...ENFORCEMENT_FACTS },
     };
   }
 
@@ -374,6 +424,7 @@ export class BrowserAdapter implements EnvironmentAdapter {
       platform: { os: process.platform, arch: process.arch },
       capabilities: [browserCapabilityDescriptor(this.attributes())],
       enforcement: this.enforcement(),
+      enforcementFacts: { ...ENFORCEMENT_FACTS },
       adapterVersion: VERSION,
     };
   }
@@ -862,6 +913,11 @@ export class BrowserLease implements EnvironmentLease {
     private readonly provider: BrowserAdapter,
     readonly environmentId: string,
   ) {}
+
+  /** When the acquisition record says the lease ends. */
+  get expiresAt(): string {
+    return this.provider.expiryOf(this.environmentId);
+  }
 
   async manifest(): Promise<EnvironmentManifest> {
     return this.provider.manifestOf(this.environmentId);

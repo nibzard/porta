@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { AdapterOperation, EnvironmentLease } from "../schema/adapter.js";
+import type { AcquisitionLimits } from "../schema/policy.js";
 import { MONTY_PYTHON_PROVIDER_ID, MONTY_VERIFIED_IMPORTS, MontyPythonAdapter } from "./monty-python-adapter.js";
 import type { MontyPythonAdapterOptions } from "./monty-python-adapter.js";
 import type { PythonEvaluateResult } from "../runtime/python-capability.js";
@@ -38,6 +39,20 @@ interface Fixture {
   close(): Promise<void>;
 }
 
+/** Explicit grants every successful acquire in this file carries. */
+const LIMITS: AcquisitionLimits = {
+  executionLocations: ["local", "remote"],
+  networkEgress: "unrestricted",
+  egressAllowlist: [],
+  hostFilesystemAccess: true,
+  maxEnvironmentLifetimeMs: 86_400_000,
+  maxResources: {
+    memoryBytes: 4 * 1024 ** 3,
+    storageBytes: 4 * 1024 ** 3,
+    gpuMemoryBytes: 4 * 1024 ** 3,
+  },
+};
+
 async function make(options: MontyPythonAdapterOptions = {}): Promise<Fixture> {
   const copyRoot = mkdtempSync(join(tmpdir(), "porta-monty-"));
   mkdirSync(join(copyRoot, "data"), { recursive: true });
@@ -55,6 +70,7 @@ async function make(options: MontyPythonAdapterOptions = {}): Promise<Fixture> {
       requires: {},
     },
     authority: { principal: "user://test", policyRef: "policy://test" },
+    limits: LIMITS,
   });
   return {
     adapter,
@@ -125,6 +141,7 @@ test("evaluation runs isolated programs with variables, output, and host functio
       acquisitionId: `acq-${randomUUID()}`,
       request: { name: "python", providerId: MONTY_PYTHON_PROVIDER_ID, requires: {} },
       authority: { principal: "user://test", policyRef: "policy://test" },
+      limits: LIMITS,
     });
     const failed = resultOf(
       await evaluate(boomLease, {
@@ -328,6 +345,7 @@ test("workspace bindings read and write the authorized copy under their mode", a
       acquisitionId: `acq-${randomUUID()}`,
       request: { name: "python", providerId: MONTY_PYTHON_PROVIDER_ID, requires: {} },
       authority: { principal: "user://test", policyRef: "policy://test" },
+      limits: LIMITS,
     });
     const refused = await refuse(() =>
       evaluate(bareLease, {
@@ -368,6 +386,7 @@ test("the adapter declares its truth and refuses what it cannot do", async () =>
           requires: { "exec.python@1": { subset: { equals: "full" } } },
         },
         authority: { principal: "user://test", policyRef: "policy://test" },
+        limits: LIMITS,
       }),
     );
     assert.equal(full?.code, "RequirementUnsatisfied");
@@ -436,6 +455,7 @@ test("acquisitions are idempotent, inspectable, and release exactly once", async
       acquisitionId,
       request: { name: "python", providerId: MONTY_PYTHON_PROVIDER_ID, requires: {} },
       authority: { principal: "user://test", policyRef: "policy://test" },
+      limits: LIMITS,
     } as const;
     const first = await adapter.acquire(request);
     const again = await adapter.acquire(request);

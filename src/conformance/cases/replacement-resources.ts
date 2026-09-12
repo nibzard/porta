@@ -6,6 +6,7 @@ import { PolicyAuthority } from "../../core/policy.js";
 import type { PolicyAuthority as Authority } from "../../core/policy.js";
 import { operationUnknownError, providerUnavailableError } from "../../core/errors.js";
 import type { PortableError } from "../../schema/error.js";
+import type { EnforcementFacts } from "../../schema/capability.js";
 import { ControlStore } from "../../store/control-store.js";
 import { BlobStore } from "../../store/blob-store.js";
 import { checkpointWorkspace } from "../../runtime/workspace.js";
@@ -85,12 +86,28 @@ import type { ConformanceCase, ConformanceCaseAnswer } from "../runner.js";
  * charges, or touches anything outside private temporary directories.
  */
 
+/** Typed enforcement facts of the scripted provider: a plain local host. */
+const SCRIPTED_FACTS: EnforcementFacts = {
+  executionLocation: "local",
+  networkEgress: "none",
+  hostFilesystemAccess: false,
+};
+
 /** The authority every flow in this pack runs under. */
 const AUTHORITY: Authority = PolicyAuthority.fromPolicy({
   schemaVersion: 1,
+  providers: ["porta-conf-scripted"],
   operations: ["exec.process@1", "service.port@1", "browser.session@1"],
+  locations: ["local", "remote"],
   transferDestinations: ["local"],
   networkEgress: "unrestricted",
+  hostFilesystemAccess: true,
+  maxEnvironmentLifetimeMs: 86_400_000,
+  maxResources: {
+    memoryBytes: 4 * 1024 ** 3,
+    storageBytes: 4 * 1024 ** 3,
+    gpuMemoryBytes: 4 * 1024 ** 3,
+  },
   serviceAudiences: ["session"],
 });
 
@@ -113,10 +130,18 @@ interface ScriptedFailures {
 
 /** One lease of the scripted provider. */
 class ScriptedLease implements EnvironmentLease {
+  /** When this lease ends: fifteen minutes after it was granted. */
+  private readonly grantedTo = new Date(Date.now() + 15 * 60_000).toISOString();
+
   constructor(
     private readonly provider: ScriptedAdapter,
     readonly environmentId: string,
   ) {}
+
+  /** The lease end this provider reports. */
+  get expiresAt(): string {
+    return this.grantedTo;
+  }
 
   manifest(): Promise<EnvironmentManifest> {
     return Promise.resolve(this.provider.manifestOf(this.environmentId));
@@ -185,6 +210,7 @@ class ScriptedAdapter implements EnvironmentAdapter {
           { id: "exec.process@1", attributes: processCapabilityDescriptor().attributes },
           { id: "service.port@1", attributes: serviceCapabilityDescriptor().attributes },
         ],
+        enforcementFacts: { ...SCRIPTED_FACTS },
       },
     ]);
   }
@@ -213,6 +239,7 @@ class ScriptedAdapter implements EnvironmentAdapter {
       platform: { os: "linux", arch: "x64" },
       capabilities: [processCapabilityDescriptor(), serviceCapabilityDescriptor()],
       enforcement: {},
+      enforcementFacts: { ...SCRIPTED_FACTS },
       adapterVersion: "1.0.0-conformance",
     };
   }
@@ -1080,6 +1107,7 @@ export function replacementResourceCases(): ConformanceCase[] {
           const failed = await runCleanup(state.store, state.sessionId, "policy://conformance", {
             adapter,
             principal: "conformance",
+            authority: AUTHORITY,
           });
           if (
             failed.outcomes[0]?.outcome !== "pending" ||
@@ -1107,6 +1135,7 @@ export function replacementResourceCases(): ConformanceCase[] {
           const satisfied = await runCleanup(state.store, state.sessionId, "policy://conformance", {
             adapter,
             principal: "conformance",
+            authority: AUTHORITY,
           });
           if (satisfied.remaining !== 0 || satisfied.outcomes[0]?.outcome !== "satisfied") {
             return {
