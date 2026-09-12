@@ -509,6 +509,8 @@ test("missing or empty policy configuration exits 2 with a clear error", async (
     assert.equal(empty.code, 2);
     assert.ok(empty.err[0]?.includes("needs a policy authority"));
   } finally {
+    delete process.env["PORTABLE_STORE"];
+    delete process.env["PORTABLE_SESSION"];
     delete process.env["PORTABLE_POLICY"];
     fx.restoreEnv();
     rmSync(fx.root, { recursive: true, force: true });
