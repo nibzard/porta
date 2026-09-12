@@ -58,6 +58,7 @@ import type {
   EnvironmentOffer,
 } from "../schema/capability.js";
 import type { AttachmentRef, AttachmentSummary } from "../schema/session.js";
+import type { OperationRecord } from "../schema/operation.js";
 import { LocalProcessAdapter } from "../adapters/local-process-adapter.js";
 import { MontyPythonAdapter } from "../adapters/monty-python-adapter.js";
 import { BrowserAdapter } from "../adapters/browser-adapter.js";
@@ -711,6 +712,22 @@ async function environmentOf(
 }
 
 /**
+ * The adapter answer a lost claim adopts from the stored record.
+ *
+ * The result reference of this flow is the JSON encoding of the
+ * provider result, so the adopted answer decodes it back. A record a
+ * lost claim reads is never `accepted`: the winning claim moved it.
+ */
+function adoptedAnswer(operationId: string, record: OperationRecord): AdapterOperation {
+  return {
+    operationId,
+    status: record.status === "accepted" ? "running" : record.status,
+    ...(record.resultRef !== undefined ? { result: JSON.parse(record.resultRef) } : {}),
+    ...(record.error !== undefined ? { error: record.error } : {}),
+  };
+}
+
+/**
  * Admit, dispatch, and settle one managed operation.
  *
  * The durable record exists before the provider runs; the settle call
@@ -738,7 +755,10 @@ async function dispatch(
     },
     { authority },
   );
-  await session.markDispatched(admitted.id);
+  const claim = await session.claimDispatch(admitted.id);
+  if (!claim.claimed) {
+    return adoptedAnswer(admitted.id, claim.operation);
+  }
   const lease = await leaseOf(await environmentOf(session, attachment.attachmentId));
   const answered = await lease.invoke({
     operationId: admitted.id,
@@ -1238,18 +1258,20 @@ async function demonstrationOf(
     },
     { authority, destination: verification.dir },
   );
-  await session.markDispatched(verifyAdmitted.id);
+  const verifyClaim = await session.claimDispatch(verifyAdmitted.id);
   const verifyLease = await destination.leaseOf(
     await environmentOf(session, compute.attachmentId),
   );
-  const verifyRun = await verifyLease.invoke({
-    operationId: verifyAdmitted.id,
-    capability: "exec.process@1",
-    operation: "run",
-    input: verifyInput,
-    environmentId: verifyLease.environmentId,
-    limits: {},
-  });
+  const verifyRun = verifyClaim.claimed
+    ? await verifyLease.invoke({
+        operationId: verifyAdmitted.id,
+        capability: "exec.process@1",
+        operation: "run",
+        input: verifyInput,
+        environmentId: verifyLease.environmentId,
+        limits: {},
+      })
+    : adoptedAnswer(verifyAdmitted.id, verifyClaim.operation);
   await session.settle(verifyAdmitted.id, {
     kind: "completed",
     resultRef: JSON.stringify(verifyRun.result ?? null),

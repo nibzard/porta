@@ -32,11 +32,12 @@ import { WorkspaceFiles } from "./workspace-capability.js";
 import { admitInvocation } from "./admission.js";
 import type { AdmissionOptions, AdmissionOutcome } from "./admission.js";
 import {
-  markOperationDispatched,
+  claimOperationDispatch,
   reconcileOperation,
   settleOperation,
 } from "./outcomes.js";
 import type {
+  DispatchClaim,
   OperationOutcome,
   OperationResolution,
   OutcomeOptions,
@@ -373,7 +374,7 @@ export class ManagedSession {
    *
    * The record exists before this call returns: the identifier is
    * durable the moment admission commits, and completion is a later
-   * `markDispatched`, `settle`, or `reconcile` call. The facade runs
+   * `claimDispatch`, `settle`, or `reconcile` call. The facade runs
    * nothing itself, so adapter behavior stays behind the capability
    * contract the admission checked.
    */
@@ -404,14 +405,21 @@ export class ManagedSession {
   }
 
   /**
-   * Record that provider execution of one operation started.
+   * Claim the dispatch of one admitted operation.
    *
-   * The record moves `accepted` to `running` under compare-and-set.
-   * A settled or unknown operation refuses, so an unsafe effect is
-   * never replayed (SPEC.md section 9.2).
+   * The claim is atomic: the one transaction that moves the record
+   * from `accepted` to `running` owns the provider call. A caller
+   * that loses the claim receives the record instead — running,
+   * settled, or unknown — and must read it, wait for it, or
+   * reconcile it. One logical request therefore reaches the provider
+   * at most once, across concurrent callers and across processes
+   * sharing the store (SPEC.md sections 9.1 and 9.2).
    */
-  async markDispatched(operationId: string, options?: OutcomeOptions): Promise<OperationRecord> {
-    return markOperationDispatched(this.store, this.id, operationId, options ?? {});
+  async claimDispatch(
+    operationId: string,
+    options?: OutcomeOptions,
+  ): Promise<DispatchClaim> {
+    return claimOperationDispatch(this.store, this.id, operationId, options ?? {});
   }
 
   /**

@@ -163,6 +163,28 @@ export function prepareVerificationRun(
 ): VerificationRunPreparation {
   assertValid(provenanceCaptureRequestSchema, request);
   const session = requireOpenSession(store, sessionId);
+
+  // A repeated preparation returns the recorded answer: the private
+  // copy it staged is the copy the run owns, and a second staging
+  // would duplicate the checkpoint and the copy before the store
+  // refused the duplicate record (SPEC.md section 11.5).
+  const existing = store.getExecutionProvenance(request.operationId);
+  if (existing !== null) {
+    if (existing.sessionId !== sessionId) {
+      throw invalidRequestError(
+        `The provenance of ${request.operationId} belongs to another session.`,
+        { operationId: request.operationId, sessionId },
+      );
+    }
+    if (existing.testedRevisionId === undefined || existing.verificationCopyId === undefined) {
+      throw invalidRequestError(
+        `Operation ${request.operationId} already holds a provenance record without a verification run.`,
+        { operationId: request.operationId },
+      );
+    }
+    return recordedPreparation(store, existing);
+  }
+
   const { copy, base } = checkAttachmentAndCopy(store, sessionId, request);
 
   const lockFileName = options.lockFileName ?? DEFAULT_LOCK_FILE;
@@ -247,6 +269,28 @@ export function prepareVerificationRun(
     });
   } catch (error) {
     throw portable(error);
+  }
+  return { provenance: record, verificationCopy, testedRevision };
+}
+
+/** The recorded answer of one preparation that already ran. */
+function recordedPreparation(
+  store: ControlStore,
+  record: ExecutionProvenance,
+): VerificationRunPreparation {
+  const verificationCopy = store.getWorkingCopy(record.verificationCopyId!);
+  if (verificationCopy === null) {
+    throw invalidRequestError(
+      `The recorded verification copy ${record.verificationCopyId} is gone.`,
+      { workingCopyId: record.verificationCopyId },
+    );
+  }
+  const testedRevision = store.getRevision(record.testedRevisionId!);
+  if (testedRevision === null) {
+    throw invalidRequestError(
+      `The tested revision ${record.testedRevisionId} is gone.`,
+      { revisionId: record.testedRevisionId },
+    );
   }
   return { provenance: record, verificationCopy, testedRevision };
 }

@@ -236,10 +236,12 @@ test("a completed process failure keeps its exit code in its result", async () =
     const operation = invokeAccepted(fx, "op-exit-3", "run", input);
     const operationId = operation["id"] as string;
 
-    // The executor side: dispatch, run through the adapter lease, and
-    // settle with the recorded result artifact as the reference.
+    // The executor side: claim the dispatch, run through the adapter
+    // lease, and settle with the recorded result artifact as the
+    // reference.
     const session = await openFixtureSession(fx);
-    await session.markDispatched(operationId);
+    const claim = await session.claimDispatch(operationId);
+    assert.equal(claim.claimed, true);
     const adapter = new LocalProcessAdapter({ supervisorDir: fx.supervisor });
     const lease = adapter.lease(fx.environmentId);
     const executed = await lease.invoke(dispatchOf(fx, operationId, "run", input));
@@ -291,7 +293,8 @@ test("operation cancel stops a started process from another CLI process", async 
     // the resource the still-running operation owns. Its durable
     // handle is the adapter record under the same operation id.
     const session = await openFixtureSession(fx);
-    await session.markDispatched(operationId);
+    const claim = await session.claimDispatch(operationId);
+    assert.equal(claim.claimed, true);
     const adapter = new LocalProcessAdapter({ supervisorDir: fx.supervisor });
     const started = await adapter.lease(fx.environmentId).invoke(
       dispatchOf(fx, operationId, "start", input),

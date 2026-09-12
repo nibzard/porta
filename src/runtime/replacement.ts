@@ -51,7 +51,7 @@ import type { CancelTransport } from "./cancellation.js";
 import { attachEnvironment } from "./acquisition.js";
 import { materializeRevision } from "./workspace.js";
 import { admitInvocation } from "./admission.js";
-import { markOperationDispatched, settleOperation } from "./outcomes.js";
+import { claimOperationDispatch, settleOperation } from "./outcomes.js";
 import type { OperationOutcome } from "./outcomes.js";
 import { bindResource } from "./resources.js";
 import type { BindTransport } from "./resources.js";
@@ -1182,10 +1182,13 @@ async function invokeStep(
     ...(options.redactor !== undefined ? { redactor: options.redactor } : {}),
   });
   // The durable record owns its own id; the adapter addresses the step
-  // by its deterministic identity. A rerun adopts the record either way.
+  // by its deterministic identity. Only the caller that wins the
+  // dispatch claim invokes the provider; a rerun adopts whatever the
+  // record already holds.
   const record = admitted.operation;
-  if (admitted.deduplicated && record.status !== "accepted") {
-    if (record.status === "running") {
+  const claim = claimOperationDispatch(store, transition.sessionId, record.id);
+  if (!claim.claimed) {
+    if (claim.operation.status === "running") {
       const inspected = await lease.inspect(operationId);
       return {
         operationId,
@@ -1196,12 +1199,12 @@ async function invokeStep(
     }
     return {
       operationId,
-      status: record.status,
-      ...(record.resultRef !== undefined ? { result: record.resultRef } : {}),
-      ...(record.error !== undefined ? { error: record.error } : {}),
+      // A lost claim never reads `accepted`: the winner moved it.
+      status: claim.operation.status === "accepted" ? "running" : claim.operation.status,
+      ...(claim.operation.resultRef !== undefined ? { result: claim.operation.resultRef } : {}),
+      ...(claim.operation.error !== undefined ? { error: claim.operation.error } : {}),
     };
   }
-  markOperationDispatched(store, transition.sessionId, record.id);
   const answer = await lease.invoke({
     operationId,
     capability: step.capability,

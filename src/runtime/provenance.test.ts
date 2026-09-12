@@ -296,6 +296,55 @@ test("a clean-copy verification tests the base revision and reports tracked chan
   }
 });
 
+test("a repeated preparation returns the recorded staging without duplicating it", () => {
+  const parts = setup();
+  try {
+    const request = parts.capture();
+    const first = prepareVerificationRun(
+      parts.store,
+      parts.sessionId,
+      parts.blobs,
+      request,
+      { authority: LOCAL_AUTHORITY, destination: parts.dest() },
+    );
+
+    // The retry — a lost response or a crashed caller — finds the
+    // recorded staging: the same private copy, the same tested
+    // revision, no second checkpoint or materialization.
+    const second = prepareVerificationRun(
+      parts.store,
+      parts.sessionId,
+      parts.blobs,
+      request,
+      { authority: LOCAL_AUTHORITY, destination: parts.dest() },
+    );
+    assert.equal(second.provenance.operationId, first.provenance.operationId);
+    assert.equal(second.verificationCopy.id, first.verificationCopy.id);
+    assert.equal(second.testedRevision.id, first.testedRevision.id);
+    assert.equal(second.provenance.verificationCopyId, first.verificationCopy.id);
+
+    // One capture event proves no duplicate staging landed.
+    const captured = parts.store
+      .listEvents(parts.sessionId, 0)
+      .filter((event) => event.type === "provenance.captured");
+    assert.equal(captured.length, 1);
+
+    // An operation that holds a plain capture, not a verification run,
+    // refuses a preparation instead of overwriting its record.
+    const plain = parts.capture();
+    recordInvocationProvenance(parts.store, parts.sessionId, plain, {});
+    const mixed = refuse(() =>
+      prepareVerificationRun(parts.store, parts.sessionId, parts.blobs, plain, {
+        authority: LOCAL_AUTHORITY,
+        destination: parts.dest(),
+      }),
+    );
+    assert.equal(mixed?.code, "InvalidRequest");
+  } finally {
+    parts.done();
+  }
+});
+
 test("a modified copy never claims it tested the base revision", () => {
   const parts = setup();
   try {

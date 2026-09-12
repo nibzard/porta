@@ -14,7 +14,7 @@ import { checkpointWorkspace } from "./workspace.js";
 import { bindResource } from "./resources.js";
 import type { BindResourceInput, BindTransport, ResourceFlowOptions } from "./resources.js";
 import { admitInvocation } from "./admission.js";
-import { markOperationDispatched, settleOperation } from "./outcomes.js";
+import { claimOperationDispatch, settleOperation } from "./outcomes.js";
 import {
   checkpointReplacement,
   planReplace,
@@ -405,7 +405,7 @@ async function runningOperation(
   const admitted = admitInvocation(parts.store, parts.sessionId, invocation, {
     authority: AUTHORITY.authority,
   });
-  markOperationDispatched(parts.store, parts.sessionId, admitted.operation.id);
+  claimOperationDispatch(parts.store, parts.sessionId, admitted.operation.id);
   return admitted.operation.id;
 }
 

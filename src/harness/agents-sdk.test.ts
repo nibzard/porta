@@ -9,6 +9,7 @@ import { PolicyAuthority } from "../core/policy.js";
 import { PortableRuntime } from "../runtime/session.js";
 import { LocalProcessAdapter } from "../adapters/local-process-adapter.js";
 import type { LocalProcessAdapter as Adapter } from "../adapters/local-process-adapter.js";
+import type { EnvironmentLease } from "../schema/adapter.js";
 import { authorityForApproval, AgentsToolkit } from "./agents-sdk.js";
 import type { HarnessApproval, HarnessApprovalSource } from "./agents-sdk.js";
 
@@ -367,6 +368,108 @@ test("reopening restores records and states the limits of conversation restorati
     assert.match(outcome.harnessNotice, /agents-sdk:\/\/thread\/7f3c/);
     assert.match(outcome.harnessNotice, /uninterpreted/);
     store.close();
+  } finally {
+    state.done();
+  }
+});
+
+// -- R2: one request key, one provider invocation ------------------------------
+
+/** One lease whose invoke pauses until the test releases it. */
+function gatedLease(
+  lease: EnvironmentLease,
+  gates: { onEnter(): void; held: Promise<void> },
+): EnvironmentLease {
+  return {
+    environmentId: lease.environmentId,
+    ...(lease.expiresAt !== undefined ? { expiresAt: lease.expiresAt } : {}),
+    manifest: () => lease.manifest(),
+    invoke: async (request) => {
+      gates.onEnter();
+      await gates.held;
+      return lease.invoke(request);
+    },
+    inspect: (operationId) => lease.inspect(operationId),
+    cancel: (operationId) => lease.cancel(operationId),
+    bind: (resource, context) => lease.bind(resource, context),
+    renew: (expiresAt) => lease.renew(expiresAt),
+    release: () => lease.release(),
+  };
+}
+
+test("one request key reaches one provider invocation across concurrent callers", async () => {
+  const state = await bench();
+  try {
+    // The provider call pauses on a gate, so the first dispatch stays
+    // in flight while the second caller reaches the same operation.
+    let invocations = 0;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const enteredOnce = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const session = await new PortableRuntime(state.store).openSession(state.sessionId);
+    const toolkit = new AgentsToolkit({
+      session,
+      blobs: new BlobStore(join(state.root, "blobs"), state.store),
+      route: { decision: "local-bridge", bridgeRootPath: state.bridge },
+      authority: baseAuthority(),
+      approvals: approving(state),
+      principal: "user://operator",
+      leaseOf: async (environmentId) =>
+        gatedLease(await state.adapter.lease(environmentId), {
+          onEnter: () => {
+            invocations += 1;
+            entered();
+          },
+          held,
+        }),
+      runsRoot: join(state.root, "runs"),
+      harnessContextRef: "agents-sdk://thread/7f3c",
+    });
+    const run = toolkit.tools().find((tool) => tool.name === "portable_run")!;
+    const launch = { command: "printf", args: ["%s", "once"], requestKey: "once-1" };
+
+    // Two approvals, two callers, one request key.
+    state.granted.push({ approvedBy: "user://ada", operations: ["exec.process@1"] });
+    state.granted.push({ approvedBy: "user://ada", operations: ["exec.process@1"] });
+    const first = run.execute({ ...launch });
+    // The first dispatch holds the provider gate from here on.
+    await enteredOnce;
+    const second = run.execute({ ...launch });
+    release();
+
+    const answers = (await Promise.all([first, second])).map((answer) =>
+      JSON.parse(answer as string),
+    ) as Array<{ status: string; operationId: string; result?: { exitCode?: number } }>;
+    const a = answers[0]!;
+    const b = answers[1]!;
+
+    // One logical request, one provider invocation, one effect.
+    assert.equal(invocations, 1);
+    assert.equal(a.status, "completed");
+    assert.equal(a.result?.exitCode, 0);
+    assert.equal(b.status, "completed");
+    assert.equal(b.operationId, a.operationId);
+    assert.equal(b.result?.exitCode, 0);
+    const settled = state.store.getOperation(a.operationId);
+    assert.equal(settled?.status, "completed");
+
+    // A later caller under the same key reads the recorded result and
+    // never reaches the provider again.
+    state.granted.push({ approvedBy: "user://ada", operations: ["exec.process@1"] });
+    const third = JSON.parse(await run.execute({ ...launch })) as {
+      status: string;
+      operationId: string;
+      result?: { exitCode?: number };
+    };
+    assert.equal(invocations, 1);
+    assert.equal(third.status, "completed");
+    assert.equal(third.operationId, a.operationId);
+    assert.equal(third.result?.exitCode, 0);
   } finally {
     state.done();
   }

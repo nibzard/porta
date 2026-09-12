@@ -1,6 +1,6 @@
 # Review repair plan
 
-Date: 2026-09-12. Status: in progress. R1 is complete; R2 through R9 remain.
+Date: 2026-09-12. Status: in progress. R1 and R2 are complete; R3 through R9 remain.
 
 This plan covers all eight defects found in the project review. It includes the related documentation and validation work.
 
@@ -61,6 +61,22 @@ Each repair starts with a failing regression test. Use temporary files, loopback
 **Design constraint:** The runtime remains independent of adapter modules. Use common contracts and adapter declarations. Do not add provider-name switches to runtime policy code.
 
 ## R2: Claim operation dispatch once
+
+> **Status: complete (2026-09-12).** `claimOperationDispatch` is the
+> compare-and-set from `accepted` to `running`: the one transaction
+> that moves the record owns the provider call, and every other
+> caller adopts the record — settled answers from storage, running
+> work through bounded waiting or `inspect`, unknown outcomes through
+> reconciliation. The session exposes `claimDispatch`; the harness,
+> the reconstruction steps, and the acceptance demonstration claim
+> before they invoke. Admission now conflicts on the whole invocation
+> identity, not only the input hash, and a repeated verification
+> preparation returns the recorded staging. Coverage:
+> `test:harness/agents-sdk` (concurrent callers, one invocation),
+> `test:runtime/outcomes` (claim race across two store connections),
+> `test:runtime/admission` (identity conflicts),
+> `test:runtime/provenance` (idempotent preparation), the full
+> replacement suite, and the acceptance demonstration.
 
 **Problem:** Admission deduplicates records, but the harness still dispatches an existing running operation. Concurrent calls produce duplicate effects.
 

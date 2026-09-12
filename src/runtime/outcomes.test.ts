@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { portableError } from "../core/errors.js";
 import { PolicyAuthority } from "../core/policy.js";
 import type { InvocationRequest, OperationRecord } from "../schema/operation.js";
@@ -9,7 +12,7 @@ import { ControlStore } from "../store/control-store.js";
 import { admitInvocation } from "./admission.js";
 import type { AdmissionOptions } from "./admission.js";
 import {
-  markOperationDispatched,
+  claimOperationDispatch,
   reconcileOperation,
   settleOperation,
 } from "./outcomes.js";
@@ -91,15 +94,21 @@ function setup(): {
   return { store, sessionId, attachmentId, operation: admitted.operation };
 }
 
-test("dispatch records a known start and refuses to replay settled work", async () => {
+test("the dispatch claim is won once; later callers adopt the record", async () => {
   const parts = setup();
 
-  const running = markOperationDispatched(parts.store, parts.sessionId, parts.operation.id);
-  assert.equal(running.status, "running");
+  // The first claim owns the provider call: the record moves to
+  // running inside the claiming transaction.
+  const won = claimOperationDispatch(parts.store, parts.sessionId, parts.operation.id);
+  assert.equal(won.claimed, true);
+  assert.equal(won.operation.status, "running");
   assert.equal(parts.store.getOperation(parts.operation.id)?.status, "running");
-  // The second call is an idempotent no-op, not a second event.
-  const again = markOperationDispatched(parts.store, parts.sessionId, parts.operation.id);
-  assert.equal(again.status, "running");
+
+  // A concurrent caller loses the claim and reads the record as it
+  // stands; no second running event lands.
+  const lost = claimOperationDispatch(parts.store, parts.sessionId, parts.operation.id);
+  assert.equal(lost.claimed, false);
+  assert.equal(lost.operation.status, "running");
   const started = parts.store
     .listEvents(parts.sessionId, 0)
     .filter(
@@ -109,23 +118,86 @@ test("dispatch records a known start and refuses to replay settled work", async 
     );
   assert.equal(started.length, 1);
 
-  // Settle completed, then try to dispatch again: the unsafe effect
-  // must not replay.
+  // Settle completed, then claim again: the settled answer returns as
+  // data, and the unsafe effect never replays.
   const done = settleOperation(parts.store, parts.sessionId, parts.operation.id, {
     kind: "completed",
     resultRef: "result://exit-3",
   });
   assert.equal(done.status, "completed");
-  const replay = await refuse(() =>
-    markOperationDispatched(parts.store, parts.sessionId, parts.operation.id),
-  );
-  assert.ok(replay !== null && replay.code === "InvalidRequest");
-  assert.ok(JSON.stringify(replay.details).includes("operation-settled"));
+  const replay = claimOperationDispatch(parts.store, parts.sessionId, parts.operation.id);
+  assert.equal(replay.claimed, false);
+  assert.equal(replay.operation.status, "completed");
+  assert.equal(replay.operation.resultRef, "result://exit-3");
+});
+
+test("one claim wins across separate store connections", async () => {
+  const root = mkdtempSync(join(tmpdir(), "porta-outcomes-"));
+  try {
+    // Two connections over one database file: the same shape as two
+    // executor processes sharing a store.
+    const db = join(root, "control.db");
+    const writer = ControlStore.open(db);
+    const sessionId = `sess-${randomUUID()}`;
+    const attachmentId = `att-${randomUUID()}`;
+    writer.createSession({
+      id: sessionId,
+      schemaVersion: 1,
+      status: "open",
+      workspaceId: `ws-${randomUUID()}`,
+      eventSequence: 0,
+      policyRef: "policy://test",
+      createdAt: new Date().toISOString(),
+    });
+    writer.insertAttachment({
+      sessionId,
+      attachmentId,
+      name: "worker",
+      generation: 1,
+      status: "active",
+      capabilityIds: ["exec.process@1"],
+    });
+    const admitted = admitInvocation(
+      writer,
+      sessionId,
+      {
+        attachment: { sessionId, attachmentId, generation: 1 },
+        capability: "exec.process@1",
+        operation: "run",
+        input: { command: "sh", args: ["-c", "exit 0"] },
+        requestKey: "invoke-1",
+      },
+      AUTHORITY,
+    );
+
+    const reader = ControlStore.open(db);
+    const first = claimOperationDispatch(writer, sessionId, admitted.operation.id);
+    const second = claimOperationDispatch(reader, sessionId, admitted.operation.id);
+    assert.equal(first.claimed, true);
+    assert.equal(second.claimed, false);
+    assert.equal(second.operation.status, "running");
+
+    // The loser that arrives after settlement reads the answer as
+    // data; the provider is never reached again.
+    settleOperation(writer, sessionId, admitted.operation.id, {
+      kind: "completed",
+      resultRef: "result://once",
+    });
+    const third = claimOperationDispatch(reader, sessionId, admitted.operation.id);
+    assert.equal(third.claimed, false);
+    assert.equal(third.operation.status, "completed");
+    assert.equal(third.operation.resultRef, "result://once");
+
+    reader.close();
+    writer.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("a nonzero exit is a completed operation, not a transport failure", async () => {
   const parts = setup();
-  markOperationDispatched(parts.store, parts.sessionId, parts.operation.id);
+  claimOperationDispatch(parts.store, parts.sessionId, parts.operation.id);
 
   // The process exited 3: the operation completed with that exit code.
   const exited = settleOperation(parts.store, parts.sessionId, parts.operation.id, {
@@ -166,7 +238,7 @@ test("a nonzero exit is a completed operation, not a transport failure", async (
 
 test("a lost response after possible effects becomes unknown, not cancelled", async () => {
   const parts = setup();
-  markOperationDispatched(parts.store, parts.sessionId, parts.operation.id);
+  claimOperationDispatch(parts.store, parts.sessionId, parts.operation.id);
 
   // The response never came back. Effects may have happened, so the
   // outcome is unknown; the timeout proves no cancellation.
@@ -190,16 +262,16 @@ test("a lost response after possible effects becomes unknown, not cancelled", as
   assert.ok(direct !== null && direct.code === "InvalidRequest");
   assert.ok(JSON.stringify(direct.details).includes("operation-needs-reconciliation"));
 
-  // Dispatch of an unknown operation refuses as well.
-  const redispatch = await refuse(() =>
-    markOperationDispatched(parts.store, parts.sessionId, parts.operation.id),
-  );
-  assert.ok(redispatch !== null && redispatch.code === "InvalidRequest");
+  // A claim on an unknown record never dispatches: only
+  // reconciliation with evidence resolves it.
+  const redispatch = claimOperationDispatch(parts.store, parts.sessionId, parts.operation.id);
+  assert.equal(redispatch.claimed, false);
+  assert.equal(redispatch.operation.status, "unknown");
 });
 
 test("reconciliation appends evidence and preserves the original unknown", async () => {
   const parts = setup();
-  markOperationDispatched(parts.store, parts.sessionId, parts.operation.id);
+  claimOperationDispatch(parts.store, parts.sessionId, parts.operation.id);
   const uncertainty = portableError("ProviderUnavailable", "The response was lost.", {
     details: { cause: "timeout" },
   });

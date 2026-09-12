@@ -19,7 +19,7 @@ import type {
 } from "../../runtime/process-capability.js";
 import { admitInvocation } from "../../runtime/admission.js";
 import {
-  markOperationDispatched,
+  claimOperationDispatch,
   reconcileOperation,
   settleOperation,
 } from "../../runtime/outcomes.js";
@@ -624,7 +624,7 @@ export function processOperationCases(): ConformanceCase[] {
         }
         // The key keeps answering after the operation settles; it
         // never dispatches again.
-        markOperationDispatched(state.store, state.sessionId, first.operation.id);
+        claimOperationDispatch(state.store, state.sessionId, first.operation.id);
         settleOperation(state.store, state.sessionId, first.operation.id, {
           kind: "completed",
           resultRef: "result://once",
@@ -668,7 +668,7 @@ export function processOperationCases(): ConformanceCase[] {
         const attached = attachmentOf(state);
         const admitted = admit(state, attached, `op-${randomUUID()}`, { command: "touch", args: ["out"] });
         const operationId = admitted.operation.id;
-        markOperationDispatched(state.store, state.sessionId, operationId);
+        claimOperationDispatch(state.store, state.sessionId, operationId);
         // The response never arrived; the effects may have run.
         const unknown = settleOperation(state.store, state.sessionId, operationId, {
           kind: "unknown",
@@ -681,13 +681,15 @@ export function processOperationCases(): ConformanceCase[] {
             detail: unknown.status,
           };
         }
-        // Replaying may double the effects: dispatch refuses.
-        const replay = await expectCode(
-          () => markOperationDispatched(state.store, state.sessionId, operationId),
-          "InvalidRequest",
-        );
-        if (replay !== undefined) {
-          return replay;
+        // Replaying may double the effects: the claim is lost and the
+        // unknown record answers for itself.
+        const replay = claimOperationDispatch(state.store, state.sessionId, operationId);
+        if (replay.claimed || replay.operation.status !== "unknown") {
+          return {
+            outcome: "fail",
+            reason: "a replay of an unknown operation could claim dispatch",
+            detail: `${replay.claimed}/${replay.operation.status}`,
+          };
         }
         // Provider evidence resolves the outcome exactly once.
         const resolved = reconcileOperation(state.store, state.sessionId, operationId, {
@@ -781,7 +783,7 @@ export function processOperationCases(): ConformanceCase[] {
         const attached = attachmentOf(state);
         const admitted = admit(state, attached, `op-${randomUUID()}`, { command: "true" });
         const operationId = admitted.operation.id;
-        markOperationDispatched(state.store, state.sessionId, operationId);
+        claimOperationDispatch(state.store, state.sessionId, operationId);
         settleOperation(state.store, state.sessionId, operationId, {
           kind: "unknown",
           error: operationUnknownError(operationId, "The connection dropped mid-flight."),
@@ -841,10 +843,15 @@ export function processOperationCases(): ConformanceCase[] {
         if (repeat !== undefined) {
           return repeat;
         }
-        return expectCode(
-          () => markOperationDispatched(state.store, state.sessionId, operationId),
-          "InvalidRequest",
-        );
+        const redispatch = claimOperationDispatch(state.store, state.sessionId, operationId);
+        if (redispatch.claimed || redispatch.operation.status !== "completed") {
+          return {
+            outcome: "fail",
+            reason: "a settled operation could be dispatched again",
+            detail: `${redispatch.claimed}/${redispatch.operation.status}`,
+          };
+        }
+        return undefined;
       },
     },
   ];

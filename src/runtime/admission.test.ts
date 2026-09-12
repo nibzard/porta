@@ -270,6 +270,59 @@ test("a repeated key returns the existing operation; changed input conflicts", a
   assert.equal(reordered.deduplicated, false);
 });
 
+test("one key reused for different work conflicts, whatever the input", async () => {
+  const parts = setup();
+  const call = request(parts.sessionId, parts.attachmentId, { requestKey: "identity-1" });
+  const first = admitInvocation(parts.store, parts.sessionId, call, OPTIONS);
+  assert.equal(first.deduplicated, false);
+
+  // The same input bytes under another operation or capability are
+  // different work; the key refuses to answer for them.
+  const operation = await refuse(() =>
+    admitInvocation(
+      parts.store,
+      parts.sessionId,
+      { ...call, operation: "inspect" },
+      OPTIONS,
+    ),
+  );
+  assert.ok(operation !== null && operation.code === "RequestConflict");
+  const capability = await refuse(() =>
+    admitInvocation(
+      parts.store,
+      parts.sessionId,
+      { ...call, capability: "fs.workspace@1" },
+      OPTIONS,
+    ),
+  );
+  assert.ok(capability !== null && capability.code === "RequestConflict");
+
+  // Another attachment or generation is different work too.
+  const attachment = await refuse(() =>
+    admitInvocation(
+      parts.store,
+      parts.sessionId,
+      { ...call, attachment: { ...call.attachment, attachmentId: "att-other" } },
+      OPTIONS,
+    ),
+  );
+  assert.ok(attachment !== null && attachment.code === "RequestConflict");
+  const generation = await refuse(() =>
+    admitInvocation(
+      parts.store,
+      parts.sessionId,
+      { ...call, attachment: { ...call.attachment, generation: 2 } },
+      OPTIONS,
+    ),
+  );
+  assert.ok(generation !== null && generation.code === "RequestConflict");
+
+  // The identical invocation still deduplicates.
+  const again = admitInvocation(parts.store, parts.sessionId, call, OPTIONS);
+  assert.equal(again.deduplicated, true);
+  assert.equal(again.operation.id, first.operation.id);
+});
+
 test("admission races with replacement and release cannot dispatch stale work", async () => {
   // Replacement preparation moved the attachment to `replacing` first:
   // admission must refuse, because new commands cannot enter during

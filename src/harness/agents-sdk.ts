@@ -8,6 +8,7 @@ import type { ManagedSession } from "../runtime/session.js";
 import type { ReopenReport } from "../runtime/release.js";
 import type { BlobStore } from "../store/blob-store.js";
 import type { EnvironmentLease } from "../schema/adapter.js";
+import type { OperationRecord } from "../schema/operation.js";
 import type { AttachmentSummary } from "../schema/session.js";
 
 /**
@@ -24,6 +25,17 @@ import type { AttachmentSummary } from "../schema/session.js";
  * library stays independent of the SDK package, so the embedding
  * application stays on its own SDK version.
  */
+
+/**
+ * One answer of a dispatch attempt: the caller's own, or the record
+ * another caller's dispatch left behind. `pending` names an operation
+ * whose dispatch another caller still holds.
+ */
+type DispatchAnswer =
+  | { status: "completed"; result: unknown }
+  | { status: "pending"; code: string; message: string }
+  | { status: "unknown"; code: string; message: string; error: PortableError }
+  | { status: "refused"; code: string; message: string; error?: unknown };
 
 /** One tool definition the harness adopts into its agent loop. */
 export interface HarnessTool {
@@ -398,7 +410,11 @@ export class AgentsToolkit {
     return {
       status: settled.status,
       operationId: operation.id,
-      ...(settled.status === "completed" ? { result: settled.result } : { error: settled.error }),
+      ...(settled.status === "completed"
+        ? { result: settled.result }
+        : settled.status === "pending"
+          ? { message: settled.message }
+          : { error: settled.error }),
       ...(verification !== undefined ? { verify: verification } : {}),
       environment: context,
     };
@@ -478,17 +494,26 @@ export class AgentsToolkit {
     }
   }
 
-  /** Dispatch one admitted operation through its lease and settle it. */
+  /**
+   * Dispatch one admitted operation through its lease and settle it.
+   *
+   * Only the caller that wins the dispatch claim invokes the
+   * provider. A caller that loses the claim — a concurrent caller,
+   * or a retry after the first dispatch started — reads the record
+   * the winner leaves behind: a settled answer returns from storage,
+   * a running one is awaited, and an unknown one reports its
+   * uncertainty. No path dispatches a second time.
+   */
   private async dispatchAndSettle(
     operationId: string,
     processInput: Record<string, unknown>,
     environmentId: string,
-  ): Promise<
-    | { status: "completed"; result: unknown }
-    | { status: "refused"; code: string; message: string; error?: unknown }
-  > {
+  ): Promise<DispatchAnswer> {
+    const claim = await this.options.session.claimDispatch(operationId);
+    if (!claim.claimed) {
+      return this.answerOfClaimedElsewhere(claim.operation);
+    }
     try {
-      await this.options.session.markDispatched(operationId);
       const lease = await this.options.leaseOf(environmentId);
       const answered = await lease.invoke({
         operationId,
@@ -509,13 +534,53 @@ export class AgentsToolkit {
       });
       return { status: "completed", result: answered.result };
     } catch (error) {
-      return {
-        status: "refused",
-        code: codeOf(error) ?? "ProviderUnavailable",
-        message: messageOf(error),
-        error,
+      // The provider call threw, so its effect may or may not have
+      // happened. The record settles unknown — never failed — and
+      // only reconciliation resolves it. Nothing retries here.
+      const code = codeOf(error) ?? "ProviderUnavailable";
+      const message = messageOf(error);
+      const recorded: PortableError = {
+        code,
+        message,
+        retry: "after-reconciliation",
       };
+      await this.options.session.settle(operationId, { kind: "unknown", error: recorded });
+      return { status: "unknown", code, message, error: recorded };
     }
+  }
+
+  /** The answer for a caller that lost the dispatch claim. */
+  private async answerOfClaimedElsewhere(operation: OperationRecord): Promise<DispatchAnswer> {
+    if (operation.status === "completed") {
+      // The recorded result reference is the provider's answer.
+      return { status: "completed", result: JSON.parse(operation.resultRef ?? "null") };
+    }
+    if (operation.status === "running") {
+      const waited = await this.options.session.waitFor(operation.id, {
+        waitMs: 60_000,
+        pollIntervalMs: 25,
+      });
+      if (waited.outcome === "timed-out" || waited.operation.status === "running") {
+        return {
+          status: "pending",
+          code: "OperationRunning",
+          message: "Another caller holds the dispatch of this operation.",
+        };
+      }
+      return this.answerOfClaimedElsewhere(waited.operation);
+    }
+    const error: PortableError =
+      operation.error ?? {
+        code: "OperationUnknown",
+        message: "The outcome of the operation could not be determined.",
+        retry: "after-reconciliation",
+      };
+    return {
+      status: operation.status === "unknown" ? "unknown" : "refused",
+      code: error.code,
+      message: error.message,
+      error,
+    };
   }
 
   /** The environment one attachment currently runs on. */

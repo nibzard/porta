@@ -11,7 +11,7 @@ import { ControlStore } from "../store/control-store.js";
 import { BlobStore } from "../store/blob-store.js";
 import { admitInvocation } from "./admission.js";
 import type { AdmissionOptions } from "./admission.js";
-import { markOperationDispatched } from "./outcomes.js";
+import { claimOperationDispatch } from "./outcomes.js";
 import {
   readArtifact,
   readOutputStream,
@@ -95,7 +95,7 @@ function setup(): {
     requestKey: "invoke-1",
   };
   const admitted = admitInvocation(store, sessionId, request, AUTHORITY);
-  markOperationDispatched(store, sessionId, admitted.operation.id);
+  claimOperationDispatch(store, sessionId, admitted.operation.id);
   return {
     store,
     blobs,

@@ -19,7 +19,7 @@ import type { BindTransport } from "../../runtime/resources.js";
 import { attachEnvironment } from "../../runtime/acquisition.js";
 import { admitInvocation } from "../../runtime/admission.js";
 import {
-  markOperationDispatched,
+  claimOperationDispatch,
   reconcileOperation,
   settleOperation,
 } from "../../runtime/outcomes.js";
@@ -1617,7 +1617,7 @@ function admitUnknown(state: Bench): string {
     },
     { authority: AUTHORITY },
   );
-  markOperationDispatched(state.store, state.sessionId, admitted.operation.id);
+  claimOperationDispatch(state.store, state.sessionId, admitted.operation.id);
   settleOperation(state.store, state.sessionId, admitted.operation.id, {
     kind: "unknown",
     error: operationUnknownError(

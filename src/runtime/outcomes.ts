@@ -10,21 +10,37 @@ import type { ControlStore } from "../store/control-store.js";
 /**
  * Operation outcomes and reconciliation (SPEC.md section 9.2).
  *
- * An operation moves `accepted` to `running` once provider execution
- * is known to have started, and settles from there to `completed`,
- * `failed`, `cancelled`, or `unknown`. A lost response after dispatch
- * settles as `unknown` — a timeout proves nothing about cancellation —
- * and only reconciliation with evidence resolves an unknown record.
+ * An operation moves `accepted` to `running` when one caller claims
+ * its dispatch, and settles from there to `completed`, `failed`,
+ * `cancelled`, or `unknown`. Only the caller whose transaction won the
+ * claim may invoke the provider; every other caller reads the record
+ * or waits for the claim holder to settle it. A lost response after
+ * dispatch settles as `unknown` — a timeout proves nothing about
+ * cancellation — and only reconciliation with evidence resolves an
+ * unknown record.
  *
  * Settled operations never move again: settling the same outcome twice
- * changes nothing, a different outcome refuses, and dispatching a
- * settled operation refuses. Nothing here retries an unsafe effect.
+ * changes nothing, and a different outcome refuses. Nothing here
+ * retries an unsafe effect.
  */
 
 /** Input of one dispatch, settlement, or reconciliation call. */
 export interface OutcomeOptions {
   /** Redactor applied to journal event data. */
   redactor?: EventRedactor;
+}
+
+/** The answer of one dispatch claim. */
+export interface DispatchClaim {
+  /** The durable operation record as it stands after the claim. */
+  operation: OperationRecord;
+  /**
+   * `true` only for the caller whose transaction moved the operation
+   * from `accepted` to `running`. Only that caller may invoke the
+   * provider; every other caller must read the record, wait for it,
+   * or reconcile it instead of dispatching again.
+   */
+  claimed: boolean;
 }
 
 /** One settled outcome of an operation. */
@@ -56,9 +72,6 @@ export interface ReconciliationTrail {
   observations: ReconciliationObservation[];
 }
 
-/** The statuses an operation can settle from. */
-const SETTLEABLE: ReadonlySet<OperationStatus> = new Set(["accepted", "running"]);
-
 /** The statuses an operation never leaves. */
 const TERMINAL: ReadonlySet<OperationStatus> = new Set(["completed", "failed", "cancelled"]);
 
@@ -72,34 +85,37 @@ interface Plan {
   write: boolean;
   /** Reconciliation evidence the journal entry carries, when one does. */
   reconciliation?: ReconciliationObservation;
+  /** Whether this caller won the dispatch claim. */
+  claimed?: boolean;
 }
 
 /**
- * Record that provider execution of one operation is known to have
- * started (SPEC.md section 9.2).
+ * Claim the dispatch of one operation (SPEC.md sections 9.1 and 9.2).
  *
- * The move is compare-and-set from `accepted`; a second call changes
- * nothing. A settled or unknown operation refuses: dispatching again
- * would replay effects whose first run may already have happened.
+ * The claim is the compare-and-set from `accepted` to `running`: the
+ * one transaction that moves the record owns the provider call, and
+ * every later caller — concurrent or after a crash — receives
+ * `claimed: false` with the record as it stands. A running record
+ * belongs to another caller in flight; a settled record answers from
+ * storage; an unknown record needs reconciliation. None of them
+ * dispatch again, so one logical request reaches the provider at most
+ * once, whatever the number of callers.
  */
-export function markOperationDispatched(
+export function claimOperationDispatch(
   store: ControlStore,
   sessionId: string,
   operationId: string,
   options: OutcomeOptions = {},
-): OperationRecord {
-  return transition(store, sessionId, operationId, options, (current) => {
-    if (current.status === "running") {
-      return { record: current, write: false };
+): DispatchClaim {
+  const plan = plannedTransition(store, sessionId, operationId, options, (current) => {
+    if (current.status === "accepted") {
+      return { record: { ...current, status: "running" }, write: true, claimed: true };
     }
-    if (SETTLEABLE.has(current.status)) {
-      return { record: { ...current, status: "running" }, write: true };
-    }
-    if (current.status === "unknown") {
-      throw dispatchRefusal(current, "operation-needs-reconciliation");
-    }
-    throw dispatchRefusal(current, "operation-settled");
+    // Running belongs to the caller in flight; settled and unknown
+    // answer from the record. None of them may invoke the provider.
+    return { record: current, write: false, claimed: false };
   });
+  return { operation: plan.record, claimed: plan.claimed === true };
 }
 
 /**
@@ -189,12 +205,23 @@ function transition(
   options: OutcomeOptions,
   decide: (current: OperationRecord) => Plan,
 ): OperationRecord {
+  return plannedTransition(store, sessionId, operationId, options, decide).record;
+}
+
+/** `transition` that also reports the plan it committed. */
+function plannedTransition(
+  store: ControlStore,
+  sessionId: string,
+  operationId: string,
+  options: OutcomeOptions,
+  decide: (current: OperationRecord) => Plan,
+): Plan {
   try {
     return store.transaction(() => {
       const current = requireOperation(store, sessionId, operationId);
       const plan = decide(current);
       if (!plan.write) {
-        return plan.record;
+        return plan;
       }
       const updated = store.casOperation(operationId, { status: current.status }, plan.record);
       if (updated === null) {
@@ -205,7 +232,7 @@ function transition(
       }
       const stream = new SessionEventStream(store, sessionId, options.redactor);
       stream.append("operation.updated", plan.record.id, payloadOf(plan.record, plan.reconciliation));
-      return updated;
+      return { ...plan, record: updated };
     });
   } catch (error) {
     if (error instanceof StoreError) {
@@ -229,14 +256,6 @@ function settleTerminal(current: OperationRecord, outcome: OperationOutcome): Pl
   throw invalidRequestError(
     `Operation ${current.id} is ${current.status}; it cannot settle as ${outcome.kind}.`,
     { operationId: current.id, status: current.status, offered: outcome.kind, reason: "operation-settled" },
-  );
-}
-
-/** The refusal when a settled or unknown operation is asked to dispatch. */
-function dispatchRefusal(current: OperationRecord, reason: string): PortableError {
-  return invalidRequestError(
-    `Operation ${current.id} is ${current.status}; it cannot dispatch again.`,
-    { operationId: current.id, status: current.status, reason },
   );
 }
 

@@ -190,14 +190,18 @@ completion is a later, separate step. Run the operation through the
 adapter lease, record its result, and settle it:
 
 1. `invoke` prints the operation record with status `accepted`.
-2. The executor marks the operation dispatched and runs it through
-   the adapter lease.
+2. The executor claims the dispatch through `claimDispatch`. Only the
+   caller that moves the record from `accepted` to `running` runs it
+   through the adapter lease.
 3. The executor records the result and settles the operation.
 4. `operation inspect` prints the record exactly as stored.
 
 A retry of `invoke` under the same request key returns the same
 operation; the key and the attachment generation are never
-regenerated.
+regenerated. A retry that loses the claim adopts the record instead:
+a settled operation returns its stored result, a running one waits or
+reports pending, and an unknown one needs reconciliation. No retry
+reaches the provider twice.
 
 A completed process operation with a nonzero process exit code is a
 successful Portable invocation: `operation inspect` exits 0, reports

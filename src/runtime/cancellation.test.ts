@@ -9,7 +9,7 @@ import type { AttachmentSummary } from "../schema/session.js";
 import { ControlStore } from "../store/control-store.js";
 import { admitInvocation } from "./admission.js";
 import type { AdmissionOptions } from "./admission.js";
-import { markOperationDispatched, settleOperation } from "./outcomes.js";
+import { claimOperationDispatch, settleOperation } from "./outcomes.js";
 import {
   cancelOperation,
   deadlineFromTimeoutMs,
@@ -107,7 +107,7 @@ function setup(): {
 
 test("a deadline bounds the wait and never the operation", async () => {
   const parts = setup();
-  markOperationDispatched(parts.store, parts.sessionId, parts.operation.id);
+  claimOperationDispatch(parts.store, parts.sessionId, parts.operation.id);
 
   // The deadline is derived from a duration, never taken on trust.
   assert.equal(
@@ -155,7 +155,7 @@ test("a deadline bounds the wait and never the operation", async () => {
 test("a confirmed stop settles cancelled and keeps prior effects visible", async () => {
   const parts = setup();
   const operationId = parts.operation.id;
-  markOperationDispatched(parts.store, parts.sessionId, operationId);
+  claimOperationDispatch(parts.store, parts.sessionId, operationId);
 
   // Partial output existed before the stop; it must remain visible.
   parts.store.casOperation(operationId, { status: "running" }, {
@@ -206,7 +206,7 @@ test("a confirmed stop settles cancelled and keeps prior effects visible", async
 test("a best-effort stop stays unknown until reconciliation resolves it", async () => {
   const parts = setup();
   const operationId = parts.operation.id;
-  markOperationDispatched(parts.store, parts.sessionId, operationId);
+  claimOperationDispatch(parts.store, parts.sessionId, operationId);
 
   // The provider took the signal but confirms nothing.
   const unconfirmed = await cancelOperation(parts.store, parts.sessionId, operationId, transport({
@@ -239,7 +239,7 @@ test("a best-effort stop stays unknown until reconciliation resolves it", async 
   // keeps the outcome unknown.
   const parts3 = setup();
   const unknownId = parts3.operation.id;
-  markOperationDispatched(parts3.store, parts3.sessionId, unknownId);
+  claimOperationDispatch(parts3.store, parts3.sessionId, unknownId);
   settleOperation(parts3.store, parts3.sessionId, unknownId, {
     kind: "unknown",
     error: portableError("ProviderUnavailable", "The response was lost."),
@@ -257,7 +257,7 @@ test("a best-effort stop stays unknown until reconciliation resolves it", async 
 test("an unsupported cancellation refuses without touching the status", async () => {
   const parts = setup();
   const operationId = parts.operation.id;
-  markOperationDispatched(parts.store, parts.sessionId, operationId);
+  claimOperationDispatch(parts.store, parts.sessionId, operationId);
 
   const refused = await cancelOperation(parts.store, parts.sessionId, operationId, transport({
     outcome: "unsupported",

@@ -360,9 +360,11 @@ interface OperationRecord {
 
 The runtime MUST durably record acceptance before dispatch. It MUST record outcomes before acknowledging them to the caller.
 
-The pair `(sessionId, requestKey)` MUST identify one logical request for the session's retention period. Reuse with a different input hash MUST return `RequestConflict`.
+The pair `(sessionId, requestKey)` MUST identify one logical request for the session's retention period. Reuse for different work — another input hash, capability, operation, or attachment generation — MUST return `RequestConflict`.
 
 Repeating the same request returns its existing operation. It MUST NOT blindly redispatch an unsafe operation.
+
+Dispatch is claimed once. The runtime MUST move an operation from `accepted` to `running` in one transaction, and only the caller whose transaction won that claim MAY invoke the provider. Every other caller — concurrent or after a restart — MUST adopt the record: read the stored outcome, wait for the holder, or reconcile an unknown one.
 
 ### 9.2 Outcomes
 

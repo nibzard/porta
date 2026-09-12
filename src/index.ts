@@ -261,11 +261,12 @@ export type { AdmissionOptions, AdmissionOutcome } from "./runtime/admission.js"
 
 // Runtime: operation outcomes and reconciliation.
 export {
-  markOperationDispatched,
+  claimOperationDispatch,
   reconcileOperation,
   settleOperation,
 } from "./runtime/outcomes.js";
 export type {
+  DispatchClaim,
   OperationOutcome,
   OperationResolution,
   OutcomeOptions,

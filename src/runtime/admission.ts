@@ -32,8 +32,9 @@ import { requireOpenSession } from "./workspace.js";
  *
  * The pair (sessionId, requestKey) names one logical request. A
  * repeated key returns the operation it created — whatever status it
- * holds — and never redispatches it. The same key with a different
- * input hash is a `RequestConflict`.
+ * holds — and never redispatches it. The same key offered for
+ * different work — another input, capability, operation, or
+ * attachment generation — is a `RequestConflict`.
  */
 
 /** Input of one admission call. */
@@ -192,11 +193,36 @@ function deduplicated(
   request: InvocationRequest,
   inputHash: string,
 ): AdmissionOutcome {
-  if (existing.inputHash !== inputHash) {
+  // One request key names one piece of work. The input hash alone does
+  // not identify work: the same bytes under another capability,
+  // operation, or attachment are different work, so the whole
+  // invocation identity must match (SPEC.md section 9.1).
+  const same =
+    existing.inputHash === inputHash &&
+    existing.capability === request.capability &&
+    existing.operation === request.operation &&
+    existing.attachment.attachmentId === request.attachment.attachmentId &&
+    existing.attachment.generation === request.attachment.generation;
+  if (!same) {
     throw requestConflictError(
       request.requestKey,
-      `Request key ${request.requestKey} is reused with a different input.`,
-      { recordedInputHash: existing.inputHash, offeredInputHash: inputHash },
+      `Request key ${request.requestKey} is reused for different work.`,
+      {
+        recorded: {
+          capability: existing.capability,
+          operation: existing.operation,
+          attachmentId: existing.attachment.attachmentId,
+          generation: existing.attachment.generation,
+          inputHash: existing.inputHash,
+        },
+        offered: {
+          capability: request.capability,
+          operation: request.operation,
+          attachmentId: request.attachment.attachmentId,
+          generation: request.attachment.generation,
+          inputHash,
+        },
+      },
     );
   }
   // Repeating a request returns its operation; it never dispatches
