@@ -52,6 +52,8 @@ export async function openRuntimeCommand(parsed: ParsedArguments, io: CliIo): Pr
       return describeSession(parsed, io);
     case "checkpoint":
       return checkpoint(parsed, io);
+    case "materialize":
+      return materialize(parsed, io);
     case "attach":
       return attach(parsed, io);
     case "invoke":
@@ -120,6 +122,28 @@ async function checkpoint(parsed: ParsedArguments, io: CliIo): Promise<number> {
   return 0;
 }
 
+/**
+ * Materialize one revision into a local directory.
+ *
+ * Transfer policy is checked before any byte is read. A `proposal`
+ * copy is private: it reaches the authoritative head only through an
+ * accepted proposal (SPEC.md sections 11.3 and 11.6).
+ */
+async function materialize(parsed: ParsedArguments, io: CliIo): Promise<number> {
+  const { session, config, blobs } = await openInvocation(parsed);
+  const copy = await session.materialize(
+    blobs,
+    valueOf(parsed, "--revision"),
+    valueOf(parsed, "--destination"),
+    {
+      authority: loadAuthority(config),
+      mode: modeOf(parsed),
+    },
+  );
+  emit(io, copy);
+  return 0;
+}
+
 /** Attach one environment through the durable acquisition protocol. */
 async function attach(parsed: ParsedArguments, io: CliIo): Promise<number> {
   const { session, config } = await openInvocation(parsed);
@@ -177,15 +201,25 @@ async function cancelOperation(parsed: ParsedArguments, io: CliIo): Promise<numb
 /** Offer one working copy's content as a proposal. */
 async function proposeWorkspace(parsed: ParsedArguments, io: CliIo): Promise<number> {
   const { session, blobs } = await openInvocation(parsed);
-  const outcome = await session.propose(blobs, {
-    requestKey: valueOf(parsed, "--request-key"),
-    copyId: valueOf(parsed, "--copy"),
-    attachment: {
-      sessionId: session.id,
-      attachmentId: valueOf(parsed, "--attachment"),
-      generation: generationOf(parsed),
+  const detail = parsed.values.get("--stability-detail");
+  const outcome = await session.propose(
+    blobs,
+    {
+      requestKey: valueOf(parsed, "--request-key"),
+      copyId: valueOf(parsed, "--copy"),
+      attachment: {
+        sessionId: session.id,
+        attachmentId: valueOf(parsed, "--attachment"),
+        generation: generationOf(parsed),
+      },
     },
-  });
+    {
+      stability: {
+        kind: stabilityOf(parsed),
+        ...(detail !== undefined ? { detail } : {}),
+      },
+    },
+  );
   emit(io, outcome);
   return 0;
 }
@@ -349,6 +383,15 @@ function stabilityOf(parsed: ParsedArguments): "locked" | "snapshot" {
   const raw = valueOf(parsed, "--stability");
   if (raw !== "locked" && raw !== "snapshot") {
     throw usageError("Option --stability needs locked or snapshot.");
+  }
+  return raw;
+}
+
+/** One required working-copy mode. */
+function modeOf(parsed: ParsedArguments): "read-only" | "proposal" {
+  const raw = valueOf(parsed, "--mode");
+  if (raw !== "read-only" && raw !== "proposal") {
+    throw usageError("Option --mode needs read-only or proposal.");
   }
   return raw;
 }

@@ -27,6 +27,10 @@ const COMMANDS: ReadonlyMap<string, CommandSpec> = new Map([
     { requires: ["--request", "--stability"], extras: ["--stability-detail"] },
   ],
   [
+    "materialize",
+    { requires: ["--revision", "--destination", "--mode", "--policy-file"], extras: [] },
+  ],
+  [
     "attach",
     { requires: ["--request", "--request-key", "--adapter", "--principal", "--policy-file"], extras: [] },
   ],
@@ -35,7 +39,10 @@ const COMMANDS: ReadonlyMap<string, CommandSpec> = new Map([
   ["operation cancel", { requires: ["--operation", "--adapter"], extras: [] }],
   [
     "workspace propose",
-    { requires: ["--attachment", "--generation", "--copy", "--request-key"], extras: [] },
+    {
+      requires: ["--attachment", "--generation", "--copy", "--request-key", "--stability"],
+      extras: ["--stability-detail"],
+    },
   ],
   ["workspace accept", { requires: ["--proposal", "--expected-head"], extras: [] }],
   ["replace", { requires: ["--request"], extras: [] }],
@@ -150,12 +157,15 @@ export function commandUsage(): string {
     "  describe",
     "  checkpoint --request FILE|- --stability locked|snapshot",
     "             [--stability-detail TEXT]",
+    "  materialize --revision ID --destination DIR --mode read-only|proposal",
+    "             --policy-file PATH",
     "  attach --request FILE|- --request-key KEY --adapter MODULE",
     "           --principal NAME --policy-file PATH",
     "  invoke --request FILE|- --policy-file PATH",
     "  operation inspect --operation ID",
     "  operation cancel --operation ID --adapter MODULE",
     "  workspace propose --attachment ID --generation N --copy ID --request-key KEY",
+    "             --stability locked|snapshot [--stability-detail TEXT]",
     "  workspace accept --proposal ID --expected-head REVISION",
     "  replace --request FILE|- [--plan]",
     "  release --attachment ID --generation N --request-key KEY",

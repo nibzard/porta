@@ -1265,7 +1265,7 @@
     "id": "T050",
     "title": "Implement CLI session and workspace commands",
     "priority": 3,
-    "status": "todo",
+    "status": "done",
     "details": "Expose session creation, description, checkpoints, proposals, and acceptance.",
     "depends_on": [
       "T049"

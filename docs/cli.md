@@ -1,0 +1,193 @@
+# Portable CLI
+
+The CLI is a thin layer over the Portable library (SPEC.md section 16).
+Every command calls the same contracts an embedding application calls.
+The CLI implements no lifecycle rules of its own.
+
+Standard output carries machine records only. Streaming commands print
+one JSON object per line. Diagnostics go to standard error.
+
+| Exit code | Meaning |
+| --- | --- |
+| 0 | The command completed successfully |
+| 1 | Known command failure |
+| 2 | Invalid input or configuration |
+| 3 | Unresolved or unknown outcome |
+
+## Configuration
+
+Every command names its targets explicitly:
+
+- `--store PATH` or the `PORTABLE_STORE` variable names the control
+  store database.
+- `--policy-file PATH` or the `PORTABLE_POLICY` variable names the
+  policy document a command needs as its authority.
+- `--session SESSION` or the `PORTABLE_SESSION` variable names the
+  session a command runs against.
+
+A command that needs a session and does not get one refuses. The CLI
+never guesses among several sessions, and it never scans for stores.
+
+Structured requests travel in files or on standard input (`-`). No
+command needs shell interpolation of JSON or secrets.
+
+## Worked example
+
+This walkthrough runs against a temporary local workspace. Each step
+prints one JSON record; the next step reads its identifier from that
+record.
+
+### 1. Prepare the workspace and the policy
+
+1. Create an empty directory for the example, with a workspace folder
+   inside it.
+2. Write one file into the workspace folder.
+3. Write a policy file that allows the local process provider and
+   local workspace transfers:
+
+```json
+{
+  "schemaVersion": 1,
+  "providers": ["local-process"],
+  "transferDestinations": ["local"]
+}
+```
+
+### 2. Create the session
+
+```text
+portable session create --policy-ref policy://example \
+  --workspace ./workspace --store ./control.db
+```
+
+The record contains the session identifier, which the later steps
+pass as `--session`.
+
+### 3. Checkpoint the workspace
+
+Write the checkpoint request to a file. The request names the source
+directory. The `--stability` option declares how the source's writers
+were made quiescent; the CLI refuses an undeclared source.
+
+```json
+{
+  "requestKey": "checkpoint-1",
+  "source": { "kind": "bridge", "rootPath": "./workspace" }
+}
+```
+
+```text
+portable checkpoint --request checkpoint.json --stability locked \
+  --store ./control.db --session SESSION
+```
+
+The outcome contains the first revision identifier. A later
+checkpoint also names the head it expects in `expectedHead`; a head
+that moved refuses the checkpoint.
+
+### 4. Inspect the session
+
+```text
+portable describe --store ./control.db --session SESSION
+```
+
+The description reports the persisted state: the session record, its
+attachments, the workspace head, unresolved allocations, and pending
+cleanup.
+
+### 5. Attach one environment
+
+An adapter module names operator-supplied code. This example uses the
+local process adapter, with its supervisor state inside the example
+directory, so the attachment survives CLI process exits:
+
+```js
+// worker-adapter.mjs
+import { LocalProcessAdapter } from "portable";
+export const adapter = new LocalProcessAdapter({ supervisorDir: "./supervisor" });
+```
+
+Write the environment request to a file:
+
+```json
+{
+  "name": "worker",
+  "providerId": "local-process",
+  "requires": {}
+}
+```
+
+```text
+portable attach --request attach.json --request-key worker-1 \
+  --adapter ./worker-adapter.mjs --principal user://example \
+  --policy-file policy.json --store ./control.db --session SESSION
+```
+
+The `--request-key` value names the logical request. A retry under
+the same key recovers the same attachment; the key is never
+regenerated.
+
+### 6. Materialize a proposal copy
+
+```text
+portable materialize --revision REVISION --destination ./copy \
+  --mode proposal --policy-file policy.json \
+  --store ./control.db --session SESSION
+```
+
+The copy is private. Edit its files freely; nothing reaches the
+authoritative head until a proposal is accepted.
+
+### 7. Propose the change
+
+Edit a file inside `./copy`, stop its writers, then offer the copy's
+content. The `--stability` option declares how you made the copy
+quiescent; an undeclared copy refuses the proposal:
+
+```text
+portable workspace propose --attachment ATTACHMENT --generation 1 \
+  --copy COPY --request-key propose-1 --stability locked \
+  --store ./control.db --session SESSION
+```
+
+The copy identifier comes from the materialization record. The
+generation reaches the library exactly as passed; retries under the
+same request key reuse the recorded proposal.
+
+### 8. Accept under an expected head
+
+```text
+portable workspace accept --proposal PROPOSAL --expected-head REVISION \
+  --store ./control.db --session SESSION
+```
+
+The acceptance names the head it expects. A moved head exits 1 and
+changes nothing: the workspace head, the proposal, and the copy files
+all stay as they were.
+
+### 9. Read the journal
+
+```text
+portable events --after 0 --store ./control.db --session SESSION
+```
+
+The journal prints as one JSON object per line, in sequence order.
+`--after` resumes from a sequence, so a consumer that stops and starts
+again never misses an event or repeats one.
+
+## Conflicts change nothing
+
+Every refusal path leaves durable state and files untouched:
+
+- A checkpoint whose `expectedHead` names a moved head refuses before
+  any blob is written.
+- An acceptance under a wrong expected head refuses before the head
+  moves.
+- A proposal from a read-only snapshot refuses before any revision is
+  recorded.
+
+## Adapter modules
+
+An adapter module exports `adapter`, an instance implementing the
+adapter contract. Loading a module is configuration: the path names
+operator-supplied code, and model-controlled input never supplies it.
