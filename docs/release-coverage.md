@@ -399,7 +399,8 @@ deliberate stand-in or a documented limit, not a silent omission.
    the E2B adapter has no executed run here. Its write-ahead
    acquisition protocol is documented in `docs/adapters/e2b-linux.md`.
    The working-copy evidence — executable bits, staged-swap
-   publication, interrupted recovery — rests on the injected client of
+   publication, interrupted upload and recovery — rests on the
+   injected client of
    `test:adapters/e2b-adapter`, not on a live provider run. The
    opt-in live smoke test checks a full lifecycle, an uploaded
    executable script that must run, and outbound access from a
@@ -419,7 +420,7 @@ deliberate stand-in or a documented limit, not a silent omission.
 
 ## Verification record
 
-- Clean checkout: `npm ci` then `npm test` — 477 tests, 476
+- Clean checkout: `npm ci` then `npm test` — 478 tests, 477
   pass, 1 skip (live E2B, no key), 0 fail.
 - Conformance, local process adapter, all packs, both grants: 70
   cases, 63 pass, 7 skip (`capability-not-offered`), exit 3.

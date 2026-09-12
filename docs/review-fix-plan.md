@@ -320,10 +320,12 @@ Each repair starts with a failing regression test. Use temporary files, loopback
 > mixed tree; between the two renames a lookup sees no root at all,
 > never a partial one. Coverage: `test:adapters/e2b-adapter`
 > (replacement-not-merge with deletions and type changes, empty
-> revision, reserved-path removal boundary, previous copy preserved
-> and committed swap finished after injected rename faults, concurrent
-> publishers behind an explicit write barrier), `docs/adapters/e2b-linux.md`.
-> Full suite: 474 tests, 473 pass, 1 skip (live E2B, no key).
+> revision, reserved-path removal boundary, the previous copy
+> preserved and served after an injected upload fault, the committed
+> swap finished after injected rename faults, concurrent publishers
+> behind an explicit write barrier), `docs/adapters/e2b-linux.md`.
+> Full suite at this repair's completion: 474 tests, 473 pass, 1 skip
+> (live E2B, no key).
 
 ## R8: Export entry type changes
 
@@ -361,10 +363,10 @@ Each repair starts with a failing regression test. Use temporary files, loopback
 > path and the recovery path alike. Local edits still conflict before
 > any overwrite, executable bits survive the change, and the reserved
 > bridge files stay. Coverage: `test:runtime/export` (both type
-> directions with nested entries and an executable, a crash between
-> removal and creation across a type change, a corrupt stage restoring
-> the base), `conf:workspace-authority.export-type-change`. Full
-> suite: 477 tests, 476 pass, 1 skip (live E2B, no key).
+> directions with nested entries and an executable, crashes after
+> removal and during creation across type changes, a corrupt stage
+> restoring the base), `conf:workspace-authority.export-type-change`.
+> Full suite: 478 tests, 477 pass, 1 skip (live E2B, no key).
 
 ## R9: Complete conformance and release evidence
 
@@ -387,7 +389,7 @@ Each repair starts with a failing regression test. Use temporary files, loopback
 > R8 added `conf:workspace-authority.export-type-change` and R5 had
 > added `conf:process.release-orphaned-group`. The documented
 > workflows ran on the committed tree: the `npm ci` clean checkout
-> runs 477 tests with 476 pass and 1 skip (live E2B, no key); the
+> runs 478 tests with 477 pass and 1 skip (live E2B, no key); the
 > local conformance run reports 70 cases, 63 pass, 7 skip, exit 3;
 > the Python pack reports 7 cases, 7 pass, exit 0; the no-grants run
 > reports 70 cases, 43 pass, 27 skip, exit 3; the acceptance

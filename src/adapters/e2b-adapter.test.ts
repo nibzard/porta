@@ -90,11 +90,11 @@ class FakeE2BClient implements E2BClient {
   /** Every removal a session made, newest last. */
   readonly removeCalls: Array<{ path: string }> = [];
   /**
-   * Scripted provider faults by call position: the Nth rename or
-   * remove attempt throws, after the attempt is recorded. Undefined
-   * never fires.
+   * Scripted provider faults by call position: the Nth write, rename,
+   * or remove attempt throws, after the attempt is recorded. A failed
+   * write lands no bytes. Undefined never fires.
    */
-  failOn: { renameAt?: number; removeAt?: number } = {};
+  failOn: { writeFileAt?: number; renameAt?: number; removeAt?: number } = {};
   /**
    * Deterministic concurrency barrier: hold every file write whose
    * path contains this fragment until `releaseHeld()` runs. The
@@ -232,6 +232,9 @@ class FakeE2BClient implements E2BClient {
           await new Promise<void>((resolve) => client.held.push(resolve));
         }
         client.fileWrites.push({ path, bytes: bytes.byteLength });
+        if (client.failOn.writeFileAt === client.fileWrites.length) {
+          throw new Error("write failed (scripted)");
+        }
         state.files.set(path, bytes);
         state.modes.set(path, state.defaultFileMode);
       },
@@ -1567,6 +1570,62 @@ test("an interrupted publication leaves the previous copy or a recoverable state
     const again = await push(first);
     const settled = await pull(again.rootHash);
     assert.equal(settled.rootHash, again.rootHash);
+  } finally {
+    fixture.close();
+    for (const dir of [first, second, blobRoot, harvest]) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("an interrupted upload leaves the previous copy serving", async () => {
+  const fixture = make();
+  const first = mkdtempSync(join(tmpdir(), "porta-upload-one-"));
+  const second = mkdtempSync(join(tmpdir(), "porta-upload-two-"));
+  const blobRoot = mkdtempSync(join(tmpdir(), "porta-upload-blobs-"));
+  const harvest = mkdtempSync(join(tmpdir(), "porta-upload-out-"));
+  const blobs = new BlobStore(blobRoot, ControlStore.inMemory());
+  const push = (copyRoot: string) =>
+    fixture.adapter.pushCopy({
+      environmentId: lease.environmentId,
+      copyRoot,
+      entries: scanTreeFromDirectory(copyRoot).entries,
+      authority: REMOTE_AUTHORITY,
+    });
+  const pull = (expectedRootHash?: string) =>
+    fixture.adapter.pullCopy({
+      environmentId: lease.environmentId,
+      destRoot: harvest,
+      blobs,
+      authority: REMOTE_AUTHORITY,
+      ...(expectedRootHash === undefined ? {} : { expectedRootHash }),
+    });
+  let lease: EnvironmentLease;
+  try {
+    writeFileSync(join(first, "base.txt"), "the previous copy");
+    writeFileSync(join(second, "next.txt"), "the next copy");
+    lease = await fixture.adapter.acquire(request("acq-upload"));
+    const base = await push(first);
+
+    // The upload dies while staging the next tree, before the published
+    // root moves: the first staged write attempt throws.
+    fixture.client.failOn = { writeFileAt: fixture.client.fileWrites.length + 1 };
+    const refused = await refuse(() => push(second));
+    assert.equal(refused?.code, "ProviderUnavailable");
+    fixture.client.failOn = {};
+
+    // The previous copy still serves, bytes and hash alike.
+    const round = await pull(base.rootHash);
+    assert.equal(round.rootHash, base.rootHash);
+    assert.equal(readFileSync(join(harvest, "base.txt"), "utf8"), "the previous copy");
+    assert.equal(existsSync(join(harvest, "next.txt")), false);
+
+    // The next attempt stages from scratch and publishes.
+    const published = await push(second);
+    const next = await pull(published.rootHash);
+    assert.equal(next.rootHash, published.rootHash);
+    assert.equal(readFileSync(join(harvest, "next.txt"), "utf8"), "the next copy");
+    assert.equal(existsSync(join(harvest, "base.txt")), false);
   } finally {
     fixture.close();
     for (const dir of [first, second, blobRoot, harvest]) {

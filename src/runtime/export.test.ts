@@ -570,6 +570,40 @@ test("a crash between removal and creation recovers a type change", async () => 
     assert.equal(existsSync(join(target, ".portable-bridge.journal")), false);
     const settled = scanTreeFromDirectory(target, { exclusions: [...RESERVED] });
     assert.equal(settled.rootHash, outcome.rootHash);
+
+    // Revision three reverses both types again, and this time the
+    // apply crashes during creation: the removals landed and the new
+    // file `x` copied, but the new directory `d` never arrived.
+    rmSync(join(src.dir, "x"), { recursive: true });
+    writeFileSync(join(src.dir, "x"), "now x is a file");
+    rmSync(join(src.dir, "d"));
+    mkdirSync(join(src.dir, "d"));
+    writeFileSync(join(src.dir, "d", "revived.txt"), "revived");
+    const third = await session.checkpoint(
+      parts.blobs,
+      {
+        requestKey: "import-3",
+        source: { kind: "bridge", rootPath: src.dir },
+        expectedHead: second.revision.id,
+      },
+      { stability: { kind: "locked" } },
+    );
+    await simulatePrepare(parts, target, third.revision.id);
+    rmSync(join(target, "x"), { recursive: true });
+    writeFileSync(join(target, "x"), "now x is a file");
+    rmSync(join(target, "d"));
+
+    const finished = await session.recoverExport(parts.blobs, target, { authority: LOCAL_AUTHORITY });
+    assert.equal(finished.recovered, true);
+    assert.equal(finished.restored, false);
+    assert.equal(finished.revisionId, third.revision.id);
+    assert.ok(statSync(join(target, "x")).isFile());
+    assert.equal(readFileSync(join(target, "x"), "utf8"), "now x is a file");
+    assert.ok(statSync(join(target, "d")).isDirectory());
+    assert.equal(readFileSync(join(target, "d", "revived.txt"), "utf8"), "revived");
+    assert.deepEqual(contentOf(target), new Set(["x", "d", "d/revived.txt"]));
+    const settledAgain = scanTreeFromDirectory(target, { exclusions: [...RESERVED] });
+    assert.equal(settledAgain.rootHash, finished.rootHash);
   } finally {
     parts.done();
     src.done();
