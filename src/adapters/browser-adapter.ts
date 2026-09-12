@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { isIP } from "node:net";
 import {
   invalidRequestError,
   invalidRequestFromValidation,
@@ -136,11 +137,55 @@ export function browserOwnerOf(extensions: Extensions | undefined): BrowserOwner
 
 // -- Driver surface ------------------------------------------------------------
 
+/**
+ * Network rules a driver enforces before any request leaves it.
+ *
+ * The rules cover every channel the driver opens for one session: the
+ * navigation itself, each redirect hop, and every dependency the page
+ * declares. Checking a final URL after the fact enforces nothing.
+ */
+export interface BrowserNetworkRules {
+  /**
+   * Origins pages may contact: an explicit list restricts to those
+   * origins, `["*"]` restricts none, and an empty list admits no
+   * origin at all.
+   */
+  allowedOrigins: string[];
+  /** Whether loopback and private address ranges are refused. */
+  blockPrivateRanges: boolean;
+}
+
+/** Why one network attempt was refused before it left the driver. */
+export type BrowserNetworkDenialReason =
+  | "origin-not-allowed"
+  | "private-range"
+  | "address-rejected"
+  | "too-many-redirects";
+
+/**
+ * One network refusal a driver reports to the adapter.
+ *
+ * A driver throws this instead of performing the request, so a denied
+ * navigation produces zero requests at the refused destination.
+ */
+export class BrowserNetworkBlockedError extends Error {
+  constructor(
+    readonly url: string,
+    readonly reason: BrowserNetworkDenialReason,
+    message?: string,
+  ) {
+    super(message ?? `The browser driver blocked ${url} (${reason}).`);
+    this.name = "BrowserNetworkBlockedError";
+  }
+}
+
 /** What one session creation asks the provider for. */
 export interface BrowserDriverCreate {
   viewport?: { width: number; height: number };
   locale?: string;
   userAgent?: string;
+  /** The rules this session's driver enforces on every request. */
+  network: BrowserNetworkRules;
 }
 
 /** Where one navigation ended. */
@@ -184,8 +229,21 @@ export interface BrowserDriverSession {
   close(): Promise<boolean>;
 }
 
-/** The provider calls this adapter makes; tests inject a scripted one. */
+/**
+ * The provider calls this adapter makes; tests inject a scripted one.
+ *
+ * `networkEnforcement` states whether this driver applies the network
+ * rules a session carries. A driver that cannot enforce them is
+ * honest about it: the adapter refuses a restrictive acquisition
+ * instead of trusting a driver that only checks after the fact.
+ */
 export interface BrowserDriver {
+  /**
+   * `origin-allowlist` means the driver checks every request —
+   * navigation, redirects, and page dependencies — against the
+   * session's rules before the request leaves the driver.
+   */
+  readonly networkEnforcement: "origin-allowlist" | "unsupported";
   createSession(input: BrowserDriverCreate): Promise<BrowserDriverSession>;
 }
 
@@ -212,6 +270,8 @@ export interface BrowserAcquisitionRecord {
   environmentId: string;
   createdAt: string;
   expiresAt: string;
+  /** Network rules resolved at acquisition; sessions enforce these. */
+  network: BrowserNetworkRules;
   releasedAt?: string;
 }
 
@@ -223,7 +283,12 @@ export interface BrowserAdapterOptions {
   sessionPersistence?: BrowserAttributeDeclarations["sessionPersistence"];
   /** Whether a new attachment can adopt a provider session. */
   reattachment?: BrowserAttributeDeclarations["reattachment"];
-  /** Origins pages may contact; the adapter enforces what is declared. */
+  /**
+   * Origins pages may contact: an explicit list restricts to those
+   * origins, `["*"]` restricts none, and an empty list admits no
+   * origin at all. A policy allowlist narrows the list further at
+   * acquisition.
+   */
   allowedOrigins?: string[];
   /** Whether loopback and private ranges are blocked. */
   blockPrivateRanges?: boolean;
@@ -241,15 +306,17 @@ const DEFAULT_LEASE_TTL_MS = 15 * 60_000;
 /**
  * Typed enforcement facts of this provider (SPEC.md 7).
  *
- * Sessions run in the local driver process against an origin
- * allowlist; the driver blocks private address ranges by default and
- * the provider reaches no host filesystem.
+ * Sessions run in the local driver process under an origin allowlist
+ * the driver itself enforces; the provider reaches no host
+ * filesystem.
  */
-const ENFORCEMENT_FACTS: EnforcementFacts = {
+const enforcementFactsOf = (network: BrowserNetworkRules): EnforcementFacts => ({
   executionLocation: "local",
-  networkEgress: "allowlist",
+  // A wildcard list (`["*"]`) is the honest unrestricted form; an
+  // empty list is a closed allowlist that admits no origin.
+  networkEgress: network.allowedOrigins.includes("*") ? "unrestricted" : "allowlist",
   hostFilesystemAccess: false,
-};
+});
 
 /** Default inline capture ceiling: sixty-four KiB. */
 const DEFAULT_INLINE_IMAGE_BYTES = 64 * 1024;
@@ -304,12 +371,26 @@ export class BrowserAdapter implements EnvironmentAdapter {
       // repeated acquire returns the same lease (SPEC.md section 5.2).
       return new BrowserLease(this, existing.environmentId);
     }
+    // The rules resolve before any spend exists: policy narrows the
+    // operator list, a closed network refuses, and a driver that
+    // cannot enforce a restrictive network never gets one (SPEC.md
+    // section 7).
+    const network = this.effectiveNetwork(request.limits);
+    if (
+      (!network.allowedOrigins.includes("*") || network.blockPrivateRanges) &&
+      this.driver.networkEnforcement !== "origin-allowlist"
+    ) {
+      throw policyDeniedError(
+        "The browser driver enforces no network rules, so a restrictive network cannot be honored.",
+        { dimension: "networkEgress", allowed: request.limits.networkEgress },
+      );
+    }
     const environmentId = `env-browser-${randomUUID()}`;
     // Requirements this provider cannot satisfy are rejected here,
     // before any session exists (SPEC.md section 7).
     const unsatisfied = checkTargetSatisfies(
       request.request,
-      manifestTarget(this.manifestOf(environmentId)),
+      manifestTarget(this.manifestOf(environmentId, network)),
     );
     if (unsatisfied !== null) {
       throw unsatisfied;
@@ -321,6 +402,7 @@ export class BrowserAdapter implements EnvironmentAdapter {
       environmentId,
       createdAt: now,
       expiresAt: new Date(Date.parse(now) + ttlMs).toISOString(),
+      network,
     };
     this.acquisitions.set(record.acquisitionId, record);
     this.byEnvironment.set(record.environmentId, record.acquisitionId);
@@ -339,7 +421,7 @@ export class BrowserAdapter implements EnvironmentAdapter {
       acquisitionId,
       state: record.releasedAt !== undefined ? "released" : "allocated",
       environmentId: record.environmentId,
-      manifest: this.manifestOf(record.environmentId),
+      manifest: this.manifestOf(record.environmentId, record.network),
       expiresAt: record.expiresAt,
     };
   }
@@ -358,14 +440,55 @@ export class BrowserAdapter implements EnvironmentAdapter {
   // -- Adapter surface ------------------------------------------------------------
 
   /**
+   * The network rules one acquisition's sessions enforce.
+   *
+   * Policy narrows and the operator configures; neither widens the
+   * other. A policy allowlist keeps only the origins the operator
+   * also allows — an intersection that may close the list to empty.
+   * A policy that closes the network entirely refuses, because a
+   * browser that may navigate nowhere is not an environment this
+   * provider can honestly provide.
+   */
+  private effectiveNetwork(limits: AuthorizedAcquireRequest["limits"]): BrowserNetworkRules {
+    const operator = this.declared.networkConstraints;
+    if (limits.networkEgress === "none") {
+      throw policyDeniedError(
+        "The browser driver enforces an origin allowlist; it cannot close the network entirely.",
+        { dimension: "networkEgress", allowed: limits.networkEgress },
+      );
+    }
+    if (limits.networkEgress === "allowlist") {
+      return {
+        allowedOrigins: operator.allowedOrigins.filter((origin) =>
+          policyAllowsOrigin(origin, limits.egressAllowlist),
+        ),
+        blockPrivateRanges: operator.blockPrivateRanges,
+      };
+    }
+    return {
+      allowedOrigins: [...operator.allowedOrigins],
+      blockPrivateRanges: operator.blockPrivateRanges,
+    };
+  }
+
+  /** The network rules recorded for one environment. */
+  private networkOf(environmentId: string): BrowserNetworkRules {
+    const record = this.acquisitionOfEnvironment(environmentId);
+    if (record === null) {
+      return {
+        allowedOrigins: [...this.declared.networkConstraints.allowedOrigins],
+        blockPrivateRanges: this.declared.networkConstraints.blockPrivateRanges,
+      };
+    }
+    return record.network;
+  }
+
+  /**
    * The lease span the effective limits admit, or a refusal.
    *
    * Sessions run locally in this process, so a policy that allows no
-   * local execution is refused. A driver without network enforcement
-   * support cannot advertise a network the policy closes entirely:
-   * `none` refuses, and the allowlist contract itself is enforced by
-   * the driver before requests leave it (R4 tightens redirects and
-   * dependencies). The lease span is constrained to the lifetime
+   * local execution is refused. Network limits resolve separately in
+   * `effectiveNetwork`. The lease span is constrained to the lifetime
    * ceiling.
    */
   private admissibleLeaseMs(limits: AuthorizedAcquireRequest["limits"]): number {
@@ -373,12 +496,6 @@ export class BrowserAdapter implements EnvironmentAdapter {
       throw policyDeniedError(
         "The browser provider executes locally; the policy allows no local execution.",
         { dimension: "locations", allowed: limits.executionLocations },
-      );
-    }
-    if (limits.networkEgress === "none") {
-      throw policyDeniedError(
-        "The browser driver enforces an origin allowlist; it cannot close the network entirely.",
-        { dimension: "networkEgress", allowed: limits.networkEgress },
       );
     }
     if (limits.maxEnvironmentLifetimeMs <= 0) {
@@ -406,37 +523,54 @@ export class BrowserAdapter implements EnvironmentAdapter {
   /** The discovery offer of this adapter. */
   offer(): EnvironmentOffer {
     const descriptor = browserCapabilityDescriptor(this.attributes());
+    const network = {
+      allowedOrigins: [...this.declared.networkConstraints.allowedOrigins],
+      blockPrivateRanges: this.declared.networkConstraints.blockPrivateRanges,
+    };
     return {
       providerId: BROWSER_PROVIDER_ID,
       adapterId: BROWSER_PROVIDER_ID,
       platform: { os: process.platform, arch: process.arch },
       capabilities: [{ id: descriptor.id, attributes: descriptor.attributes }],
-      enforcement: this.enforcement(),
-      enforcementFacts: { ...ENFORCEMENT_FACTS },
+      enforcement: this.enforcement(network),
+      enforcementFacts: enforcementFactsOf(network),
     };
   }
 
-  /** The manifest of one browser environment. */
-  manifestOf(environmentId: string): EnvironmentManifest {
+  /**
+   * The manifest of one browser environment, from its recorded rules
+   * when the environment exists and from the declared defaults
+   * otherwise.
+   */
+  manifestOf(
+    environmentId: string,
+    network: BrowserNetworkRules = this.networkOf(environmentId),
+  ): EnvironmentManifest {
     return {
       environmentId,
       providerId: BROWSER_PROVIDER_ID,
       platform: { os: process.platform, arch: process.arch },
       capabilities: [browserCapabilityDescriptor(this.attributes())],
-      enforcement: this.enforcement(),
-      enforcementFacts: { ...ENFORCEMENT_FACTS },
+      enforcement: this.enforcement(network),
+      enforcementFacts: enforcementFactsOf(network),
       adapterVersion: VERSION,
     };
   }
 
-  /** Enforcement this provider can honestly declare. */
-  private enforcement(): Record<string, unknown> {
+  /** Enforcement this provider can honestly declare for one rule set. */
+  private enforcement(network: BrowserNetworkRules): Record<string, unknown> {
+    const wildcard = network.allowedOrigins.includes("*");
     return {
       isolation: "provider-driver",
       hostFilesystem: "none",
-      networkEgress: this.declared.networkConstraints.blockPrivateRanges
-        ? "allowlist-private-blocked"
-        : "allowlist",
+      networkEgress: wildcard
+        ? network.blockPrivateRanges
+          ? "private-blocked"
+          : "unrestricted"
+        : network.blockPrivateRanges
+          ? "allowlist-private-blocked"
+          : "allowlist",
+      allowedOrigins: [...network.allowedOrigins],
       sessionStore: "adapter-memory",
       reattachment: this.declared.reattachment,
     };
@@ -736,6 +870,7 @@ export class BrowserAdapter implements EnvironmentAdapter {
       ...(input.viewport !== undefined ? { viewport: input.viewport } : {}),
       ...(input.locale !== undefined ? { locale: input.locale } : {}),
       ...(input.userAgent !== undefined ? { userAgent: input.userAgent } : {}),
+      network: this.networkOf(environmentId),
     });
     const resourceId = `res-browser-${randomUUID()}`;
     // The provider's own report fixes the session expiry, when it
@@ -803,9 +938,24 @@ export class BrowserAdapter implements EnvironmentAdapter {
   ): Promise<BrowserNavigateResult> {
     const input = validateBrowserNavigateInput(request.input);
     const entry = this.requireSession(environmentId, input.resourceId);
-    this.enforceNetwork(input.url);
+    const network = this.networkOf(environmentId);
+    this.enforceNetwork(input.url, network);
     const waitUntil: BrowserWaitUntil = input.waitUntil ?? "load";
-    const navigation = await entry.driver.navigate(input.url, waitUntil);
+    let navigation: BrowserDriverNavigation;
+    try {
+      navigation = await entry.driver.navigate(input.url, waitUntil);
+    } catch (error) {
+      // The driver refused a hop or dependency before it left. The
+      // denial is structured, and the session keeps the state its
+      // last successful navigation left.
+      if (error instanceof BrowserNetworkBlockedError) {
+        throw policyDeniedError(
+          `The browser driver blocked ${error.url} (${error.reason}); no request reached it.`,
+          { url: error.url, reason: error.reason },
+        );
+      }
+      throw error;
+    }
     return {
       resourceId: input.resourceId,
       url: input.url,
@@ -878,8 +1028,12 @@ export class BrowserAdapter implements EnvironmentAdapter {
     };
   }
 
-  /** Enforce the declared network constraints on one target URL. */
-  private enforceNetwork(url: string): void {
+  /**
+   * Enforce the recorded network rules on one target URL. The driver
+   * enforces the same rules on every hop and dependency; this check
+   * refuses a bad target before the driver is reached at all.
+   */
+  private enforceNetwork(url: string, network: BrowserNetworkRules): void {
     let parsed: URL;
     try {
       parsed = new URL(url);
@@ -888,20 +1042,18 @@ export class BrowserAdapter implements EnvironmentAdapter {
         reason: "network-url-unparsable",
       });
     }
-    if (
-      this.declared.networkConstraints.blockPrivateRanges &&
-      isPrivateHost(parsed.hostname)
-    ) {
+    const denial = browserUrlDenial(parsed, network);
+    if (denial !== null) {
       throw invalidRequestError(
-        `The URL ${url} reaches a private range this provider blocks.`,
-        { reason: "network-private-range-blocked" },
-      );
-    }
-    const allowed = this.declared.networkConstraints.allowedOrigins;
-    if (allowed.length > 0 && !allowed.includes(parsed.origin)) {
-      throw invalidRequestError(
-        `The origin ${parsed.origin} is not one this provider allows.`,
-        { reason: "network-origin-not-allowed" },
+        denial === "origin-not-allowed"
+          ? `The origin ${parsed.origin} is not one this provider allows.`
+          : `The URL ${url} reaches a private range this provider blocks.`,
+        {
+          reason:
+            denial === "origin-not-allowed"
+              ? "network-origin-not-allowed"
+              : "network-private-range-blocked",
+        },
       );
     }
   }
@@ -987,20 +1139,136 @@ function imageCapture(
   };
 }
 
-/** Whether one host name is loopback, private, or link-local. */
-function isPrivateHost(hostname: string): boolean {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+/**
+ * Whether one origin's host satisfies a policy allowlist entry. An
+ * entry is a host pattern (`example.org`, `*.example.org`), with an
+ * optional port; an entry without a port admits any port.
+ */
+function policyAllowsOrigin(origin: string, allowlist: readonly string[]): boolean {
+  const parsed = new URL(origin);
+  const hostname = parsed.hostname.toLowerCase();
+  const { port } = parsed;
+  return allowlist.some((raw) => {
+    const entry = raw.toLowerCase();
+    const colon = entry.lastIndexOf(":");
+    const suffix = colon === -1 ? "" : entry.slice(colon + 1);
+    const pinnedPort = /^\d+$/.test(suffix) ? suffix : undefined;
+    const entryHost = pinnedPort === undefined ? entry : entry.slice(0, colon);
+    if (entryHost === "") {
+      return false;
+    }
+    if (pinnedPort !== undefined && port !== pinnedPort) {
+      return false;
+    }
+    if (entryHost.startsWith("*.")) {
+      const base = entryHost.slice(2);
+      return hostname === base || hostname.endsWith(`.${base}`);
+    }
+    return hostname === entryHost;
+  });
+}
+
+/**
+ * Denial one URL earns under the rules, or null when the rules admit
+ * it. A loopback or private *name* refuses as `private-range`; a
+ * literal private *address* refuses as `address-rejected`. Shared by
+ * the adapter's initial check and every driver hop check.
+ */
+export function browserUrlDenial(
+  target: URL,
+  rules: BrowserNetworkRules,
+): BrowserNetworkDenialReason | null {
+  const host = target.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (rules.blockPrivateRanges) {
+    if (host === "localhost" || host.endsWith(".localhost")) {
+      return "private-range";
+    }
+    if (isIP(host) !== 0 && isPrivateAddress(host)) {
+      return "address-rejected";
+    }
+  }
+  if (
+    !rules.allowedOrigins.includes("*") &&
+    !rules.allowedOrigins.includes(target.origin)
+  ) {
+    return "origin-not-allowed";
+  }
+  return null;
+}
+
+/**
+ * Whether one address is loopback, private, link-local, shared, or
+ * unspecified — an address no session may dial when the rules block
+ * private ranges. Covers IPv4, IPv6 textual forms, and IPv4-mapped
+ * IPv6 addresses, which carry a private IPv4 inside an IPv6 spelling.
+ */
+export function isPrivateAddress(address: string): boolean {
+  const host = address.toLowerCase().replace(/^\[|\]$/g, "");
   if (host === "localhost" || host.endsWith(".localhost")) {
     return true;
   }
-  if (host === "::1" || host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80")) {
+  const quad = privateIPv4(host);
+  if (quad !== null) {
+    return quad;
+  }
+  // IPv6 textual forms. The distinct prefixes lead the string, so
+  // prefix checks cover every practical spelling.
+  if (host === "::" || host === "::1") {
     return true;
   }
-  const quad = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
-  if (quad === null) {
+  const mapped = /^::ffff:(.+)$/.exec(host);
+  if (mapped !== null) {
+    const inner = mapped[1]!;
+    const dotted = privateIPv4(inner);
+    if (dotted !== null) {
+      return dotted;
+    }
+    // Hex form: two hextets carry the mapped 32-bit IPv4 value.
+    const hextets = inner.split(":");
+    if (hextets.length === 2 && hextets.every((part) => /^[0-9a-f]{1,4}$/.test(part))) {
+      const value = (Number(`0x${hextets[0]}`) << 16) | Number(`0x${hextets[1]}`);
+      return privateIPv4Of(
+        (value >>> 24) & 0xff,
+        (value >>> 16) & 0xff,
+        (value >>> 8) & 0xff,
+        value & 0xff,
+      );
+    }
     return false;
   }
-  const [a, b] = [Number(quad[1]), Number(quad[2])];
+  if (/^f[cd][0-9a-f]{0,2}:/.test(host)) {
+    // Unique local addresses (fc00::/7).
+    return true;
+  }
+  if (/^fe[89ab][0-9a-f]:/.test(host)) {
+    // Link-local addresses (fe80::/10).
+    return true;
+  }
+  // IPv4-compatible IPv6 spelling, for example ::127.0.0.1.
+  const compatible = /^::(\d{1,3}(?:\.\d{1,3}){3})$/.exec(host);
+  if (compatible !== null) {
+    const dotted = privateIPv4(compatible[1]!);
+    return dotted ?? false;
+  }
+  return false;
+}
+
+/** Private-range verdict of one IPv4 dotted quad, or null if not IPv4. */
+function privateIPv4(host: string): boolean | null {
+  const quad = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (quad === null) {
+    return null;
+  }
+  return privateIPv4Of(
+    Number(quad[1]),
+    Number(quad[2]),
+    Number(quad[3]),
+    Number(quad[4]),
+  );
+}
+
+/** Whether four IPv4 octets name a range sessions may not dial. */
+function privateIPv4Of(a: number, b: number, _c: number, _d: number): boolean {
   if (a === 127 || a === 10 || a === 0) {
     return true;
   }
@@ -1010,7 +1278,11 @@ function isPrivateHost(hostname: string): boolean {
   if (a === 172 && b >= 16 && b <= 31) {
     return true;
   }
-  return a === 192 && b === 168;
+  if (a === 192 && b === 168) {
+    return true;
+  }
+  // Carrier-grade NAT shared range (100.64.0.0/10).
+  return a === 100 && b >= 64 && b <= 127;
 }
 
 /** Validate one call and convert schema failures to InvalidRequest. */

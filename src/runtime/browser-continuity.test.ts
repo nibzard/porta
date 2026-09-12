@@ -107,6 +107,7 @@ class ScriptedSession implements BrowserDriverSession {
 
 /** The driver the browser adapter translates. */
 class ScriptedDriver implements BrowserDriver {
+  readonly networkEnforcement = "origin-allowlist" as const;
   readonly sessions = new Map<string, ScriptedSession>();
   private counter = 0;
 

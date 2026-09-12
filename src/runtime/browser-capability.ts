@@ -188,7 +188,11 @@ export interface BrowserAttributeDeclarations {
   interactionOperations: string[];
   /** Network policy the provider enforces for every session. */
   networkConstraints: {
-    /** Origins pages may contact; empty means none. */
+    /**
+     * Origins pages may contact: an explicit list restricts to those
+     * origins, `["*"]` restricts none, and an empty list admits no
+     * origin at all.
+     */
     allowedOrigins: string[];
     /** Whether loopback and private address ranges are blocked. */
     blockPrivateRanges: boolean;
@@ -203,7 +207,8 @@ export const BROWSER_ATTRIBUTE_KEYS = [
   "networkConstraints",
 ] as const;
 
-const ORIGIN_PATTERN = /^https?:\/\/[^\s/"']+$/;
+/** One allowed-origins entry: an origin, or the wildcard `*`. */
+const ORIGIN_PATTERN = /^(?:\*|https?:\/\/[^\s/"']+)$/;
 
 /**
  * Read one provider's declared browser attributes.

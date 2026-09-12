@@ -43,6 +43,8 @@ import { exposeService, connectService } from "../runtime/service-connections.js
 import { serviceCapabilityDescriptor } from "../runtime/service-capability.js";
 import { reconnectBrowserService } from "../runtime/browser-continuity.js";
 import type { BrowserContinuityTransport } from "../runtime/browser-continuity.js";
+import { HttpBrowserDriver } from "../adapters/http-browser-driver.js";
+import type { StandinPageRecord } from "../adapters/http-browser-driver.js";
 import { abortReplacement } from "../runtime/replacement.js";
 import type { ReplaceRequest } from "../schema/handoff.js";
 import type {
@@ -258,116 +260,8 @@ function okTransport(): BindTransport {
 
 // -- The stand-in browser driver ----------------------------------------------------
 
-/** One page this driver loaded, with the data endpoint it declared. */
-export interface StandinPageRecord {
-  requestedUrl: string;
-  finalUrl: string;
-  status: number;
-  title: string;
-  /** What each `fetch("...")` in the page returned, keyed by path. */
-  dataEndpoints: Record<string, unknown>;
-}
-
-/**
- * The browser driver of the automated demonstration.
- *
- * This driver loads documents over HTTP and follows the data endpoint
- * each page declares through a literal `fetch("...")` call. It
- * executes no page script, so its observation of a page is the
- * document plus the data the page's script would bind, never a
- * rendered view. A real integration supplies a driver backed by a
- * browser engine; the adapter and the flows above it do not change.
- */
-export class HttpBrowserDriver implements BrowserDriver {
-  private counter = 0;
-  private readonly byProviderSession = new Map<string, StandinSession>();
-
-  /** Every page every session of this driver loaded, in order. */
-  pages(): StandinPageRecord[] {
-    const records: StandinPageRecord[] = [];
-    for (const session of this.byProviderSession.values()) {
-      records.push(...session.pages);
-    }
-    return records;
-  }
-
-  async createSession(input: BrowserDriverCreate): Promise<BrowserDriverSession> {
-    void input;
-    const session = new StandinSession(`standin-${(this.counter += 1)}`);
-    this.byProviderSession.set(session.providerSessionId, session);
-    return session;
-  }
-}
-
-/** One session of the stand-in driver. */
-class StandinSession implements BrowserDriverSession {
-  readonly pages: StandinPageRecord[] = [];
-  private closed = false;
-
-  constructor(readonly providerSessionId: string) {}
-
-  async navigate(url: string): Promise<BrowserDriverNavigation> {
-    const response = await fetch(url);
-    const html = await response.text();
-    const dataEndpoints: Record<string, unknown> = {};
-    for (const path of declaredFetchPaths(html)) {
-      const data = await fetch(new URL(path, url));
-      dataEndpoints[path] = data.ok ? await data.json() : { status: data.status };
-    }
-    this.pages.push({
-      requestedUrl: url,
-      finalUrl: response.url,
-      status: response.status,
-      title: titleOf(html),
-      dataEndpoints,
-    });
-    return { finalUrl: response.url, status: response.status };
-  }
-
-  async screenshot(): Promise<BrowserDriverCapture> {
-    // A one-pixel marker, not a rendering: this driver draws nothing.
-    return {
-      bytes: Buffer.from(
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
-        "base64",
-      ),
-      truncated: false,
-    };
-  }
-
-  async observe(): Promise<BrowserDriverObservation> {
-    const last = this.pages.at(-1);
-    return this.closed
-      ? { state: "closed" }
-      : {
-          state: "active",
-          ...(last === undefined ? {} : { url: last.finalUrl, title: last.title }),
-        };
-  }
-
-  async close(): Promise<boolean> {
-    const wasLive = !this.closed;
-    this.closed = true;
-    return wasLive;
-  }
-}
-
-/** The title element of one page, when the page carries one. */
-function titleOf(html: string): string {
-  return /<title>([^<]*)<\/title>/i.exec(html)?.[1]?.trim() ?? "";
-}
-
-/** Every literal `fetch("...")` path one page declares. */
-function declaredFetchPaths(html: string): string[] {
-  const paths: string[] = [];
-  for (const match of html.matchAll(/fetch\("([^"]+)"\)/g)) {
-    const path = match[1];
-    if (path !== undefined && !paths.includes(path)) {
-      paths.push(path);
-    }
-  }
-  return paths;
-}
+export { HttpBrowserDriver } from "../adapters/http-browser-driver.js";
+export type { StandinPageRecord } from "../adapters/http-browser-driver.js";
 
 // -- The report ---------------------------------------------------------------------
 

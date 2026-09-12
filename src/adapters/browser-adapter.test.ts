@@ -117,8 +117,14 @@ class ScriptedSession implements BrowserDriverSession {
 /** The provider driver; every session it created stays reachable. */
 class ScriptedDriver implements BrowserDriver {
   readonly sessions: ScriptedSession[] = [];
+  /** Every create input, so tests can read the rules the adapter sent. */
+  readonly createInputs: BrowserDriverCreate[] = [];
+
+  constructor(readonly networkEnforcement: "origin-allowlist" | "unsupported" =
+    "origin-allowlist") {}
 
   async createSession(input: BrowserDriverCreate): Promise<ScriptedSession> {
+    this.createInputs.push(input);
     const session = new ScriptedSession(`drv-${this.sessions.length + 1}`, input);
     this.sessions.push(session);
     return session;
@@ -153,12 +159,15 @@ const LIMITS: AcquisitionLimits = {
   },
 };
 
-function acquireRequest(acquisitionId: string): AuthorizedAcquireRequest {
+function acquireRequest(
+  acquisitionId: string,
+  limits: AcquisitionLimits = LIMITS,
+): AuthorizedAcquireRequest {
   return {
     acquisitionId,
     request: { name: "browser", requires: {} },
     authority: { principal: "tester", policyRef: "policy://test" },
-    limits: LIMITS,
+    limits,
   };
 }
 
@@ -493,4 +502,111 @@ test("declared constraints and adapter discipline hold", async () => {
 
   const unknownOperation = await refusal(() => lease.inspect("op-unknown"));
   assert.equal(unknownOperation?.code, "InvalidRequest");
+});
+
+test("a driver without network enforcement cannot acquire a restrictive network", async () => {
+  const denied = new BrowserAdapter({ driver: new ScriptedDriver("unsupported") });
+  const refused = await refusal(() => denied.acquire(acquireRequest("acq-1")));
+  assert.equal(refused?.code, "PolicyDenied");
+  assert.equal(
+    (refused?.details as { dimension?: string }).dimension,
+    "networkEgress",
+  );
+  // Nothing was allocated by the refusal.
+  assert.equal((await denied.reconcile("acq-1")).state, "unknown");
+
+  // A wide-open operator configuration demands no enforcement, so the
+  // same driver may acquire; the initial-URL check is also gone
+  // because the wildcard origin restricts nothing.
+  const open = new BrowserAdapter({
+    driver: new ScriptedDriver("unsupported"),
+    allowedOrigins: ["*"],
+    blockPrivateRanges: false,
+  });
+  const lease = (await open.acquire(acquireRequest("acq-open"))) as BrowserLease;
+  const session = await drive<{ resource: { id: string } }>(lease, "create", {}, OWNER_A);
+  const anywhere = await drive<{ finalUrl: string }>(
+    lease,
+    "navigate",
+    { resourceId: session.resource.id, url: "https://anywhere.example/" },
+    OWNER_A,
+  );
+  assert.equal(anywhere.finalUrl, "https://anywhere.example/");
+});
+
+test("policy narrows the session network rules below the operator list", async () => {
+  const driver = new ScriptedDriver();
+  const adapter = new BrowserAdapter({
+    driver,
+    allowedOrigins: ["https://one.example", "https://two.example"],
+  });
+  const lease = (await adapter.acquire(
+    acquireRequest("acq-1", {
+      ...LIMITS,
+      networkEgress: "allowlist" as const,
+      egressAllowlist: ["one.example"],
+    }),
+  )) as BrowserLease;
+
+  const created = await drive<{ resource: { id: string } }>(lease, "create", {}, OWNER_A);
+  // The driver received the policy-narrowed rules, not the operator
+  // list: the session enforces one origin while the operator
+  // configured two.
+  const createInput = driver.createInputs[0];
+  assert.ok(createInput !== undefined);
+  assert.deepEqual(createInput.network.allowedOrigins, ["https://one.example"]);
+  assert.equal(createInput.network.blockPrivateRanges, true);
+
+  const onList = await drive<{ finalUrl: string }>(
+    lease,
+    "navigate",
+    { resourceId: created.resource.id, url: "https://one.example/docs" },
+    OWNER_A,
+  );
+  assert.equal(onList.finalUrl, "https://one.example/docs");
+  const offPolicy = await refusal(() =>
+    drive(lease, "navigate", {
+      resourceId: created.resource.id,
+      url: "https://two.example/",
+    }),
+  );
+  assert.equal(
+    (offPolicy?.details as { reason?: string }).reason,
+    "network-origin-not-allowed",
+  );
+
+  // An allowlist that intersects nothing leaves no origin reachable;
+  // every navigation is denied, and the acquisition is honest about it.
+  const empty = new BrowserAdapter({
+    driver: new ScriptedDriver(),
+    allowedOrigins: ["https://one.example"],
+  });
+  const emptyLease = (await empty.acquire(
+    acquireRequest("acq-2", {
+      ...LIMITS,
+      networkEgress: "allowlist" as const,
+      egressAllowlist: ["other.example"],
+    }),
+  )) as BrowserLease;
+  const emptySession = await drive<{ resource: { id: string } }>(
+    emptyLease,
+    "create",
+    {},
+    OWNER_A,
+  );
+  const nowhere = await refusal(() =>
+    drive(emptyLease, "navigate", {
+      resourceId: emptySession.resource.id,
+      url: "https://one.example/",
+    }),
+  );
+  assert.equal(
+    (nowhere?.details as { reason?: string }).reason,
+    "network-origin-not-allowed",
+  );
+  const emptyManifest = await emptyLease.manifest();
+  assert.deepEqual(
+    (emptyManifest.enforcement.allowedOrigins as unknown[]).length,
+    0,
+  );
 });

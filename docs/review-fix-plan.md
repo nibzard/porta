@@ -1,6 +1,6 @@
 # Review repair plan
 
-Date: 2026-09-12. Status: in progress. R1 through R3 are complete; R4 through R9 remain.
+Date: 2026-09-12. Status: in progress. R1 through R4 are complete; R5 through R9 remain.
 
 This plan covers all eight defects found in the project review. It includes the related documentation and validation work.
 
@@ -138,6 +138,26 @@ Each repair starts with a failing regression test. Use temporary files, loopback
 - The live test checks outbound access from a subprocess in both configurations. Record it as unverified if credentials or allocation authorization are absent.
 
 ## R4: Enforce browser network restrictions
+
+> **Status: complete (2026-09-12).** The driver contract carries the
+> network rules each session enforces, and a driver declares whether
+> it enforces them at all — a restrictive acquisition on a driver
+> without support refuses with `PolicyDenied`. Rules resolve at
+> acquisition and are recorded with it: policy narrows the operator
+> list (the intersection may close to empty), `["*"]` is the explicit
+> unrestricted form, and manifests report the recorded rules. The
+> reference `HttpBrowserDriver` follows redirects manually under a
+> limit of ten hops, resolves declared dependencies against the final
+> document URL, validates every target before it dials, and runs each
+> dial through a validating lookup that filters private, loopback,
+> link-local, shared, mapped, and unspecified answers — the socket
+> dials only the filtered list. Denials are structured, and a blocked
+> navigation leaves the session on its last successful state. Coverage:
+> `test:adapters/http-browser-driver` (counting loopback servers:
+> redirect, multi-hop, relative, dependency, private-name, mapped-
+> address, address-filter cases), `test:adapters/browser-adapter`
+> (unsupported-driver refusal, policy narrowing, wildcard semantics),
+> `docs/adapters/browser-reference.md`.
 
 **Problem:** Only the initial navigation URL is checked. Redirects and page dependencies can contact forbidden origins.
 

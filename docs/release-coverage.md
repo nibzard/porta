@@ -385,8 +385,13 @@ deliberate stand-in or a documented limit, not a silent omission.
 2. **Rendered browser pages.** The reference browser driver loads
    documents over HTTP and follows the data endpoint each page
    declares. It executes no page script, and its screenshot is a
-   one-pixel marker. A real integration supplies a driver backed by a
-   browser engine; the adapter and the flows above it do not change.
+   one-pixel marker. Its network enforcement is real: every redirect
+   hop and declared dependency is checked against the session's
+   recorded rules before the request leaves the driver, and private
+   ranges are refused by name, by literal address, and at the
+   connection's own resolution (see `docs/adapters/browser-reference.md`).
+   A real integration supplies a driver backed by a browser engine;
+   the adapter and the flows above it do not change.
 3. **E2B credentials.** No credentials exist in this repository, so
    the E2B adapter has no executed run here. Its write-ahead
    acquisition protocol is documented in `docs/adapters/e2b-linux.md`.
