@@ -791,6 +791,52 @@ export function processOperationCases(): ConformanceCase[] {
       },
     },
     {
+      id: "operations.concurrent-dispatch-claim",
+      area: "operations",
+      summary: "Two callers claim one dispatch; exactly one may invoke the provider.",
+      async run() {
+        const state = bench();
+        const attached = attachmentOf(state);
+        const admitted = admit(state, attached, `op-${randomUUID()}`, {
+          command: "true",
+        });
+        const operationId = admitted.operation.id;
+        // Two callers contend for the same accepted operation. The
+        // compare-and-set gives the provider call to one of them; the
+        // loser adopts the record instead of invoking again.
+        const winner = claimOperationDispatch(state.store, state.sessionId, operationId);
+        const loser = claimOperationDispatch(state.store, state.sessionId, operationId);
+        if (winner.claimed !== true || loser.claimed !== false) {
+          return {
+            outcome: "fail",
+            reason: "the dispatch claim did not name exactly one caller",
+            detail: `${winner.claimed} then ${loser.claimed}`,
+          };
+        }
+        if (loser.operation.status !== "running") {
+          return {
+            outcome: "fail",
+            reason: "the losing caller did not adopt the running record",
+            detail: loser.operation.status,
+          };
+        }
+        // The winner settles; every later caller reads the answer.
+        settleOperation(state.store, state.sessionId, operationId, {
+          kind: "completed",
+          resultRef: "result://once",
+        });
+        const settled = claimOperationDispatch(state.store, state.sessionId, operationId);
+        if (settled.claimed !== false || settled.operation.status !== "completed") {
+          return {
+            outcome: "fail",
+            reason: "a settled operation answered as dispatchable",
+            detail: `${settled.claimed}/${settled.operation.status}`,
+          };
+        }
+        return undefined;
+      },
+    },
+    {
       id: "operations.lost-response-after-effects",
       area: "operations",
       summary: "A lost response after effects stays unknown until evidence resolves it.",

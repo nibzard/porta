@@ -21,6 +21,7 @@ const REQUIRED_CASES = [
   "process.release-orphaned-group",
   "operations.duplicate-request",
   "operations.mismatched-input",
+  "operations.concurrent-dispatch-claim",
   "operations.lost-response-after-effects",
   "operations.unconfirmed-cancellation",
   "operations.reconciliation-history",
@@ -133,7 +134,7 @@ test("the process cases skip, not fails, against an adapter without processes", 
         (entry) => entry.outcome === "skip" && entry.reason === "capability-not-offered",
       ),
     );
-    assert.equal(operationsArea.length, 5);
+    assert.equal(operationsArea.length, 6);
     assert.ok(operationsArea.every((entry) => entry.outcome === "pass"));
     assert.equal(report.summary.failed, 0);
     assert.equal(report.verdict, "incomplete");

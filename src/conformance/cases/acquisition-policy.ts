@@ -517,5 +517,79 @@ export function acquisitionPolicyCases(): ConformanceCase[] {
         };
       },
     },
+    {
+      id: "matching.unenforceable-limits",
+      area: "matching",
+      capability: "exec.process@1",
+      summary:
+        "A restrictive policy yields an enforced environment or a refusal, never an unenforced one.",
+      effects: { external: true },
+      async run(context): Promise<ConformanceCaseAnswer> {
+        const dimensions = [
+          {
+            name: "networkEgress",
+            policy: policyOf(context, { networkEgress: "none" }),
+          },
+          {
+            name: "hostFilesystemAccess",
+            policy: policyOf(context, { hostFilesystemAccess: false }),
+          },
+        ] as const;
+        const observed: string[] = [];
+        for (const dimension of dimensions) {
+          let lease: EnvironmentLease;
+          try {
+            lease = await context.adapter.acquire({
+              acquisitionId: `acq-${randomUUID()}`,
+              request: { name: "worker", providerId: context.adapter.id, requires: {} },
+              authority: { principal: "conformance", policyRef: "policy://conformance" },
+              limits: dimension.policy.acquisitionLimits(),
+            });
+          } catch (error) {
+            // The adapter cannot enforce the restriction. The refusal
+            // must cross before any allocation exists.
+            const code = codeOf(error);
+            if (code !== "PolicyDenied") {
+              return {
+                outcome: "fail",
+                reason: `the ${dimension.name} refusal did not say PolicyDenied`,
+                detail: code ?? "no portable error",
+              };
+            }
+            observed.push(`${dimension.name}: refused`);
+            continue;
+          }
+          // The adapter allocated. Its manifest must carry the
+          // restriction as an enforcement fact, or the environment
+          // runs outside the policy that admitted it.
+          const manifest = await lease.manifest();
+          const facts = manifest.enforcementFacts;
+          const enforced =
+            dimension.name === "networkEgress"
+              ? facts?.networkEgress === "none"
+              : facts?.hostFilesystemAccess === false;
+          if (!enforced) {
+            return {
+              outcome: "fail",
+              reason: `the allocation does not enforce the ${dimension.name} policy`,
+              detail: JSON.stringify(facts ?? {}),
+            };
+          }
+          observed.push(`${dimension.name}: enforced`);
+          const released = await lease.release();
+          if (released.status !== "released") {
+            return {
+              outcome: "fail",
+              reason: `the ${dimension.name} environment did not release`,
+              detail: `${released.status}${released.detail === undefined ? "" : `: ${released.detail}`}`,
+            };
+          }
+        }
+        return {
+          outcome: "pass",
+          detail: observed.join("; "),
+        };
+      },
+    },
   ];
 }

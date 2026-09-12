@@ -21,6 +21,7 @@ const REQUIRED_CASES = [
   "matching.ambiguous-provider",
   "matching.policy-denial",
   "matching.declared-restrictions",
+  "matching.unenforceable-limits",
 ];
 
 test("the pack covers every required acquisition and matching scenario", () => {
@@ -93,7 +94,7 @@ test("the allocation cases wait for their test authority", async () => {
     // execute skips with the grant it lacks, and the run cannot call
     // itself conformant.
     const gated = report.results.filter((entry) => entry.outcome === "skip");
-    assert.equal(gated.length, 7);
+    assert.equal(gated.length, 8);
     assert.ok(gated.every((entry) => entry.reason === "external-effects-not-authorized"));
     assert.equal(report.summary.failed, 0);
     assert.equal(report.verdict, "incomplete");
