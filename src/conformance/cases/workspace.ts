@@ -20,6 +20,7 @@ import { PolicyAuthority } from "../../core/policy.js";
 import type { PolicyAuthority as Authority } from "../../core/policy.js";
 import {
   materializeTree,
+  scanTreeFromDirectory,
   treeRootHash,
   validateWorkspacePath,
 } from "../../store/workspace-tree.js";
@@ -971,6 +972,107 @@ export function workspaceCases(): ConformanceCase[] {
           return {
             outcome: "pass",
             detail: "A mid-apply crash completed from the stage; the next export ran clean.",
+          };
+        } finally {
+          state.done();
+        }
+      },
+    },
+    {
+      id: "workspace-authority.export-type-change",
+      area: "workspace-authority",
+      summary: "An export replaces entry kinds, not only file content.",
+      async run() {
+        const state = bench();
+        try {
+          const src = state.directory();
+          // Revision one: one file and one nested directory.
+          writeFileSync(join(src, "swap"), "once a file");
+          mkdirSync(join(src, "tree"));
+          mkdirSync(join(src, "tree", "sub"));
+          writeFileSync(join(src, "tree", "old.txt"), "old");
+          writeFileSync(join(src, "tree", "sub", "leaf.txt"), "leaf");
+          const first = checkpoint(state, `conf-${randomUUID()}`, src, {
+            stability: { kind: "locked" },
+          });
+          const target = join(state.directory(), "out");
+          exportRevision(
+            state.store,
+            state.sessionId,
+            state.blobs,
+            { revisionId: first.revision.id, destination: target },
+            { authority: LOCAL_AUTHORITY },
+          );
+          // Revision two swaps both kinds: the file becomes a nested
+          // directory, the directory becomes a file.
+          rmSync(join(src, "swap"));
+          mkdirSync(join(src, "swap"));
+          writeFileSync(join(src, "swap", "child.txt"), "child");
+          rmSync(join(src, "tree"), { recursive: true });
+          writeFileSync(join(src, "tree"), "now a file");
+          const second = checkpoint(
+            state,
+            `conf-${randomUUID()}`,
+            src,
+            { stability: { kind: "locked" } },
+            first.revision.id,
+          );
+          const applied = exportRevision(
+            state.store,
+            state.sessionId,
+            state.blobs,
+            { revisionId: second.revision.id, destination: target },
+            { authority: LOCAL_AUTHORITY },
+          );
+          if (!statSync(join(target, "swap")).isDirectory()) {
+            return {
+              outcome: "fail",
+              reason: "the file did not become a directory on export",
+            };
+          }
+          if (readFileSync(join(target, "swap", "child.txt"), "utf8") !== "child") {
+            return {
+              outcome: "fail",
+              reason: "the new directory misses its child file",
+            };
+          }
+          if (!statSync(join(target, "tree")).isFile()) {
+            return {
+              outcome: "fail",
+              reason: "the directory did not become a file on export",
+            };
+          }
+          if (readFileSync(join(target, "tree"), "utf8") !== "now a file") {
+            return {
+              outcome: "fail",
+              reason: "the new file holds the wrong content",
+            };
+          }
+          if (existsSync(join(target, "tree", "sub"))) {
+            return {
+              outcome: "fail",
+              reason: "an obsolete nested directory stayed behind",
+            };
+          }
+          const settled = scanTreeFromDirectory(target, {
+            exclusions: [JOURNAL_FILE, STATE_FILE, STAGE_DIR, ".portable-bridge.lock"],
+          });
+          if (settled.rootHash !== applied.rootHash) {
+            return {
+              outcome: "fail",
+              reason: "the destination tree does not hash to the revision",
+              detail: `${settled.rootHash} against ${applied.rootHash}`,
+            };
+          }
+          if (!existsSync(join(target, STATE_FILE))) {
+            return {
+              outcome: "fail",
+              reason: "the reserved bridge state file did not survive",
+            };
+          }
+          return {
+            outcome: "pass",
+            detail: "Both kind changes landed; obsolete directories left with them.",
           };
         } finally {
           state.done();

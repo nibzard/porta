@@ -1,6 +1,6 @@
 # Review repair plan
 
-Date: 2026-09-12. Status: in progress. R1 through R7 are complete; R8 and R9 remain.
+Date: 2026-09-12. Status: in progress. R1 through R8 are complete; R9 remains.
 
 This plan covers all eight defects found in the project review. It includes the related documentation and validation work.
 
@@ -346,6 +346,25 @@ Each repair starts with a failing regression test. Use temporary files, loopback
 - Local edits still cause a conflict before overwrite.
 - Failures after removal and during creation recover to a complete, verified revision.
 - Reserved bridge files survive. Corrupt staging content cannot be published under a valid revision hash.
+
+> **Status: complete (2026-09-12).** The apply now compares path and
+> kind, not path alone. A file whose path the next revision needs as a
+> directory leaves before the directory lands; an emptied directory
+> whose path the next revision needs as a file leaves before the file
+> copies over it. Obsolete directories remove children before parents,
+> so a dropped subtree empties from the bottom and no orphan directory
+> stays behind. Recovery verifies the staged tree against the journal
+> hash before it applies: a stage that is gone, changed, or unscannable
+> restores the recorded base, so corrupt staging content can no longer
+> publish under a valid revision hash. The bridge state is written only
+> after the applied destination hashes to the revision, on the export
+> path and the recovery path alike. Local edits still conflict before
+> any overwrite, executable bits survive the change, and the reserved
+> bridge files stay. Coverage: `test:runtime/export` (both type
+> directions with nested entries and an executable, a crash between
+> removal and creation across a type change, a corrupt stage restoring
+> the base), `conf:workspace-authority.export-type-change`. Full
+> suite: 477 tests, 476 pass, 1 skip (live E2B, no key).
 
 ## R9: Complete conformance and release evidence
 

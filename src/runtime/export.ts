@@ -230,6 +230,7 @@ function applyExport(
   };
   writeAtomic(join(destination, JOURNAL_FILE), JSON.stringify(journal));
   applyStaged(stageRoot, tree.entries, destination, reservedNames(lockFileName));
+  verifyApplied(destination, tree.rootHash, lockFileName);
   writeState(destination, tree.revisionId, tree.rootHash);
   rmSync(stageRoot, { recursive: true, force: true });
   rmSync(join(destination, JOURNAL_FILE), { force: true });
@@ -245,9 +246,11 @@ function applyExport(
 /**
  * Complete or restore one interrupted apply, if any.
  *
- * A journal with no staging tree restores the base the export started
- * from. A stray staging tree with no journal is garbage from a crash
- * before the journal existed; it is removed.
+ * A journal whose staging tree still hashes to it completes the apply.
+ * A journal with no staging tree, or one the scan cannot verify,
+ * restores the base the export started from: recovery never publishes
+ * content it did not verify. A stray staging tree with no journal is
+ * garbage from a crash before the journal existed; it is removed.
  */
 function recoverBridgeLocked(
   store: ControlStore,
@@ -293,10 +296,12 @@ function recoverBridgeLocked(
       restored: false,
     };
   }
-  if (existsSync(stageRoot)) {
-    // The staging tree is intact: complete the apply from it.
-    const entries = scanTreeFromDirectory(stageRoot).entries;
-    applyStaged(stageRoot, entries, destination, reserved);
+  const staged = readStagedTree(stageRoot, journal.rootHash);
+  if (staged !== null) {
+    // The staging tree is intact and still hashes to the journal:
+    // complete the apply from it.
+    applyStaged(stageRoot, staged, destination, reserved);
+    verifyApplied(destination, journal.rootHash, lockFileName);
     writeState(destination, journal.revisionId, journal.rootHash);
     rmSync(stageRoot, { recursive: true, force: true });
     rmSync(journalPath, { force: true });
@@ -308,13 +313,15 @@ function recoverBridgeLocked(
       restored: false,
     };
   }
-  // The staging tree is gone: restore the recorded base so the
+  // The staging tree is gone or no longer matches the journal. The
+  // recorded base is the only verified tree left: restore it so the
   // destination holds exactly one revision again.
+  rmSync(stageRoot, { recursive: true, force: true });
   if (journal.baseRevisionId === null) {
     for (const path of walkFiles(destination, reserved)) {
       rmSync(path, { force: true });
     }
-    pruneDirectories(destination, new Set(), reserved);
+    pruneDirectories(destination, new Map(), reserved);
     rmSync(journalPath, { force: true });
     return { revisionId: "none", rootHash: "none", fileCount: 0, recovered: true, restored: true };
   }
@@ -329,8 +336,11 @@ function recoverBridgeLocked(
 
 /**
  * Copy one staged tree into a destination and drop what it does not
- * name. The apply is idempotent: running it again writes the same
- * result. Reserved bridge files are never touched.
+ * name with the same kind. A file whose path the target needs as a
+ * directory leaves before the directory lands, and an emptied
+ * directory whose path the target needs as a file leaves before the
+ * file copies over it. The apply is idempotent: running it again
+ * writes the same result. Reserved bridge files are never touched.
  */
 function applyStaged(
   stageRoot: string,
@@ -338,23 +348,23 @@ function applyStaged(
   destination: string,
   reserved: ReadonlySet<string>,
 ): void {
-  const targetPaths = new Set(entries.map((entry) => entry.path));
+  const target = new Map(entries.map((entry) => [entry.path, entry] as const));
   for (const path of walkFiles(destination, reserved)) {
-    if (!targetPaths.has(relativeTo(destination, path))) {
+    if (target.get(relativeTo(destination, path))?.kind !== "file") {
       rmSync(path, { force: true });
     }
   }
-  pruneDirectories(destination, targetPaths, reserved);
+  pruneDirectories(destination, target, reserved);
   for (const entry of entries) {
-    const target = join(destination, entry.path);
+    const to = join(destination, entry.path);
     if (entry.kind === "directory") {
-      mkdirSync(target, { recursive: true });
-      chmodSync(target, 0o755);
+      mkdirSync(to, { recursive: true });
+      chmodSync(to, 0o755);
       continue;
     }
-    mkdirSync(dirname(target), { recursive: true });
-    copyFileSync(join(stageRoot, entry.path), target);
-    chmodSync(target, entry.executable ? 0o755 : 0o644);
+    mkdirSync(dirname(to), { recursive: true });
+    copyFileSync(join(stageRoot, entry.path), to);
+    chmodSync(to, entry.executable ? 0o755 : 0o644);
   }
 }
 
@@ -478,10 +488,13 @@ function walkFiles(root: string, reserved: ReadonlySet<string>): string[] {
   return found;
 }
 
-/** Remove directories the target tree no longer names, deepest first. */
+/**
+ * Remove directories the target tree no longer names as directories,
+ * children before parents. A directory with content stays put.
+ */
 function pruneDirectories(
   root: string,
-  targetPaths: ReadonlySet<string>,
+  target: ReadonlyMap<string, TreeEntry>,
   reserved: ReadonlySet<string>,
 ): void {
   const seen: string[] = [];
@@ -498,8 +511,10 @@ function pruneDirectories(
     }
   };
   visit(root);
-  for (const path of seen.reverse()) {
-    if (targetPaths.has(relativeTo(root, path))) {
+  // Post order lists children before parents, so an obsolete subtree
+  // empties from the bottom and every directory of it can leave.
+  for (const path of seen) {
+    if (target.get(relativeTo(root, path))?.kind === "directory") {
       continue;
     }
     try {
@@ -510,6 +525,41 @@ function pruneDirectories(
     } catch {
       // A directory that cannot be read is left for the caller.
     }
+  }
+}
+
+/**
+ * Read one staged tree that still hashes to the journal.
+ *
+ * Returns null when the staging directory is gone, no longer hashes
+ * to the recorded root, or cannot be scanned at all. Recovery never
+ * publishes a stage it cannot verify.
+ */
+function readStagedTree(stageRoot: string, expectedRootHash: string): TreeEntry[] | null {
+  if (!existsSync(stageRoot)) {
+    return null;
+  }
+  try {
+    const scanned = scanTreeFromDirectory(stageRoot);
+    return scanned.rootHash === expectedRootHash ? scanned.entries : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Verify the destination now holds one tree, or refuse to record it.
+ *
+ * The bridge state names a revision only after the applied
+ * destination hashes to it, so a state file never claims a tree the
+ * directory does not hold.
+ */
+function verifyApplied(destination: string, rootHash: string, lockFileName: string): void {
+  const settled = scanTreeFromDirectory(destination, {
+    exclusions: [...reservedNames(lockFileName)],
+  });
+  if (settled.rootHash !== rootHash) {
+    throw integrityFailureError("the applied destination tree", rootHash, settled.rootHash);
   }
 }
 

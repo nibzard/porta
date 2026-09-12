@@ -23,6 +23,7 @@ const REQUIRED_CASES = [
   "workspace-authority.stability-declaration",
   "workspace-authority.checkpoint-lock",
   "workspace-authority.interrupted-export",
+  "workspace-authority.export-type-change",
 ];
 
 test("the pack covers every required workspace scenario", () => {

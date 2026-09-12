@@ -1,12 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -395,6 +397,246 @@ test("a crash that lost the staging tree restores the recorded base", async () =
     );
     assert.equal(next.recovered, false);
     assert.equal(readFileSync(join(target, "app.txt"), "utf8"), "two");
+  } finally {
+    parts.done();
+    src.done();
+    dest.done();
+  }
+});
+
+test("entry type changes replace entries in both directions", async () => {
+  const parts = fixture();
+  const src = scratch("porta-src-");
+  const dest = scratch("porta-dest-");
+  const target = join(dest.dir, "out");
+  try {
+    // Revision one: a file that becomes a directory, a nested directory
+    // that becomes a file, a nested file that becomes a directory, and
+    // a deep subtree the next revision drops completely.
+    writeFileSync(join(src.dir, "swap-to-dir"), "once a file");
+    mkdirSync(join(src.dir, "swap-to-file"));
+    mkdirSync(join(src.dir, "swap-to-file", "sub"));
+    writeFileSync(join(src.dir, "swap-to-file", "kept-then-gone.txt"), "kept");
+    writeFileSync(join(src.dir, "swap-to-file", "sub", "y.txt"), "y");
+    mkdirSync(join(src.dir, "deep"));
+    mkdirSync(join(src.dir, "deep", "nested"));
+    writeFileSync(join(src.dir, "deep", "nested", "leaf.txt"), "once a leaf");
+    mkdirSync(join(src.dir, "gone"));
+    mkdirSync(join(src.dir, "gone", "inner"));
+    writeFileSync(join(src.dir, "gone", "inner", "obsolete.txt"), "obsolete");
+    writeFileSync(join(src.dir, "run.sh"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(src.dir, "run.sh"), 0o755);
+    const runtime = parts.runtime;
+    const sessionId = (await runtime.createSession({ policyRef: "policy://test" })).id;
+    const session = await runtime.openSession(sessionId);
+    const first = await session.checkpoint(
+      parts.blobs,
+      { requestKey: "import-1", source: { kind: "bridge", rootPath: src.dir } },
+      { stability: { kind: "locked" } },
+    );
+    await session.export(
+      parts.blobs,
+      { revisionId: first.revision.id, destination: target },
+      { authority: LOCAL_AUTHORITY },
+    );
+
+    // Revision two reworks the entry shapes.
+    rmSync(join(src.dir, "swap-to-dir"));
+    mkdirSync(join(src.dir, "swap-to-dir"));
+    writeFileSync(join(src.dir, "swap-to-dir", "child.txt"), "now a directory");
+    rmSync(join(src.dir, "swap-to-file"), { recursive: true });
+    writeFileSync(join(src.dir, "swap-to-file"), "now a file");
+    rmSync(join(src.dir, "deep", "nested", "leaf.txt"));
+    mkdirSync(join(src.dir, "deep", "nested", "leaf.txt"));
+    writeFileSync(join(src.dir, "deep", "nested", "leaf.txt", "under.txt"), "leaf became a directory");
+    rmSync(join(src.dir, "gone"), { recursive: true });
+    const second = await session.checkpoint(
+      parts.blobs,
+      {
+        requestKey: "import-2",
+        source: { kind: "bridge", rootPath: src.dir },
+        expectedHead: first.revision.id,
+      },
+      { stability: { kind: "locked" } },
+    );
+
+    // A local edit still conflicts before the type change overwrites.
+    writeFileSync(join(target, "swap-to-dir"), "precious local edit");
+    const conflict = await session
+      .export(parts.blobs, { revisionId: second.revision.id, destination: target }, { authority: LOCAL_AUTHORITY })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    assert.ok(isPortableCode(conflict) && conflict.code === "WorkspaceConflict");
+    assert.ok(JSON.stringify(conflict?.details).includes("changed-local-files"));
+    assert.equal(readFileSync(join(target, "swap-to-dir"), "utf8"), "precious local edit");
+    writeFileSync(join(target, "swap-to-dir"), "once a file");
+
+    const updated = await session.export(
+      parts.blobs,
+      { revisionId: second.revision.id, destination: target },
+      { authority: LOCAL_AUTHORITY, expectedBaseRevisionId: first.revision.id },
+    );
+    // The destination holds exactly the requested tree and root hash.
+    const settled = scanTreeFromDirectory(target, { exclusions: [...RESERVED] });
+    assert.equal(settled.rootHash, updated.rootHash);
+    assert.deepEqual(contentOf(target), contentOf(src.dir));
+
+    // Both type changes landed with the requested kinds.
+    assert.ok(statSync(join(target, "swap-to-dir")).isDirectory());
+    assert.equal(readFileSync(join(target, "swap-to-dir", "child.txt"), "utf8"), "now a directory");
+    assert.ok(statSync(join(target, "swap-to-file")).isFile());
+    assert.equal(readFileSync(join(target, "swap-to-file"), "utf8"), "now a file");
+    assert.ok(statSync(join(target, "deep", "nested", "leaf.txt")).isDirectory());
+    assert.equal(
+      readFileSync(join(target, "deep", "nested", "leaf.txt", "under.txt"), "utf8"),
+      "leaf became a directory",
+    );
+
+    // Nested obsolete directories removed fully, children and parents.
+    assert.equal(existsSync(join(target, "gone")), false);
+    assert.equal(existsSync(join(target, "swap-to-file", "sub")), false);
+
+    // Executable metadata survived the change.
+    assert.equal(statSync(join(target, "run.sh")).mode & 0o777, 0o755);
+
+    // Reserved bridge files survived the apply.
+    assert.ok(existsSync(join(target, ".portable-bridge.state")));
+  } finally {
+    parts.done();
+    src.done();
+    dest.done();
+  }
+});
+
+test("a crash between removal and creation recovers a type change", async () => {
+  const parts = fixture();
+  const src = scratch("porta-src-");
+  const dest = scratch("porta-dest-");
+  const target = join(dest.dir, "out");
+  try {
+    // Revision one: `x` is a file and `d` is a directory.
+    writeFileSync(join(src.dir, "x"), "once a file");
+    mkdirSync(join(src.dir, "d"));
+    writeFileSync(join(src.dir, "d", "old.txt"), "old");
+    const runtime = parts.runtime;
+    const sessionId = (await runtime.createSession({ policyRef: "policy://test" })).id;
+    const session = await runtime.openSession(sessionId);
+    const first = await session.checkpoint(
+      parts.blobs,
+      { requestKey: "import-1", source: { kind: "bridge", rootPath: src.dir } },
+      { stability: { kind: "locked" } },
+    );
+    await session.export(
+      parts.blobs,
+      { revisionId: first.revision.id, destination: target },
+      { authority: LOCAL_AUTHORITY },
+    );
+
+    // Revision two: `x` becomes a directory and `d` becomes a file.
+    rmSync(join(src.dir, "x"));
+    mkdirSync(join(src.dir, "x"));
+    writeFileSync(join(src.dir, "x", "child.txt"), "child");
+    rmSync(join(src.dir, "d"), { recursive: true });
+    writeFileSync(join(src.dir, "d"), "now a file");
+    const second = await session.checkpoint(
+      parts.blobs,
+      {
+        requestKey: "import-2",
+        source: { kind: "bridge", rootPath: src.dir },
+        expectedHead: first.revision.id,
+      },
+      { stability: { kind: "locked" } },
+    );
+
+    // Stage and journal like an export would, then "crash" after the
+    // removals: the old file `x` is gone and `d` lost its child, so an
+    // empty directory stands where the revision needs a file.
+    await simulatePrepare(parts, target, second.revision.id);
+    rmSync(join(target, "x"));
+    rmSync(join(target, "d", "old.txt"));
+
+    const outcome = await session.recoverExport(parts.blobs, target, { authority: LOCAL_AUTHORITY });
+    assert.equal(outcome.recovered, true);
+    assert.equal(outcome.restored, false);
+    assert.equal(outcome.revisionId, second.revision.id);
+    assert.ok(statSync(join(target, "x")).isDirectory());
+    assert.equal(readFileSync(join(target, "x", "child.txt"), "utf8"), "child");
+    assert.ok(statSync(join(target, "d")).isFile());
+    assert.equal(readFileSync(join(target, "d"), "utf8"), "now a file");
+    assert.deepEqual(contentOf(target), new Set(["x", "x/child.txt", "d"]));
+    assert.equal(existsSync(join(target, ".portable-bridge.stage")), false);
+    assert.equal(existsSync(join(target, ".portable-bridge.journal")), false);
+    const settled = scanTreeFromDirectory(target, { exclusions: [...RESERVED] });
+    assert.equal(settled.rootHash, outcome.rootHash);
+  } finally {
+    parts.done();
+    src.done();
+    dest.done();
+  }
+});
+
+test("corrupt staging content restores the base instead of publishing", async () => {
+  const parts = fixture();
+  const src = scratch("porta-src-");
+  const dest = scratch("porta-dest-");
+  const target = join(dest.dir, "out");
+  try {
+    writeFileSync(join(src.dir, "app.txt"), "one");
+    const runtime = parts.runtime;
+    const sessionId = (await runtime.createSession({ policyRef: "policy://test" })).id;
+    const session = await runtime.openSession(sessionId);
+    const first = await session.checkpoint(
+      parts.blobs,
+      { requestKey: "import-1", source: { kind: "bridge", rootPath: src.dir } },
+      { stability: { kind: "locked" } },
+    );
+    await session.export(
+      parts.blobs,
+      { revisionId: first.revision.id, destination: target },
+      { authority: LOCAL_AUTHORITY },
+    );
+
+    writeFileSync(join(src.dir, "app.txt"), "two");
+    writeFileSync(join(src.dir, "new.txt"), "fresh");
+    const second = await session.checkpoint(
+      parts.blobs,
+      {
+        requestKey: "import-2",
+        source: { kind: "bridge", rootPath: src.dir },
+        expectedHead: first.revision.id,
+      },
+      { stability: { kind: "locked" } },
+    );
+    await simulatePrepare(parts, target, second.revision.id);
+    // The staged tree changed after the journal recorded its hash.
+    // Recovery must not publish those bytes under the revision hash
+    // the journal carries.
+    writeFileSync(join(target, ".portable-bridge.stage", "new.txt"), "tampered");
+
+    const outcome = await session.recoverExport(parts.blobs, target, { authority: LOCAL_AUTHORITY });
+    assert.equal(outcome.recovered, true);
+    assert.equal(outcome.restored, true);
+    assert.equal(outcome.revisionId, first.revision.id);
+    assert.equal(readFileSync(join(target, "app.txt"), "utf8"), "one");
+    assert.equal(existsSync(join(target, "new.txt")), false);
+    assert.equal(existsSync(join(target, ".portable-bridge.stage")), false);
+    assert.equal(existsSync(join(target, ".portable-bridge.journal")), false);
+    const state = JSON.parse(readFileSync(join(target, ".portable-bridge.state"), "utf8")) as {
+      revisionId: string;
+    };
+    assert.equal(state.revisionId, first.revision.id);
+
+    // The restored base accepts the next export without recovery.
+    const next = await session.export(
+      parts.blobs,
+      { revisionId: second.revision.id, destination: target },
+      { authority: LOCAL_AUTHORITY },
+    );
+    assert.equal(next.recovered, false);
+    assert.equal(readFileSync(join(target, "app.txt"), "utf8"), "two");
+    assert.equal(readFileSync(join(target, "new.txt"), "utf8"), "fresh");
   } finally {
     parts.done();
     src.done();
