@@ -924,3 +924,29 @@ test("a request on standard input needs no shell interpolation", async () => {
     rmSync(fx.root, { recursive: true, force: true });
   }
 });
+
+test("invalid policy refuses before opening the store or loading adapter code", async () => {
+  const root = mkdtempSync(join(tmpdir(), "porta-policy-order-"));
+  try {
+    const marker = join(root, "loaded");
+    const module = join(root, "adapter.mjs");
+    writeFileSync(module, `import {writeFileSync} from 'node:fs'; writeFileSync(${JSON.stringify(marker)}, 'loaded'); export const adapter = {acquire: async () => {}};`);
+    const request = join(root, "request.json");
+    writeFileSync(request, JSON.stringify({name: "worker", requires: {}}));
+    for (const content of [undefined, "{", JSON.stringify({schemaVersion: 1, providers: 42})]) {
+      const policy = join(root, "policy.json");
+      if (content !== undefined) writeFileSync(policy, content);
+      for (const command of ["attach", "invoke", "materialize"]) {
+        const db = join(root, `${command}.db`);
+        const args = command === "attach"
+          ? ["--request", request, "--request-key", "test", "--adapter", module, "--principal", "user://test"]
+          : command === "invoke" ? ["--request", request]
+          : ["--revision", "rev-test", "--destination", join(root, "copy"), "--mode", "proposal"];
+        const {io, err} = recordingIo();
+        assert.equal(await runCli([command, "--store", db, "--session", "missing", "--policy-file", policy, ...args], io), 2, err.join("\n"));
+        assert.equal(existsSync(db), false);
+        assert.equal(existsSync(marker), false);
+      }
+    }
+  } finally { rmSync(root, {recursive: true, force: true}); }
+});

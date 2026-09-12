@@ -141,13 +141,15 @@ async function checkpoint(parsed: ParsedArguments, io: CliIo): Promise<number> {
  * accepted proposal (SPEC.md sections 11.3 and 11.6).
  */
 async function materialize(parsed: ParsedArguments, io: CliIo): Promise<number> {
-  const { session, config, blobs } = await openInvocation(parsed);
+  const config = resolveConfig(configInputOf(parsed));
+  const authority = loadAuthority(config);
+  const { session, blobs } = await openInvocation(parsed, config);
   const copy = await session.materialize(
     blobs,
     valueOf(parsed, "--revision"),
     valueOf(parsed, "--destination"),
     {
-      authority: loadAuthority(config),
+      authority,
       mode: modeOf(parsed),
     },
   );
@@ -157,7 +159,9 @@ async function materialize(parsed: ParsedArguments, io: CliIo): Promise<number> 
 
 /** Attach one environment through the durable acquisition protocol. */
 async function attach(parsed: ParsedArguments, io: CliIo): Promise<number> {
-  const { session, config } = await openInvocation(parsed);
+  const config = resolveConfig(configInputOf(parsed));
+  const authority = loadAuthority(config);
+  const { session } = await openInvocation(parsed, config);
   const adapter = await loadAdapter(valueOf(parsed, "--adapter"));
   const request = validated(valueOf(parsed, "--request"), environmentRequestSchema) as EnvironmentRequest;
   emit(
@@ -167,7 +171,7 @@ async function attach(parsed: ParsedArguments, io: CliIo): Promise<number> {
       request,
       requestKey: valueOf(parsed, "--request-key"),
       principal: valueOf(parsed, "--principal"),
-      authority: loadAuthority(config),
+      authority,
     }),
   );
   return 0;
@@ -175,9 +179,11 @@ async function attach(parsed: ParsedArguments, io: CliIo): Promise<number> {
 
 /** Admit one invocation and print its durable operation record. */
 async function invoke(parsed: ParsedArguments, io: CliIo): Promise<number> {
-  const { session, config } = await openInvocation(parsed);
+  const config = resolveConfig(configInputOf(parsed));
+  const authority = loadAuthority(config);
+  const { session } = await openInvocation(parsed, config);
   const request = validated(valueOf(parsed, "--request"), invocationRequestSchema) as InvocationRequest;
-  const operation = await session.invoke(request, { authority: loadAuthority(config) });
+  const operation = await session.invoke(request, { authority });
   emit(io, operation);
   return 0;
 }
@@ -414,12 +420,12 @@ function emit(io: CliIo, record: unknown): void {
  */
 async function openInvocation(
   parsed: ParsedArguments,
+  config: CliConfig = resolveConfig(configInputOf(parsed)),
 ): Promise<{
   config: CliConfig;
   session: ManagedSession;
   blobs: BlobStore;
 }> {
-  const config = resolveConfig(configInputOf(parsed));
   const { store, blobs } = openStore(config);
   const runtime = new PortableRuntime(store);
   const session = await runtime.openSession(requireSession(config));
