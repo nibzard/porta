@@ -1623,6 +1623,12 @@ export function switchReplacement(
           },
         );
       }
+      // The acquisition links follow the merge: every later lookup by
+      // this attachment names the live environment's allocation, never
+      // the one a retired generation released (SPEC.md sections 13.3
+      // and 13.4). The obligation above still names the source's own
+      // acquisition by identifier, which no merge rewrites.
+      store.mergeAcquisitionLinks(sessionId, attachmentId, candidate.attachmentId);
 
       // Every source-generation handle dies here, native and
       // superseded alike: the candidate bindings are the live ones.

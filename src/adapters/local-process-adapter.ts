@@ -117,6 +117,12 @@ export interface LocalProcessAdapterOptions {
   /** Root that working directories resolve against without host
    * access. Defaults to `<supervisorDir>/workspace`. */
   workingCopyRoot?: string;
+  /**
+   * Provider identity this adapter declares. Defaults to
+   * `local-process`; a second independent instance that must stay
+   * distinguishable in durable records names its own id.
+   */
+  providerId?: string;
 }
 
 /** Durable record of one started background process. */
@@ -165,7 +171,9 @@ const TERMINATE_GRACE_MS = 300;
 const TERMINATE_WAIT_MS = 2000;
 
 export class LocalProcessAdapter implements EnvironmentAdapter {
-  readonly id = LOCAL_PROCESS_PROVIDER_ID;
+  get id(): string {
+    return this.providerId;
+  }
   private readonly supervisorDirPath: string;
   private readonly processesDir: string;
   private readonly acquisitionsDir: string;
@@ -173,6 +181,7 @@ export class LocalProcessAdapter implements EnvironmentAdapter {
   private readonly leaseTtlMs: number;
   private readonly maxOutputBytes: number;
   private readonly baseEnvironment: Record<string, string>;
+  private readonly providerId: string;
 
   constructor(options: LocalProcessAdapterOptions) {
     const dir = options.supervisorDir;
@@ -187,6 +196,7 @@ export class LocalProcessAdapter implements EnvironmentAdapter {
     this.maxOutputBytes = options.maxOutputBytesPerStream ?? DEFAULT_MAX_OUTPUT_BYTES;
     this.baseEnvironment =
       options.baseEnvironment ?? ({ ...process.env } as Record<string, string>);
+    this.providerId = options.providerId ?? LOCAL_PROCESS_PROVIDER_ID;
   }
 
   // -- EnvironmentAdapter ------------------------------------------------------
@@ -336,8 +346,8 @@ export class LocalProcessAdapter implements EnvironmentAdapter {
   /** The discovery offer of this adapter. */
   offer(): EnvironmentOffer {
     return {
-      providerId: LOCAL_PROCESS_PROVIDER_ID,
-      adapterId: LOCAL_PROCESS_PROVIDER_ID,
+      providerId: this.providerId,
+      adapterId: this.providerId,
       platform: { os: process.platform, arch: process.arch },
       capabilities: [
         { id: PROCESS_CAPABILITY_ID, attributes: processCapabilityDescriptor().attributes },
@@ -350,7 +360,7 @@ export class LocalProcessAdapter implements EnvironmentAdapter {
   manifestOf(environmentId: string): EnvironmentManifest {
     return {
       environmentId,
-      providerId: LOCAL_PROCESS_PROVIDER_ID,
+      providerId: this.providerId,
       platform: { os: process.platform, arch: process.arch },
       capabilities: [processCapabilityDescriptor()],
       enforcement: { ...ENFORCEMENT, supervisorDir: this.supervisorDirPath },

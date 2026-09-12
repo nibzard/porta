@@ -1288,6 +1288,7 @@ test("a store refusal mid-switch rolls the whole transaction back", async () => 
 
 import { abortReplacement } from "./replacement.js";
 import { runCleanup } from "./lifecycle.js";
+import { releaseAttachment } from "./release.js";
 
 /** Seed a source attachment through the adapter, so it owns an acquisition. */
 async function adapterSource(
@@ -1544,6 +1545,134 @@ test("a committed switch never turns back and its cleanup retries independently"
   } finally {
     parts.cleanup();
     rmSync(copyRoot, { recursive: true, force: true });
+  }
+});
+
+test("acquisition serving links follow the merge across repeated switches", async () => {
+  const parts = await fixture();
+  const firstRoot = mkdtempSync(join(tmpdir(), "porta-sw-acq-1-"));
+  const secondRoot = mkdtempSync(join(tmpdir(), "porta-sw-acq-2-"));
+  try {
+    const adapter = new FakeEnvironmentAdapter();
+    // The source goes through the adapter, so every generation names a
+    // real acquisition a cleanup pass or a release must reach.
+    const source = await adapterSource(parts, adapter, "attach-src-1");
+    const attachment = { sessionId: parts.sessionId, attachmentId: source.attachmentId };
+    const originalAcquisition = parts.store.getAcquisitionForAttachment(
+      parts.sessionId,
+      source.attachmentId,
+    )!;
+    const recipeOf = (id: string, subject: string): ReplaceRequest["reconstruct"] => [
+      {
+        id,
+        inputRevisionId: parts.revisionId,
+        requiredCapabilities: ["exec.process@1"],
+        steps: [
+          { capability: "exec.process@1", operation: "run", input: { command: "npm", args: ["ci"] } },
+        ],
+        outputs: [`process.group ${subject}`],
+        failureConditions: ["ProviderUnavailable"],
+      },
+    ];
+
+    // First replacement: generation 1 merges the first candidate.
+    const firstPrepared = await prepareReplacement(
+      parts.store,
+      request(parts, {
+        source: { ...attachment, generation: 1 },
+        reconstruct: recipeOf("recipe-first", source.ids.reconstruct),
+        requestKey: "replace-first",
+      }),
+    );
+    checkpointReplacement(parts.store, firstPrepared.transitionId);
+    const first = await prepareDestination(
+      parts.store,
+      firstPrepared.transitionId,
+      destinationOptions(parts, adapter, firstRoot),
+    );
+    const firstAcquisition = parts.store.getAcquisitionForAttachment(
+      parts.sessionId,
+      first.candidateAttachmentId,
+    )!;
+    const firstSwitch = switchReplacement(parts.store, firstPrepared.transitionId);
+    assert.equal(firstSwitch.newGeneration, 2);
+
+    // The serving link followed the merge: a lookup by the attachment
+    // names the live environment's acquisition, and nothing answers at
+    // the retired candidate's link anymore.
+    assert.equal(
+      parts.store.getAcquisitionForAttachment(parts.sessionId, source.attachmentId)!
+        .acquisitionId,
+      firstAcquisition.acquisitionId,
+    );
+    assert.equal(
+      parts.store.getAcquisitionForAttachment(parts.sessionId, first.candidateAttachmentId),
+      null,
+    );
+
+    // Second replacement over the merged generation: its obligation
+    // must name the acquisition of the environment generation 2 runs
+    // on, never the one generation 1 already released.
+    const adoptedProcess = firstSwitch.adoptedResourceIds
+      .map((resourceId) => parts.store.getResourceBinding(parts.sessionId, resourceId)!)
+      .find((binding) => binding.type === "process.group")!
+      .id;
+    const secondPrepared = await prepareReplacement(
+      parts.store,
+      request(parts, {
+        source: { ...attachment, generation: 2 },
+        reconstruct: recipeOf("recipe-second", adoptedProcess),
+        requestKey: "replace-second",
+      }),
+    );
+    checkpointReplacement(parts.store, secondPrepared.transitionId);
+    const second = await prepareDestination(
+      parts.store,
+      secondPrepared.transitionId,
+      destinationOptions(parts, adapter, secondRoot),
+    );
+    const secondAcquisition = parts.store.getAcquisitionForAttachment(
+      parts.sessionId,
+      second.candidateAttachmentId,
+    )!;
+    const secondSwitch = switchReplacement(parts.store, secondPrepared.transitionId);
+    assert.equal(secondSwitch.newGeneration, 3);
+    assert.equal(
+      secondSwitch.cleanup[0]!.extensions?.["portable.runtime.acquisition-id"],
+      firstAcquisition.acquisitionId,
+    );
+
+    // One cleanup pass releases every pending obligation's acquisition
+    // exactly once, whichever generation introduced it.
+    const pass = await runCleanup(parts.store, parts.sessionId, "policy://test", {
+      adapter,
+      principal: "tester",
+    });
+    assert.deepEqual(
+      pass.outcomes.map((outcome) => outcome.outcome),
+      ["satisfied", "satisfied"],
+    );
+    assert.equal(pass.remaining, 0);
+    assert.equal(parts.store.getAcquisition(originalAcquisition.acquisitionId)!.state, "released");
+    assert.equal(parts.store.getAcquisition(firstAcquisition.acquisitionId)!.state, "released");
+    assert.equal(parts.store.getAcquisition(secondAcquisition.acquisitionId)!.state, "allocated");
+
+    // Releasing the merged attachment reaches the environment it runs
+    // on: generation 3's acquisition, not one of its predecessors.
+    const released = await releaseAttachment(
+      parts.store,
+      parts.sessionId,
+      "policy://test",
+      { ...attachment, generation: 3 },
+      "release-after-merge-1",
+      { adapter, principal: "tester" },
+    );
+    assert.equal(released.status, "released");
+    assert.equal(parts.store.getAcquisition(secondAcquisition.acquisitionId)!.state, "released");
+  } finally {
+    parts.cleanup();
+    rmSync(firstRoot, { recursive: true, force: true });
+    rmSync(secondRoot, { recursive: true, force: true });
   }
 });
 

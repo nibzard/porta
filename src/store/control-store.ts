@@ -663,6 +663,64 @@ export class ControlStore {
   }
 
   /**
+   * Move the acquisition serving link of one merged generation pair
+   * (SPEC.md section 13.3).
+   *
+   * A switch merges the candidate environment into the source
+   * attachment, so the acquisition that served the candidate now
+   * serves the source attachment, and the retired source generation's
+   * acquisition keeps only its durable history: it stays addressable
+   * by identifier, but no lookup by attachment finds it again. Both
+   * rows are read before either moves, and the writes belong to the
+   * caller's transaction.
+   */
+  mergeAcquisitionLinks(
+    sessionId: string,
+    sourceAttachmentId: string,
+    candidateAttachmentId: string,
+  ): void {
+    const candidate = this.getAcquisitionForAttachment(sessionId, candidateAttachmentId);
+    const retired = this.getAcquisitionForAttachment(sessionId, sourceAttachmentId);
+    if (candidate !== null) {
+      const moved = this.casUpdate(
+        "acquisitions",
+        candidate.acquisitionId,
+        { attachment_id: candidateAttachmentId },
+        {
+          attachment_id: sourceAttachmentId,
+          record_json: JSON.stringify({
+            ...candidate,
+            extensions: {
+              ...candidate.extensions,
+              "portable.runtime.attachment-id": sourceAttachmentId,
+            },
+          }),
+        },
+      );
+      if (moved === null) {
+        throw new StoreError(
+          "cas-failed",
+          `Acquisition ${candidate.acquisitionId} moved before its link merged.`,
+        );
+      }
+    }
+    if (retired !== null && retired.acquisitionId !== candidate?.acquisitionId) {
+      const detached = this.casUpdate(
+        "acquisitions",
+        retired.acquisitionId,
+        { attachment_id: sourceAttachmentId },
+        { attachment_id: null, record_json: JSON.stringify(retired) },
+      );
+      if (detached === null) {
+        throw new StoreError(
+          "cas-failed",
+          `Acquisition ${retired.acquisitionId} moved before its link detached.`,
+        );
+      }
+    }
+  }
+
+  /**
    * Acquisition identities whose outcome is not resolved.
    *
    * Covers `pending` and `unknown` states: allocations that may or may not

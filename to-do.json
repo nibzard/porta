@@ -1580,7 +1580,7 @@
     "id": "T063",
     "title": "Run and automate the full acceptance demonstration",
     "priority": 3,
-    "status": "todo",
+    "status": "done",
     "details": "Execute the complete scale, compose, replace, recover, release, and reopen workflow.",
     "depends_on": [
       "T045",

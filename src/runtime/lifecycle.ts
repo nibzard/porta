@@ -173,8 +173,9 @@ export async function renewAttachment(
  * Release obligations retry the idempotent release of exactly the
  * environment they name; unresolved allocations ask the adapter for
  * the truth first and never clear without it. An obligation clears
- * only on provider confirmation. Obligations that stay pending remain
- * visible through inspection.
+ * only on provider confirmation, and only from the pass of a provider
+ * the adapter offers — one provider never confirms another's release.
+ * Obligations that stay pending remain visible through inspection.
  */
 export async function runCleanup(
   store: ControlStore,
@@ -186,6 +187,13 @@ export async function runCleanup(
   const stream = new SessionEventStream(store, sessionId, options.redactor);
   const pending = store.listCleanup(sessionId, "pending");
   const outcomes: CleanupOutcome[] = [];
+  // The providers this pass's adapter offers. One provider may not
+  // confirm another provider's release, so a pass settles only the
+  // obligations of providers it serves; the rest stay pending for the
+  // pass that owns them.
+  const servedProviders = new Set(
+    (await options.adapter.describe()).map((offer) => offer.providerId),
+  );
 
   for (const { record } of pending) {
     const attachmentId = typeof record.extensions?.[ATTACHMENT_KEY] === "string"
@@ -200,6 +208,7 @@ export async function runCleanup(
         attachmentId,
         acquisitionId,
         leaseTtlMs,
+        servedProviders,
       });
       outcomes.push(outcome);
     } catch (error) {
@@ -387,6 +396,7 @@ async function settleObligation(
     attachmentId: string | undefined;
     acquisitionId: string | undefined;
     leaseTtlMs: number;
+    servedProviders: Set<string>;
   },
 ): Promise<CleanupOutcome> {
   const { record, attachmentId, acquisitionId } = names;
@@ -416,6 +426,19 @@ async function settleObligation(
       kind: record.kind,
       outcome: "pending",
       reason: "The acquisition carries no stored request.",
+    };
+  }
+  if (request.providerId !== undefined && !names.servedProviders.has(request.providerId)) {
+    // One provider may not confirm another provider's release: a pass
+    // settles only what its adapter offers, and the obligation stays
+    // pending for the pass that owns it (SPEC.md section 15).
+    return {
+      cleanupId: record.id,
+      kind: record.kind,
+      outcome: "pending",
+      reason:
+        `The obligation belongs to provider ${request.providerId}; ` +
+        `this pass serves ${[...names.servedProviders].join(", ")}.`,
     };
   }
 

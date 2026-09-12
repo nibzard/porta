@@ -269,6 +269,50 @@ test("cleanup survives restart and spares unrelated attachments", async () => {
   }
 });
 
+test("a cleanup pass settles only the providers its adapter offers", async () => {
+  const { session, adapter, attachment } = await attached();
+  // One unconfirmed release leaves the obligation pending.
+  adapter.queueRenew({ kind: "refuse" });
+  adapter.queueRelease({ kind: "fail-retryable" });
+  const outcome = await session.renewAttachment(attachment.attachmentId, {
+    adapter,
+    principal: "user://test",
+    authority: AUTHORITY,
+    durationMs: HOUR_MS,
+  });
+  assert.equal(outcome.status, "unavailable");
+  assert.equal((await session.describe()).pendingCleanup.length, 1);
+
+  // A pass of an adapter that offers a different provider may not
+  // confirm this release: the obligation stays pending and the
+  // provider is never called.
+  const stranger = new FakeEnvironmentAdapter({
+    offers: [
+      {
+        providerId: "fake-remote",
+        platform: { os: "linux", arch: "x64" },
+        capabilities: [{ id: "exec.process@1", attributes: { engine: "fake-process" } }],
+      },
+    ],
+  });
+  const foreign = await session.runCleanup({ adapter: stranger, principal: "user://cleanup" });
+  assert.equal(foreign.outcomes.length, 1);
+  assert.equal(foreign.outcomes[0]?.outcome, "pending");
+  assert.match(foreign.outcomes[0]?.reason ?? "", /belongs to provider fake-local/);
+  assert.equal(foreign.remaining, 1);
+  assert.equal(stranger.queues.release.length, 0, "the foreign provider was never called");
+
+  // The pass of the owning provider settles it.
+  const owned = await session.runCleanup({ adapter, principal: "user://cleanup" });
+  assert.equal(owned.outcomes.length, 1);
+  assert.equal(owned.outcomes[0]?.outcome, "satisfied");
+  assert.equal(owned.remaining, 0);
+  assert.equal(
+    (await session.describe()).attachments.find((entry) => entry.name === "worker")?.status,
+    "released",
+  );
+});
+
 test("an unresolved allocation never clears without provider truth", async () => {
   const { session, adapter } = await attached();
   // Replace the flow with a lost response that allocates nothing.
