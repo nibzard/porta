@@ -267,3 +267,35 @@ test("repeated dispatch attempts reach the provider at most once", async () => {
     state.done();
   }
 });
+
+test("the exact README example closes stores and releases attachments on failures", () => {
+  const indexUrl = new URL("../index.js", import.meta.url).href;
+  const source = readmeExample().replace(/from "portable";/, `from ${JSON.stringify(indexUrl)};`);
+  for (const fault of ["attach", "checkpoint", "release", "reopen"]) {
+    const root = mkdtempSync(join(tmpdir(), "porta-readme-failure-"));
+    try {
+      writeFileSync(join(root, "example.mjs"), source);
+      writeFileSync(join(root, "check.mjs"), `
+import assert from 'node:assert/strict';
+import {ControlStore, ManagedSession} from ${JSON.stringify(indexUrl)};
+const stores = [];
+let releases = 0;
+const open = ControlStore.open;
+ControlStore.open = function(...args) { const store = open.apply(this, args); stores.push(store); return store; };
+const release = ManagedSession.prototype.release;
+ManagedSession.prototype.release = async function(...args) { releases++; return release.apply(this, args); };
+const fault = ${JSON.stringify(fault)};
+ManagedSession.prototype[fault] = async function() {
+  if (fault === 'release') releases++;
+  throw new Error('injected ' + fault);
+};
+await assert.rejects(import('./example.mjs'), new RegExp('injected ' + fault));
+assert.equal(stores.length, fault === 'reopen' ? 2 : 1);
+assert.equal(releases, fault === 'attach' ? 0 : 1);
+for (const store of stores) assert.throws(() => store.close(), /closed|not open/i);
+`);
+      const run = spawnSync(process.execPath, ["check.mjs"], {cwd: root, encoding: "utf8", timeout: 10000});
+      assert.equal(run.status, 0, `${fault}: ${run.stderr}`);
+    } finally { rmSync(root, {recursive: true, force: true}); }
+  }
+});

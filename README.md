@@ -69,107 +69,119 @@ const authority = PolicyAuthority.fromPolicy({
 });
 
 const store = ControlStore.open("control.db");
-const blobs = new BlobStore("blobs", store);
-const session = await new PortableRuntime(store).createSession({
-  policyRef: "policy://demo",
-});
-const adapter = new LocalProcessAdapter({ supervisorDir: "./supervisor" });
+let sessionId;
+try {
+  const blobs = new BlobStore("blobs", store);
+  const session = await new PortableRuntime(store).createSession({
+    policyRef: "policy://demo",
+  });
+  sessionId = session.id;
+  const adapter = new LocalProcessAdapter({ supervisorDir: "./supervisor" });
 
-// Attach one environment. The request key makes the acquisition durable.
-const compute = await session.attach({
-  adapter,
-  request: { name: "build", providerId: "local-process", requires: {} },
-  requestKey: "attach-build-1",
-  principal: "user://me",
-  authority,
-});
-const ref = {
-  sessionId: session.id,
-  attachmentId: compute.attachmentId,
-  generation: compute.generation,
-};
-const environmentId = compute.environmentId;
-if (environmentId === undefined) {
-  throw new Error("The attachment names no environment.");
-}
-
-// Admit, dispatch, settle: the record exists before the provider runs.
-// Only the caller that wins the dispatch claim reaches the provider;
-// a retry under the same request key adopts the recorded outcome.
-const input = { command: "node", args: ["--version"] };
-const admitted = await session.invoke(
-  {
-    attachment: ref,
-    capability: "exec.process@1",
-    operation: "run",
-    input,
-    requestKey: "version-1",
-  },
-  { authority },
-);
-const claim = await session.claimDispatch(admitted.id);
-if (claim.claimed) {
-  const lease = adapter.lease(environmentId);
+  // Attach one environment. The request key makes the acquisition durable.
+  const compute = await session.attach({
+    adapter,
+    request: { name: "build", providerId: "local-process", requires: {} },
+    requestKey: "attach-build-1",
+    principal: "user://me",
+    authority,
+  });
+  const ref = {
+    sessionId: session.id,
+    attachmentId: compute.attachmentId,
+    generation: compute.generation,
+  };
   try {
-    const answered = await lease.invoke({
-      operationId: admitted.id,
-      capability: "exec.process@1",
-      operation: "run",
-      input,
-      environmentId: lease.environmentId,
-      limits: {},
-    });
-    if (answered.status === "completed") {
-      await session.settle(admitted.id, {
-        kind: "completed",
-        resultRef: JSON.stringify(answered.result ?? null),
-      });
-    } else {
-      // The provider answered no: record its failure, never success.
-      await session.settle(admitted.id, {
-        kind: "failed",
-        error:
-          answered.error ??
-          portableError("ProviderFailed", `The provider answered ${answered.status}.`),
-      });
+    const environmentId = compute.environmentId;
+    if (environmentId === undefined) {
+      throw new Error("The attachment names no environment.");
     }
-  } catch (error) {
-    // The call threw, so the effect may or may not have happened: the
-    // record settles unknown, and reconciliation resolves it later.
-    await session.settle(admitted.id, {
-      kind: "unknown",
-      error: portableError(
-        "ProviderUnavailable",
-        error instanceof Error ? error.message : String(error),
-        { retry: "after-reconciliation" },
-      ),
+
+    // Admit, dispatch, settle: the record exists before the provider runs.
+    // Only the caller that wins the dispatch claim reaches the provider;
+    // a retry under the same request key adopts the recorded outcome.
+    const input = { command: "node", args: ["--version"] };
+    const admitted = await session.invoke(
+      {
+        attachment: ref,
+        capability: "exec.process@1",
+        operation: "run",
+        input,
+        requestKey: "version-1",
+      },
+      { authority },
+    );
+    const claim = await session.claimDispatch(admitted.id);
+    if (claim.claimed) {
+      const lease = adapter.lease(environmentId);
+      try {
+        const answered = await lease.invoke({
+          operationId: admitted.id,
+          capability: "exec.process@1",
+          operation: "run",
+          input,
+          environmentId: lease.environmentId,
+          limits: {},
+        });
+        if (answered.status === "completed") {
+          await session.settle(admitted.id, {
+            kind: "completed",
+            resultRef: JSON.stringify(answered.result ?? null),
+          });
+        } else {
+          // The provider answered no: record its failure, never success.
+          await session.settle(admitted.id, {
+            kind: "failed",
+            error:
+              answered.error ??
+              portableError("ProviderFailed", `The provider answered ${answered.status}.`),
+          });
+        }
+      } catch (error) {
+        // The call threw, so the effect may or may not have happened: the
+        // record settles unknown, and reconciliation resolves it later.
+        await session.settle(admitted.id, {
+          kind: "unknown",
+          error: portableError(
+            "ProviderUnavailable",
+            error instanceof Error ? error.message : String(error),
+            { retry: "after-reconciliation" },
+          ),
+        });
+      }
+    }
+
+    // Checkpoint the bridge directory as one immutable revision.
+    mkdirSync("repo", { recursive: true });
+    writeFileSync("repo/notes.txt", "one bridge\n");
+    const checkpoint = await session.checkpoint(
+      blobs,
+      { requestKey: "snapshot-1", source: { kind: "bridge", rootPath: "./repo" } },
+      { stability: { kind: "locked", detail: "No bridge writer is active." } },
+    );
+    console.log("checkpoint", checkpoint.revision.id);
+  } finally {
+    // Release even if invocation or checkpointing fails.
+    await session.release(ref, "release-build-1", {
+      adapter,
+      principal: "user://me",
+      authority,
     });
   }
+} finally {
+  // A failed attachment or release must also close the store.
+  store.close();
 }
 
-// Checkpoint the bridge directory as one immutable revision.
-mkdirSync("repo", { recursive: true });
-writeFileSync("repo/notes.txt", "one bridge\n");
-const checkpoint = await session.checkpoint(
-  blobs,
-  { requestKey: "snapshot-1", source: { kind: "bridge", rootPath: "./repo" } },
-  { stability: { kind: "locked", detail: "No bridge writer is active." } },
-);
-console.log("checkpoint", checkpoint.revision.id);
-
-// Release the environment, close the store. A later process reopens
-// the session with the revision retained and no conversation restored.
-await session.release(ref, "release-build-1", {
-  adapter,
-  principal: "user://me",
-  authority,
-});
-store.close();
+// A later process reopens the retained revision and session records.
 const reopenStore = ControlStore.open("control.db");
-const again = await new PortableRuntime(reopenStore).openSession(session.id);
-const report = await again.reopen(); // report.conversationRestored === false
-console.log("conversationRestored", report.conversationRestored);
-reopenStore.close();
+try {
+  const again = await new PortableRuntime(reopenStore).openSession(sessionId);
+  const report = await again.reopen(); // report.conversationRestored === false
+  console.log("conversationRestored", report.conversationRestored);
+} finally {
+  reopenStore.close();
+}
 ```
 
 The CLI calls the same contracts. See [the CLI reference](docs/cli.md):
