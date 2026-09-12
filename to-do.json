@@ -1240,7 +1240,7 @@
     "id": "T049",
     "title": "Implement CLI configuration and output conventions",
     "priority": 3,
-    "status": "todo",
+    "status": "done",
     "details": "Build the thin CLI with explicit session selection, request files, standard input, and structured output.",
     "depends_on": [
       "T003",

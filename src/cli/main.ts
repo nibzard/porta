@@ -25,5 +25,5 @@ if (isMainModule()) {
       process.stderr.write(`${line}\n`);
     },
   };
-  process.exitCode = runCli(process.argv.slice(2), io);
+  process.exitCode = await runCli(process.argv.slice(2), io);
 }
