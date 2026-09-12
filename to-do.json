@@ -1501,7 +1501,7 @@
     "id": "T060",
     "title": "Expose conformance through the CLI",
     "priority": 3,
-    "status": "todo",
+    "status": "done",
     "details": "Wire the conformance command to adapter loading, profile selection, and report output.",
     "depends_on": [
       "T049",

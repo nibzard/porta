@@ -27,6 +27,15 @@ import type {
   EnvironmentAdapter,
   EnvironmentLease,
 } from "../schema/adapter.js";
+import { runConformance } from "../conformance/runner.js";
+import type { ConformanceCase } from "../conformance/runner.js";
+import { acquisitionPolicyCases } from "../conformance/cases/acquisition-policy.js";
+import { workspaceCases } from "../conformance/cases/workspace.js";
+import { processOperationCases } from "../conformance/cases/process-operations.js";
+import { pythonCases } from "../conformance/cases/python.js";
+import { replacementResourceCases } from "../conformance/cases/replacement-resources.js";
+import { eventsCases } from "../conformance/cases/events.js";
+import { bundleCases } from "../conformance/cases/bundle.js";
 
 /**
  * Command implementations of the Portable CLI (SPEC.md section 16).
@@ -74,6 +83,8 @@ export async function openRuntimeCommand(parsed: ParsedArguments, io: CliIo): Pr
       return events(parsed, io);
     case "recover":
       return recover(parsed, io);
+    case "conformance":
+      return conformance(parsed, io);
     default:
       throw usageError(`Unknown command: ${command}`);
   }
@@ -313,6 +324,72 @@ async function recover(parsed: ParsedArguments, io: CliIo): Promise<number> {
   const { session } = await openInvocation(parsed);
   emit(io, await session.reopen());
   return 0;
+}
+
+/**
+ * The case packs a conformance run can select (SPEC.md section 21).
+ *
+ * A profile names one pack; omitting `--profile` selects every pack.
+ */
+const CONFORMANCE_PACKS: Readonly<Record<string, () => ConformanceCase[]>> = {
+  "acquisition-policy": acquisitionPolicyCases,
+  workspace: workspaceCases,
+  "process-operations": processOperationCases,
+  python: pythonCases,
+  "replacement-resources": replacementResourceCases,
+  events: eventsCases,
+  bundle: bundleCases,
+};
+
+/**
+ * Run the conformance packs against one loaded adapter.
+ *
+ * The report prints as one machine record. Failures and skips stay
+ * distinct everywhere: a failing run exits 1, a run whose only blemish
+ * is a skip exits 3, because skipped support is not established
+ * support. Effect and payment grants default refused; the report
+ * records the authority the run actually had.
+ */
+async function conformance(parsed: ParsedArguments, io: CliIo): Promise<number> {
+  const adapter = await loadAdapter(valueOf(parsed, "--adapter"));
+  const selected = parsed.values.get("--profile");
+  const profiles = selected === undefined ? Object.keys(CONFORMANCE_PACKS) : selected.split(",");
+  const unknown = profiles.filter((name) => CONFORMANCE_PACKS[name] === undefined);
+  if (unknown.length > 0) {
+    throw usageError(`Unknown conformance profile: ${unknown.join(", ")}.`);
+  }
+  const cases = profiles.flatMap((name) => CONFORMANCE_PACKS[name]!());
+  const offers = await adapter.describe();
+  const timeout = parsed.values.get("--case-timeout-ms");
+  const report = await runConformance(
+    { name: profiles.join("+"), adapter, cases },
+    {
+      authority: {
+        principal: parsed.values.get("--principal") ?? "conformance://cli",
+        policyRef: parsed.values.get("--policy-ref") ?? "policy://conformance",
+        externalEffects: parsed.booleans.has("--external-effects"),
+        paidAllocation: parsed.booleans.has("--paid-allocation"),
+      },
+      adapterVersion: valueOf(parsed, "--adapter-version"),
+      // The adapter's own offers state the provider configuration the
+      // run executed against (SPEC.md section 21).
+      providerConfiguration: {
+        offers: offers.map((offer) => ({
+          providerId: offer.providerId,
+          adapterId: offer.adapterId,
+          platform: offer.platform,
+          capabilities: offer.capabilities.map((capability) => capability.id),
+          enforcement: offer.enforcement,
+        })),
+      },
+      ...(timeout !== undefined ? { caseTimeoutMs: positiveInteger(timeout, "--case-timeout-ms") } : {}),
+    },
+  );
+  emit(io, report);
+  if (report.verdict === "fail") {
+    return 1;
+  }
+  return report.verdict === "incomplete" ? 3 : 0;
 }
 
 /** The default bind transport: it refuses, honestly. */

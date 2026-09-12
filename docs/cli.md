@@ -230,6 +230,33 @@ durable in-flight operations exactly as stored, and the lease state
 of every attachment. The report says `conversationRestored: false`
 because reopening restores records, never a model conversation.
 
+## Conformance
+
+`conformance` runs the SPEC.md section 21 case packs against one
+loaded adapter module and prints the machine report:
+
+```text
+portable conformance --adapter ./worker-adapter.mjs \
+  --adapter-version 1.2.3 --profile events,bundle
+```
+
+The report identifies the specification version, the adapter version
+you stated, the adapter's own offers as the provider configuration,
+the tested profiles, and every case outcome. `--profile` accepts a
+comma-separated list; omit it to run every pack.
+
+Cases that cause external effects or allocate paid resources run
+only under the matching grant, `--external-effects` or
+`--paid-allocation`. Both default refused. Without a grant the case
+skips and the skip names the missing grant.
+
+Failures and skips stay distinct in the record and the exit status:
+
+- Every case passes: exit 0.
+- Any case fails: exit 1, a known failure.
+- No failure but any skip: exit 3, because skipped support is not
+  established support.
+
 ## Conflicts change nothing
 
 Every refusal path leaves durable state and files untouched:

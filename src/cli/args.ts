@@ -55,10 +55,22 @@ const COMMANDS: ReadonlyMap<string, CommandSpec> = new Map([
   ],
   ["events", { requires: [], extras: ["--after"] }],
   ["recover", { requires: [], extras: [] }],
+  [
+    "conformance",
+    {
+      requires: ["--adapter", "--adapter-version"],
+      extras: ["--profile", "--principal", "--policy-ref", "--case-timeout-ms"],
+    },
+  ],
 ]);
 
 /** Boolean options: they take no value. */
-const BOOLEAN_FLAGS = new Set(["--json", "--plan"]);
+const BOOLEAN_FLAGS = new Set([
+  "--json",
+  "--plan",
+  "--external-effects",
+  "--paid-allocation",
+]);
 
 /** One parsed invocation. */
 export interface ParsedArguments {
@@ -172,12 +184,18 @@ export function commandUsage(): string {
     "           --adapter MODULE --principal NAME",
     "  events [--after SEQUENCE]",
     "  recover",
+    "  conformance --adapter MODULE --adapter-version VERSION",
+    "             [--profile NAME[,NAME ...]] [--principal NAME]",
+    "             [--policy-ref REF] [--case-timeout-ms N]",
+    "             [--external-effects] [--paid-allocation]",
     "",
     "The checkpoint, attach, invoke, and replace request files hold one",
     "JSON object each. The replace file wraps a replacement request in",
     "`request` and its destination flow in `destination` (adapterModule,",
     "copyRoot, principal). Adapter modules export `adapter`. The",
-    "conformance command arrives with the conformance pack.",
+    "conformance command runs the case packs against the loaded adapter;",
+    "effect and payment grants default refused, and a run with skips",
+    "exits 3 exactly as an unestablished outcome should.",
     "  -h, --help     Show this help.",
     "  -v, --version  Print the Portable library version.",
   ].join("\n");
