@@ -115,6 +115,30 @@ async function acquireOnce(context: ConformanceContext): Promise<EnvironmentLeas
 }
 
 /**
+ * The skip for a capability the loaded adapter never offered, or null.
+ *
+ * The process cases test one capability profile, so an adapter that
+ * never claimed it reports a skip — never a failure: unclaimed
+ * support is unestablished, not violated (SPEC.md section 21).
+ */
+async function notOffered(
+  context: ConformanceContext,
+): Promise<ConformanceCaseAnswer | null> {
+  const offers = await context.adapter.describe();
+  const offered = offers.some((entry) =>
+    entry.capabilities.some((capability) => capability.id === PROCESS_CAPABILITY_ID),
+  );
+  if (offered) {
+    return null;
+  }
+  return {
+    outcome: "skip",
+    reason: "capability-not-offered",
+    detail: "The loaded adapter offers no exec.process@1 capability.",
+  };
+}
+
+/**
  * Run one process through the loaded adapter and return its result.
  *
  * A run that does not complete is a finding about the adapter; the
@@ -221,6 +245,10 @@ export function processOperationCases(): ConformanceCase[] {
       summary: "Arguments pass verbatim: no splitting, globbing, or quoting.",
       effects: { external: true },
       async run(context) {
+        const unoffered = await notOffered(context);
+        if (unoffered !== null) {
+          return unoffered;
+        }
         const lease = await acquireOnce(context);
         const arguments_ = ["a b", "c$d", "*.no-glob", "it's", "tab\tand-new\nline"];
         const result = await runProcess(lease, {
@@ -245,6 +273,10 @@ export function processOperationCases(): ConformanceCase[] {
       summary: "A relative working directory resolves inside the authorized copy.",
       effects: { external: true },
       async run(context) {
+        const unoffered = await notOffered(context);
+        if (unoffered !== null) {
+          return unoffered;
+        }
         const lease = await acquireOnce(context);
         const defaultDir = textOf((await runProcess(lease, { command: "pwd" })).stdout).trim();
         if (defaultDir.length === 0 || !defaultDir.startsWith("/")) {
@@ -275,6 +307,10 @@ export function processOperationCases(): ConformanceCase[] {
       summary: "Declared environment additions reach the process; undeclared names do not.",
       effects: { external: true },
       async run(context) {
+        const unoffered = await notOffered(context);
+        if (unoffered !== null) {
+          return unoffered;
+        }
         const lease = await acquireOnce(context);
         const name = `PORTA_CONF_PROBE_${randomUUID().slice(0, 8)}`;
         const probe = `printf %s "\${${name}-UNSET}"`;
@@ -307,6 +343,10 @@ export function processOperationCases(): ConformanceCase[] {
       summary: "Captures carry bytes outside UTF-8 text without damage.",
       effects: { external: true },
       async run(context) {
+        const unoffered = await notOffered(context);
+        if (unoffered !== null) {
+          return unoffered;
+        }
         const lease = await acquireOnce(context);
         const attributes = await declaredAttributes(lease);
         if (attributes.binaryOutput !== true) {
@@ -339,6 +379,10 @@ export function processOperationCases(): ConformanceCase[] {
       summary: "Any exit code completes the operation and reports the code.",
       effects: { external: true },
       async run(context) {
+        const unoffered = await notOffered(context);
+        if (unoffered !== null) {
+          return unoffered;
+        }
         const lease = await acquireOnce(context);
         const clean = await runProcess(lease, { command: "sh", args: ["-c", "exit 0"] });
         if (clean.exitCode !== 0) {
@@ -369,6 +413,10 @@ export function processOperationCases(): ConformanceCase[] {
       summary: "A declared capture limit truncates and says so.",
       effects: { external: true },
       async run(context) {
+        const unoffered = await notOffered(context);
+        if (unoffered !== null) {
+          return unoffered;
+        }
         const lease = await acquireOnce(context);
         const result = await runProcess(lease, {
           command: "printf",
@@ -399,6 +447,10 @@ export function processOperationCases(): ConformanceCase[] {
       summary: "A wall-clock timeout ends the process and reports it as timed out.",
       effects: { external: true },
       async run(context) {
+        const unoffered = await notOffered(context);
+        if (unoffered !== null) {
+          return unoffered;
+        }
         const lease = await acquireOnce(context);
         const started = Date.now();
         const result = await runProcess(lease, {
@@ -431,6 +483,10 @@ export function processOperationCases(): ConformanceCase[] {
       summary: "The declared descendant termination claim matches observed behavior.",
       effects: { external: true },
       async run(context): Promise<ConformanceCaseAnswer> {
+        const unoffered = await notOffered(context);
+        if (unoffered !== null) {
+          return unoffered;
+        }
         const lease = await acquireOnce(context);
         const claim = await descendantClaim(lease);
         if (claim === null || claim === "none") {

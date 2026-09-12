@@ -1605,7 +1605,7 @@
     "id": "T064",
     "title": "Complete release documentation and coverage review",
     "priority": 3,
-    "status": "todo",
+    "status": "done",
     "details": "Document setup, schemas, providers, lifecycle behavior, and conformance evidence; review every first-release requirement.",
     "depends_on": [
       "T063"

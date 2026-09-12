@@ -1434,7 +1434,7 @@ async function demonstrationOf(
     principal,
   });
   // One pass settles only the obligations its provider owns; the
-  // other provider's stay pending for their own pass (SPEC.md 15).
+  // other provider's stay pending for their own pass (SPEC.md 8).
   const cleanupOutcomes = [
     ...localCleanup.outcomes.map((outcome) => ({ pass: local.id, ...outcome })),
     ...destinationCleanup.outcomes.map((outcome) => ({

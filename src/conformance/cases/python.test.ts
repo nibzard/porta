@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MontyPythonAdapter } from "../../adapters/monty-python-adapter.js";
+import { FakeEnvironmentAdapter } from "../../adapters/test-adapter.js";
 import { runConformance } from "../runner.js";
 import { pythonCases } from "./python.js";
 
@@ -92,4 +93,31 @@ test("the evaluating cases wait for their test authority", async () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("the pack skips, not fails, against an adapter without python", async () => {
+  const report = await runConformance(
+    {
+      name: "python",
+      adapter: new FakeEnvironmentAdapter(),
+      cases: pythonCases(),
+    },
+    {
+      authority: {
+        principal: "conformance-test",
+        policyRef: "policy://conformance",
+        externalEffects: true,
+      },
+      adapterVersion: "1.0.0-test",
+      providerConfiguration: { provider: "fake-local" },
+    },
+  );
+  // An adapter that never claimed the capability establishes nothing
+  // about it; the honest answer is a skip, never a failure.
+  assert.equal(report.summary.failed, 0);
+  assert.equal(report.summary.skipped, REQUIRED_CASES.length);
+  assert.ok(
+    report.results.every((entry) => entry.reason === "capability-not-offered"),
+  );
+  assert.equal(report.verdict, "incomplete");
 });

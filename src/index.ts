@@ -130,6 +130,18 @@ export type {
 } from "./adapters/test-adapter.js";
 
 // Journal stream (durability helpers over the control store).
+// The durable control store one runtime runs over (SPEC.md section 5).
+// Embeddings construct the store to build a `PortableRuntime`; the
+// exports map exposes no deeper module path.
+export { ControlStore, StoreError } from "./store/control-store.js";
+export type {
+  CasValue,
+  MutationLease,
+  ResourceBindingRecord,
+  StoreErrorKind,
+  TransitionRecord,
+} from "./store/control-store.js";
+
 export {
   EventDeduplicator,
   SessionEventStream,

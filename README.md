@@ -4,19 +4,15 @@ Portable lets agents attach compute, browsers, and other execution capabilities 
 
 Keep your agent. Attach the execution capabilities it needs. Release compute when the work finishes.
 
-**Status:** Implementation in progress. The TypeScript toolchain, library entry, and CLI bootstrap exist. Runtime features, stores, and adapters arrive by milestone.
-
-Read the [full specification](SPEC.md) for the proposed contracts, failure behavior, interfaces, and release criteria.
+**Status:** First release complete. The library, CLI, adapters, conformance suite, and acceptance demonstration are implemented against [the specification](SPEC.md) version `0.1.0-draft.1`. Every normative statement is mapped to code and evidence in [the release coverage review](docs/release-coverage.md).
 
 ## The idea
 
 An agent can need several environments during one task: local files, remote builds, and a browser with persistent login state.
 
-Portable proposes a common contract for attaching those environments and handing work between them. Each environment advertises its capabilities. The agent requests the capabilities it needs within the user's authorized limits.
+Portable is a common contract for attaching those environments and handing work between them. Each environment advertises its capabilities. The agent requests the capabilities it needs within the user's authorized limits.
 
 The harness runs the agent loop and manages its conversation, tools, and approvals. Portable manages execution attachments, workspace revisions, and resource lifetimes.
-
-Claude Code, Codex, OpenCode, and custom harnesses are intended integration targets.
 
 ```mermaid
 flowchart TD
@@ -38,21 +34,99 @@ flowchart TD
 | Move | Run work against the same workspace revision on another provider or architecture. |
 | Compose | Use independent providers for compute, browser sessions, and workspace storage. |
 
-## First demonstration
+## Use the library
 
-The first demonstration uses one harness, lightweight Python, local execution, remote execution, and an independently attached browser.
+One session, one attachment, one checkpoint, one release:
 
-1. The agent inspects repository data through lightweight Python.
-2. Portable attaches local execution when the task requires native processes.
-3. Portable checkpoints the workspace and attaches an independent browser.
-4. Portable replaces local compute with remote compute and reconstructs the application server.
-5. The existing browser inspects the application through a new service connection.
-6. Portable demonstrates recovery from an injected replacement failure and returns results with their input revisions.
-7. Portable releases compute and reports which workspace state and resources remain available.
+```ts
+import {
+  BlobStore,
+  ControlStore,
+  LocalProcessAdapter,
+  PolicyAuthority,
+  PortableRuntime,
+} from "portable";
 
-The browser session can remain attached after compute is released. The application connection ends when its server stops.
+const store = ControlStore.open("control.db");
+const blobs = new BlobStore("blobs", store);
+const session = await new PortableRuntime(store).createSession({
+  policyRef: "policy://demo",
+});
 
-Local edits made during verification create newer work. Test results for an earlier revision do not verify those edits.
+const authority = PolicyAuthority.fromPolicy({
+  schemaVersion: 1,
+  providers: ["local-process"],
+  operations: ["exec.process@1"],
+});
+const adapter = new LocalProcessAdapter({ supervisorDir: "./supervisor" });
+
+// Attach one environment. The request key makes the acquisition durable.
+const compute = await session.attach({
+  adapter,
+  request: { name: "build", providerId: "local-process", requires: {} },
+  requestKey: "attach-build-1",
+  principal: "user://me",
+  authority,
+});
+const ref = {
+  sessionId: session.id,
+  attachmentId: compute.attachmentId,
+  generation: compute.generation,
+};
+
+// Admit, dispatch, settle: the record exists before the provider runs,
+// and the outcome lands before the caller hears it.
+const admitted = await session.invoke(
+  {
+    attachment: ref,
+    capability: "exec.process@1",
+    operation: "run",
+    input: { command: "node", args: ["--version"] },
+    requestKey: "version-1",
+  },
+  { authority },
+);
+await session.markDispatched(admitted.id);
+const lease = adapter.lease(compute.environmentId!);
+const answered = await lease.invoke({
+  operationId: admitted.id,
+  capability: "exec.process@1",
+  operation: "run",
+  input: { command: "node", args: ["--version"] },
+  environmentId: lease.environmentId,
+  limits: {},
+});
+await session.settle(admitted.id, {
+  kind: "completed",
+  resultRef: JSON.stringify(answered.result ?? null),
+});
+
+// Checkpoint the workspace as one immutable revision.
+const checkpoint = await session.checkpoint(
+  blobs,
+  { requestKey: "snapshot-1", source: { kind: "bridge", rootPath: "./repo" } },
+  { stability: { kind: "locked", detail: "No bridge writer is active." } },
+);
+
+// Release the environment. A later process reopens the session with
+// the revision retained and no conversation restored.
+await session.release(ref, "release-build-1", { adapter, principal: "user://me" });
+store.close();
+const again = await new PortableRuntime(ControlStore.open("control.db")).openSession(
+  session.id,
+);
+const report = await again.reopen(); // report.conversationRestored === false
+```
+
+The CLI calls the same contracts. See [the CLI reference](docs/cli.md):
+
+```bash
+node dist/cli/main.js attach --session ses_x --request attach-request.json
+node dist/cli/main.js conformance --adapter ./worker-adapter.mjs \
+  --adapter-version 1.2.3 --external-effects
+```
+
+For the OpenAI Agents SDK, [`AgentsToolkit`](docs/harness.md) exposes the same flow as three tools: `portable_environment`, `portable_checkpoint`, and `portable_run`.
 
 ## Core contracts
 
@@ -62,45 +136,64 @@ A capability describes versioned behavior, such as process execution, workspace 
 
 Requirements are mandatory. Preferences, such as locality, can be relaxed only within the authorized policy.
 
-Adapters must define operation behavior, including cancellation, retries, output limits, and side effects. Conformance tests check those claims.
+Adapters define operation behavior, including cancellation, retries, output limits, and side effects. The conformance suite checks those claims.
 
 ### Workspaces
 
 A workspace contains portable files and explicit durable state. Each checkpoint produces an immutable revision.
 
-The first implementation should use one authoritative writer. Remote environments receive a revision and return proposed changes. Applying those changes requires checking the base revision and handling conflicts explicitly.
+Version one uses one authoritative writer. Remote environments receive a revision and return proposed changes. Applying a change checks the base revision and reports conflicts explicitly; nothing merges automatically.
 
-Execution results record the revision they use. Recreated dependencies and generated artifacts need enough provenance to interpret those results.
+Execution results record the revision they used and whether the working copy changed.
 
 ### Resources
 
 Processes, browser sessions, and other resources have explicit references and lifetimes. A resource identifier grants no authority by itself.
 
-Each attachment has a generation number. Replacing an attachment invalidates its old handles without invalidating unrelated attachments.
+Each attachment has a generation number. Replacing an attachment invalidates its old handles without touching unrelated attachments.
 
 ### Handoffs
 
 A handoff reports which state is preserved, reconstructed, reattached, or invalidated.
 
-Before authority switches, the source remains authoritative. The implementation must record the switch durably and prevent stale writers from modifying authoritative state.
+Before authority switches, the source stays authoritative. The switch commits durably behind a fencing token, so a stale writer cannot commit after it.
 
-Recovery must handle failures before and after the switch. An operation with an uncertain outcome remains unknown until reconciled. Portable must not retry an unsafe operation automatically.
+Recovery handles failures before and after the switch. An operation with an uncertain outcome stays unknown until reconciled; Portable never retries an unsafe operation automatically.
 
 ### Authorization
 
-The harness supplies authorized limits. Portable checks requests against those limits and requires an environment that enforces them.
+The harness supplies the authenticated principal and the approved policy. Portable checks requests against those limits and requires an environment that enforces them.
 
 A request for network access is not approval. An advertised restriction is not evidence that the provider enforces it.
 
-## Integration approach
+## Known provider limitations
 
-Start with a TypeScript library and a thin command-line interface. Expose operations to describe, attach, invoke, checkpoint, replace, and release resources.
+These limits are honest and documented, with details in the
+[coverage review](docs/release-coverage.md#unsupported-requirements):
 
-A Model Context Protocol (MCP) server is deferred. The first release proves composition and replacement through the library contracts.
+- The automated acceptance demonstration uses a local stand-in, not a
+  remote Linux machine. The E2B adapter implements the remote Linux
+  profile but needs operator credentials, and none exist in a test
+  run. The stand-in identifies itself in every durable record.
+- The reference browser driver loads documents over HTTP and executes
+  no page script. It is not a rendered browser engine; a real
+  integration supplies its own driver.
+- `browser.cdp@1` is optional in the specification and no adapter
+  offers it.
+- Native snapshot restoration is optional and not implemented;
+  replacement reconstructs state through recipes.
 
-These tools provide an explicit route to Portable execution. They do not automatically redirect a harness's built-in shell or file tools.
+## Verify the release
 
-Each integration must define which workspace is authoritative and how local edits reach remote environments. Deeper harness integration can follow.
+The three release checks, with exact commands and expected outcomes,
+live in [the coverage review](docs/release-coverage.md#verified-workflows):
+
+1. Clean-checkout build: install from a fresh copy, run `npm test`.
+2. Local conformance suite: run the section 21 case packs against the
+   shipped adapters.
+3. Acceptance demonstration: the seven-step walk of section 22.1,
+   including the injected failure, the recovery, and the workspace
+   conflict.
 
 ## Scope
 
@@ -108,21 +201,7 @@ The first release targets execution composition and explicit work handoff. It do
 
 Remote execution does not keep a laptop-hosted harness running when the laptop shuts down. Continuous agent operation requires a persistent harness host or a separate resume mechanism.
 
-Model replacement, harness migration, and transparent process migration are outside the first release.
-
-## Evidence before expansion
-
-The first implementation should demonstrate:
-
-- A remote run against an identified workspace revision.
-- Conflict detection when local files change during remote work.
-- A browser session that survives compute replacement.
-- Rejection of handles from a replaced attachment.
-- Recovery from injected handoff failures without competing authoritative writers.
-- Explicit unknown outcomes when an operation's response is lost.
-- Rejection of environments that cannot satisfy authorized limits.
-
-The first release includes lightweight Python, local processes, remote Linux, and an independent browser. Add more architectures and generated adapters after these contracts hold across the initial adapters.
+Model replacement, harness migration, and transparent process migration are outside the first release. An MCP transport is deferred.
 
 The broader thesis: **An agent can outlive its computers.**
 
@@ -140,9 +219,11 @@ The implementation is a TypeScript library with a thin CLI. Node.js 22 or newer 
 Module boundaries follow the architecture in the specification:
 
 - `src/index.ts` is the library entry point. The CLI and harness integrations call it.
-- `src/cli` is the CLI. It calls library contracts and implements no lifecycle rules of its own.
-- `src/runtime` will hold request validation, routing, lifecycle, journaling, and replacement recovery. It never imports an adapter directly.
-- `src/store` will hold the durable control store and the content-addressed workspace store.
-- `src/adapters` will hold independent adapter modules loaded behind library interfaces.
+- `src/runtime` holds request validation, lifecycle, journaling, replacement, and recovery. It never imports an adapter.
+- `src/store` holds the durable control store and the content-addressed workspace store.
+- `src/adapters` holds independent adapter modules loaded behind library interfaces.
+- `src/conformance` holds the section 21 case packs and the report runner.
+- `src/acceptance` holds the section 22.1 demonstration driver.
+- `src/harness` holds the Agents SDK toolkit.
 
 Work items live in `to-do.json` with references to the specification sections they implement.

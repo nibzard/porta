@@ -73,6 +73,30 @@ async function acquireOnce(context: ConformanceContext): Promise<EnvironmentLeas
 }
 
 /**
+ * The skip for a capability the loaded adapter never offered, or null.
+ *
+ * A pack that tests one capability profile reports a skip — never a
+ * failure — when the adapter never claimed that profile: unclaimed
+ * support is unestablished, not violated (SPEC.md section 21).
+ */
+async function notOffered(
+  context: ConformanceContext,
+): Promise<ConformanceCaseAnswer | null> {
+  const offers = await context.adapter.describe();
+  const offered = offers.some((entry) =>
+    entry.capabilities.some((capability) => capability.id === PYTHON_CAPABILITY_ID),
+  );
+  if (offered) {
+    return null;
+  }
+  return {
+    outcome: "skip",
+    reason: "capability-not-offered",
+    detail: "The loaded adapter offers no exec.python@1 capability.",
+  };
+}
+
+/**
  * Evaluate one program on the loaded adapter and return its result.
  *
  * An operation that does not complete is a finding; the thrown
@@ -122,6 +146,10 @@ export function pythonCases(): ConformanceCase[] {
       summary: "The declared subset and isolation shape carry, and subset syntax runs.",
       effects: { external: true },
       async run(context) {
+        const unoffered = await notOffered(context);
+        if (unoffered !== null) {
+          return unoffered;
+        }
         const lease = await acquireOnce(context);
         const declared = await declaredOf(lease);
         if (!(PYTHON_SUBSETS as readonly string[]).includes(declared.subset)) {
@@ -169,6 +197,10 @@ export function pythonCases(): ConformanceCase[] {
       summary: "An import the declaration does not name raises a structured exception.",
       effects: { external: true },
       async run(context) {
+        const unoffered = await notOffered(context);
+        if (unoffered !== null) {
+          return unoffered;
+        }
         const lease = await acquireOnce(context);
         const declared = await declaredOf(lease);
         if (declared.imports.includes("*")) {
@@ -224,6 +256,10 @@ export function pythonCases(): ConformanceCase[] {
       summary: "Host-function bindings stay inside the declared names and shapes.",
       effects: { external: true },
       async run(context): Promise<ConformanceCaseAnswer> {
+        const unoffered = await notOffered(context);
+        if (unoffered !== null) {
+          return unoffered;
+        }
         const lease = await acquireOnce(context);
         const declared = await declaredOf(lease);
         // A name nobody offered refuses before any program runs.
@@ -301,6 +337,10 @@ export function pythonCases(): ConformanceCase[] {
       summary: "JSON values cross in and out; what the contract cannot carry refuses.",
       effects: { external: true },
       async run(context) {
+        const unoffered = await notOffered(context);
+        if (unoffered !== null) {
+          return unoffered;
+        }
         const lease = await acquireOnce(context);
         const payload = {
           rows: [1, 2.5, true, null],
@@ -354,6 +394,10 @@ export function pythonCases(): ConformanceCase[] {
       summary: "A raising program answers with its exception type and message.",
       effects: { external: true },
       async run(context) {
+        const unoffered = await notOffered(context);
+        if (unoffered !== null) {
+          return unoffered;
+        }
         const lease = await acquireOnce(context);
         const raised = await evaluate(lease, {
           source: 'raise ValueError("boom")',
@@ -399,6 +443,10 @@ export function pythonCases(): ConformanceCase[] {
       summary: "Nothing one call defines survives into the next, imports included.",
       effects: { external: true },
       async run(context) {
+        const unoffered = await notOffered(context);
+        if (unoffered !== null) {
+          return unoffered;
+        }
         const lease = await acquireOnce(context);
         const declared = await declaredOf(lease);
         const first = await evaluate(lease, { source: "leaked = 99\nleaked" });

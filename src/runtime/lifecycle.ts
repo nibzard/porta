@@ -431,7 +431,7 @@ async function settleObligation(
   if (request.providerId !== undefined && !names.servedProviders.has(request.providerId)) {
     // One provider may not confirm another provider's release: a pass
     // settles only what its adapter offers, and the obligation stays
-    // pending for the pass that owns it (SPEC.md section 15).
+    // pending for the pass that owns it (SPEC.md section 8).
     return {
       cleanupId: record.id,
       kind: record.kind,
