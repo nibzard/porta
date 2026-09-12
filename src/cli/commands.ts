@@ -427,7 +427,7 @@ async function openInvocation(
 }
 
 /** Map parsed configuration flags onto the resolver input. */
-function configInputOf(parsed: ParsedArguments): CliConfigInput {
+export function configInputOf(parsed: ParsedArguments): CliConfigInput {
   const input: CliConfigInput = {};
   const store = parsed.config.get("--store");
   if (store !== undefined) {

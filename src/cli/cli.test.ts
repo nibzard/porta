@@ -362,6 +362,159 @@ test("PORTABLE_STORE and PORTABLE_SESSION resolve like their flags", async () =>
   }
 });
 
+test("PORTABLE_POLICY admits attach, invoke, and materialize without the flag", async () => {
+  const fx = await fixture();
+  try {
+    process.env["PORTABLE_STORE"] = fx.storePath;
+    process.env["PORTABLE_SESSION"] = fx.sessionId;
+    process.env["PORTABLE_POLICY"] = fx.policyPath;
+
+    // Attach needs no --policy-file: the environment names the document.
+    const adapterPath = writeAdapterModule(fx, "env-adapter.mjs");
+    const attachRequest = join(fx.root, "attach.json");
+    writeFileSync(
+      attachRequest,
+      JSON.stringify({
+        name: "worker",
+        providerId: "fake-local",
+        requires: { "exec.process@1": { engine: { equals: "fake-process" } } },
+      }),
+    );
+    const attached = await cli([
+      "attach",
+      "--request",
+      attachRequest,
+      "--request-key",
+      "attach-env-1",
+      "--adapter",
+      adapterPath,
+      "--principal",
+      "user://cli",
+    ]);
+    assert.equal(attached.code, 0, attached.err.join("\n"));
+    const attachmentId = (recordOf(attached.out[0]) as { attachmentId: string }).attachmentId;
+
+    // Invoke runs under the environment policy too.
+    const invoked = await cli([
+      "invoke",
+      "--request",
+      writeInvokeRequest(fx, attachmentId, "op-env-1"),
+    ]);
+    assert.equal(invoked.code, 0, invoked.err.join("\n"));
+    assert.equal(recordOf(invoked.out[0])["status"], "accepted");
+
+    // Materialize needs the environment policy for its transfer checks.
+    const revisionId = await bridgeCheckpoint(fx, "cp-env-1");
+    const destination = join(fx.root, "copy");
+    const materialized = await cli([
+      "materialize",
+      "--revision",
+      revisionId,
+      "--destination",
+      destination,
+      "--mode",
+      "read-only",
+    ]);
+    assert.equal(materialized.code, 0, materialized.err.join("\n"));
+    assert.ok(existsSync(join(destination, "notes.txt")));
+  } finally {
+    delete process.env["PORTABLE_STORE"];
+    delete process.env["PORTABLE_SESSION"];
+    delete process.env["PORTABLE_POLICY"];
+    fx.restoreEnv();
+    rmSync(fx.root, { recursive: true, force: true });
+  }
+});
+
+test("an explicit --policy-file wins over PORTABLE_POLICY", async () => {
+  const fx = await fixture();
+  try {
+    const attachmentId = await attachWorker(fx);
+    const requestPath = writeInvokeRequest(fx, attachmentId, "op-precedence-1");
+
+    // The environment names a policy that grants no operation. The flag
+    // names the fixture's permissive policy; the flag must win.
+    const denyPath = join(fx.root, "deny.json");
+    writeFileSync(
+      denyPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        providers: ["fake-local"],
+        operations: [],
+        locations: ["local", "remote"],
+        transferDestinations: ["local"],
+        networkEgress: "unrestricted",
+        hostFilesystemAccess: true,
+        maxEnvironmentLifetimeMs: 86_400_000,
+        maxResources: {
+          memoryBytes: 4 * 1024 ** 3,
+          storageBytes: 4 * 1024 ** 3,
+          gpuMemoryBytes: 4 * 1024 ** 3,
+        },
+      }),
+    );
+    process.env["PORTABLE_STORE"] = fx.storePath;
+    process.env["PORTABLE_SESSION"] = fx.sessionId;
+    process.env["PORTABLE_POLICY"] = denyPath;
+    const granted = await cli(["invoke", "--request", requestPath, "--policy-file", fx.policyPath]);
+    assert.equal(granted.code, 0, granted.err.join("\n"));
+
+    // An invalid explicit file never falls back to the environment: the
+    // invocation fails as invalid input instead of borrowing the valid
+    // policy from PORTABLE_POLICY.
+    process.env["PORTABLE_POLICY"] = fx.policyPath;
+    const invalid = await cli([
+      "invoke",
+      "--request",
+      requestPath,
+      "--policy-file",
+      join(fx.root, "missing.json"),
+    ]);
+    assert.equal(invalid.code, 2);
+    assert.ok(invalid.err[0]?.includes("does not exist or does not read"));
+
+    // The same request under the denying environment policy alone fails
+    // as a known denial, proving the first invocation used the flag.
+    process.env["PORTABLE_POLICY"] = denyPath;
+    const denied = await cli(["invoke", "--request", writeInvokeRequest(fx, attachmentId, "op-precedence-2")]);
+    assert.equal(denied.code, 1);
+    assert.ok(denied.err[0]?.includes("not allowed"));
+  } finally {
+    delete process.env["PORTABLE_STORE"];
+    delete process.env["PORTABLE_SESSION"];
+    delete process.env["PORTABLE_POLICY"];
+    fx.restoreEnv();
+    rmSync(fx.root, { recursive: true, force: true });
+  }
+});
+
+test("missing or empty policy configuration exits 2 with a clear error", async () => {
+  const fx = await fixture();
+  try {
+    process.env["PORTABLE_STORE"] = fx.storePath;
+    process.env["PORTABLE_SESSION"] = fx.sessionId;
+    const attachmentId = await attachWorker(fx);
+    const requestPath = writeInvokeRequest(fx, attachmentId, "op-missing-policy-1");
+
+    // Nothing names a policy document.
+    const absent = await cli(["invoke", "--request", requestPath]);
+    assert.equal(absent.code, 2);
+    assert.deepEqual(absent.out, []);
+    assert.ok(absent.err[0]?.includes("needs a policy authority"));
+    assert.ok(absent.err[0]?.includes("PORTABLE_POLICY"));
+
+    // An empty value is absent, not a path.
+    process.env["PORTABLE_POLICY"] = "";
+    const empty = await cli(["invoke", "--request", requestPath]);
+    assert.equal(empty.code, 2);
+    assert.ok(empty.err[0]?.includes("needs a policy authority"));
+  } finally {
+    delete process.env["PORTABLE_POLICY"];
+    fx.restoreEnv();
+    rmSync(fx.root, { recursive: true, force: true });
+  }
+});
+
 // -- Session lifecycle -------------------------------------------------------
 
 test("session create prints one JSON session record and exits 0", async () => {

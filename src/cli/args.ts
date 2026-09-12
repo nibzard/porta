@@ -12,52 +12,66 @@ const CONFIG_FLAGS = ["--store", "--policy-file", "--session"];
 
 /** One command's option requirements. */
 export interface CommandSpec {
-  /** Options the command refuses to run without. */
+  /** Request options the command refuses to run without. */
   requires: readonly string[];
   /** Optional command-specific options. */
   extras: readonly string[];
   /** Boolean options the command accepts; `--json` applies everywhere. */
   booleans: readonly string[];
+  /** Whether the command needs a policy authority, from flag or environment. */
+  requiresPolicy: boolean;
 }
 
 /** The boolean options every command accepts. */
 const ANY_BOOLEAN = ["--json"];
 
-/** The full command table. */
+/** The full command table. `--policy-file` is configuration, not a
+ * request option: these commands resolve it from the flag or from
+ * `PORTABLE_POLICY` before any store opens. */
 const COMMANDS: ReadonlyMap<string, CommandSpec> = new Map([
-  ["session create", { requires: ["--policy-ref"], extras: ["--workspace"], booleans: ANY_BOOLEAN }],
-  ["describe", { requires: [], extras: [], booleans: ANY_BOOLEAN }],
+  [
+    "session create",
+    { requires: ["--policy-ref"], extras: ["--workspace"], booleans: ANY_BOOLEAN, requiresPolicy: false },
+  ],
+  ["describe", { requires: [], extras: [], booleans: ANY_BOOLEAN, requiresPolicy: false }],
   [
     "checkpoint",
-    { requires: ["--request", "--stability"], extras: ["--stability-detail"], booleans: ANY_BOOLEAN },
+    {
+      requires: ["--request", "--stability"],
+      extras: ["--stability-detail"],
+      booleans: ANY_BOOLEAN,
+      requiresPolicy: false,
+    },
   ],
   [
     "materialize",
-    { requires: ["--revision", "--destination", "--mode", "--policy-file"], extras: [], booleans: ANY_BOOLEAN },
+    { requires: ["--revision", "--destination", "--mode"], extras: [], booleans: ANY_BOOLEAN, requiresPolicy: true },
   ],
   [
     "attach",
     {
-      requires: ["--request", "--request-key", "--adapter", "--principal", "--policy-file"],
+      requires: ["--request", "--request-key", "--adapter", "--principal"],
       extras: [],
       booleans: ANY_BOOLEAN,
+      requiresPolicy: true,
     },
   ],
-  ["invoke", { requires: ["--request", "--policy-file"], extras: [], booleans: ANY_BOOLEAN }],
-  ["operation inspect", { requires: ["--operation"], extras: [], booleans: ANY_BOOLEAN }],
-  ["operation cancel", { requires: ["--operation", "--adapter"], extras: [], booleans: ANY_BOOLEAN }],
+  ["invoke", { requires: ["--request"], extras: [], booleans: ANY_BOOLEAN, requiresPolicy: true }],
+  ["operation inspect", { requires: ["--operation"], extras: [], booleans: ANY_BOOLEAN, requiresPolicy: false }],
+  ["operation cancel", { requires: ["--operation", "--adapter"], extras: [], booleans: ANY_BOOLEAN, requiresPolicy: false }],
   [
     "workspace propose",
     {
       requires: ["--attachment", "--generation", "--copy", "--request-key", "--stability"],
       extras: ["--stability-detail"],
       booleans: ANY_BOOLEAN,
+      requiresPolicy: false,
     },
   ],
-  ["workspace accept", { requires: ["--proposal", "--expected-head"], extras: [], booleans: ANY_BOOLEAN }],
+  ["workspace accept", { requires: ["--proposal", "--expected-head"], extras: [], booleans: ANY_BOOLEAN, requiresPolicy: false }],
   [
     "replace",
-    { requires: ["--request"], extras: [], booleans: ["--json", "--plan"] },
+    { requires: ["--request"], extras: [], booleans: ["--json", "--plan"], requiresPolicy: false },
   ],
   [
     "release",
@@ -65,16 +79,18 @@ const COMMANDS: ReadonlyMap<string, CommandSpec> = new Map([
       requires: ["--attachment", "--generation", "--request-key", "--adapter", "--principal"],
       extras: [],
       booleans: ANY_BOOLEAN,
+      requiresPolicy: false,
     },
   ],
-  ["events", { requires: [], extras: ["--after"], booleans: ANY_BOOLEAN }],
-  ["recover", { requires: [], extras: [], booleans: ANY_BOOLEAN }],
+  ["events", { requires: [], extras: ["--after"], booleans: ANY_BOOLEAN, requiresPolicy: false }],
+  ["recover", { requires: [], extras: [], booleans: ANY_BOOLEAN, requiresPolicy: false }],
   [
     "conformance",
     {
       requires: ["--adapter", "--adapter-version"],
       extras: ["--profile", "--principal", "--policy-ref", "--case-timeout-ms"],
       booleans: ["--json", "--external-effects", "--paid-allocation"],
+      requiresPolicy: false,
     },
   ],
 ]);

@@ -1,8 +1,9 @@
 import { VERSION } from "../version.js";
 import { ValidationError } from "../schema/validate.js";
 import type { CliIo } from "./io.js";
-import { openRuntimeCommand } from "./commands.js";
+import { openRuntimeCommand, configInputOf } from "./commands.js";
 import { commandUsage, parseArguments, usageFor } from "./args.js";
+import { resolvePolicyPath } from "./config.js";
 
 /**
  * The Portable CLI (SPEC.md section 16).
@@ -56,10 +57,16 @@ export async function runCli(args: readonly string[], io: CliIo): Promise<number
       return 2;
     }
   }
-  const known = new Map([...parsed.values, ...parsed.config]);
-  const missing = spec.requires.filter((flag) => !known.has(flag));
+  const missing = spec.requires.filter((flag) => !parsed.values.has(flag));
   if (missing.length > 0) {
     io.err(`Missing required option ${missing.join(", ")} for ${command}.`);
+    return 2;
+  }
+  // Required configuration resolves here, after grammar and before any
+  // store opens: a policy command accepts its document from the flag or
+  // from `PORTABLE_POLICY`, whichever names one (SPEC.md section 16).
+  if (spec.requiresPolicy && resolvePolicyPath(configInputOf(parsed)) === undefined) {
+    io.err("This command needs a policy authority. Pass --policy-file PATH or set PORTABLE_POLICY.");
     return 2;
   }
 

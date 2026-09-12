@@ -39,6 +39,18 @@ export interface CliConfigInput {
   sessionId?: string;
 }
 
+/**
+ * The policy document path, from the flag over the environment.
+ *
+ * An explicit flag wins even when its file is invalid: the caller
+ * reports that file, never a silent fallback to `PORTABLE_POLICY`.
+ * An empty value counts as absent.
+ */
+export function resolvePolicyPath(input: CliConfigInput): string | undefined {
+  const path = input.policyPath ?? process.env["PORTABLE_POLICY"];
+  return path !== undefined && path !== "" ? path : undefined;
+}
+
 /** Resolve one configuration from arguments over the environment. */
 export function resolveConfig(input: CliConfigInput): CliConfig {
   const storePath = input.storePath ?? process.env["PORTABLE_STORE"];
@@ -47,7 +59,7 @@ export function resolveConfig(input: CliConfigInput): CliConfig {
       "No control store named. Pass --store PATH or set PORTABLE_STORE.",
     );
   }
-  const policyPath = input.policyPath ?? process.env["PORTABLE_POLICY"];
+  const policyPath = resolvePolicyPath(input);
   const sessionId = input.sessionId ?? process.env["PORTABLE_SESSION"];
   return {
     storePath: resolve(storePath),
