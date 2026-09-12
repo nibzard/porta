@@ -1477,7 +1477,7 @@
     "id": "T059",
     "title": "Add event and bundle conformance cases",
     "priority": 3,
-    "status": "todo",
+    "status": "done",
     "details": "Verify durable event delivery and portable bundle integrity boundaries.",
     "depends_on": [
       "T006",

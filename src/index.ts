@@ -714,3 +714,9 @@ export { pythonCases } from "./conformance/cases/python.js";
 // Conformance: the replacement failure and resource case pack
 // (SPEC.md section 21).
 export { replacementResourceCases } from "./conformance/cases/replacement-resources.js";
+
+// Conformance: the event journal case pack (SPEC.md section 21).
+export { eventsCases } from "./conformance/cases/events.js";
+
+// Conformance: the state bundle case pack (SPEC.md section 21).
+export { bundleCases } from "./conformance/cases/bundle.js";
