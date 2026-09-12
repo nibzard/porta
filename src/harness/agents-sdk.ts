@@ -145,6 +145,15 @@ type PreparationAnswer =
  */
 const inFlightPreparations = new Map<string, Promise<PreparationAnswer>>();
 
+/**
+ * Bridge synchronizations in flight in this process, keyed by session
+ * and bridge path. Concurrent toolkits over one bridge chain their
+ * checkpoints: each reads the head the previous one committed, so a
+ * concurrent caller never loses the expected-head comparison and
+ * refuses a request that could have run.
+ */
+const inFlightBridgeSyncs = new Map<string, Promise<unknown>>();
+
 /** Options of one toolkit bound to one managed session. */
 export interface AgentsToolkitOptions {
   session: ManagedSession;
@@ -298,7 +307,10 @@ export class AgentsToolkit {
    * The declaration says the bridge's writers are quiescent because the
    * harness runs one tool at a time. An integration that allows
    * parallel tool calls must not claim that; its operator disables
-   * them or stops using this toolkit.
+   * them or stops using this toolkit. Synchronizations of one bridge
+   * chain in this process, so concurrent toolkits over the same
+   * session order their checkpoints instead of refusing each other's
+   * expected head.
    */
   async synchronizeBridge(): Promise<{ revisionId: string; created: boolean }> {
     if (this.options.route.decision !== "local-bridge") {
@@ -306,12 +318,35 @@ export class AgentsToolkit {
         route: this.options.route.decision,
       });
     }
+    // Chain onto any synchronization of this bridge still in flight:
+    // this checkpoint starts only after that one committed, so it reads
+    // the head that one left and its own comparison holds.
+    const bridgeRootPath = this.options.route.bridgeRootPath;
+    const key = `${this.options.session.id}:${bridgeRootPath}`;
+    const previous = inFlightBridgeSyncs.get(key) ?? Promise.resolve();
+    const mine = previous
+      .catch(() => {})
+      .then(() => this.checkpointBridge(bridgeRootPath));
+    inFlightBridgeSyncs.set(key, mine);
+    try {
+      return await mine;
+    } finally {
+      if (inFlightBridgeSyncs.get(key) === mine) {
+        inFlightBridgeSyncs.delete(key);
+      }
+    }
+  }
+
+  /** Checkpoint the bridge once, against the head as it stands now. */
+  private async checkpointBridge(
+    bridgeRootPath: string,
+  ): Promise<{ revisionId: string; created: boolean }> {
     const current = (await this.options.session.describe()).workspace.headRevisionId;
     const outcome = await this.options.session.checkpoint(
       this.options.blobs,
       {
         requestKey: `bridge-${randomUUID()}`,
-        source: { kind: "bridge", rootPath: this.options.route.bridgeRootPath },
+        source: { kind: "bridge", rootPath: bridgeRootPath },
         ...(current !== undefined ? { expectedHead: current } : {}),
       },
       {

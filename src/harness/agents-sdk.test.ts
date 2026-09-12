@@ -613,6 +613,41 @@ test("a new toolkit instance verifies new requests in the same runs directory", 
   }
 });
 
+test("concurrent toolkits running different requests use distinct directories", async () => {
+  const state = await bench();
+  try {
+    const runsRoot = join(state.root, "runs");
+    const before = new Set(readdirSync(runsRoot));
+    const one = await secondToolkit(state, {});
+    const two = await secondToolkit(state, {});
+    const launchA = { command: "printf", args: ["%s", "left"], verify: true, requestKey: "verify-distinct-1" };
+    const launchB = { command: "printf", args: ["%s", "right"], verify: true, requestKey: "verify-distinct-2" };
+
+    state.granted.push({ approvedBy: "user://ada", operations: ["exec.process@1"] });
+    state.granted.push({ approvedBy: "user://ada", operations: ["exec.process@1"] });
+    const answers = (await Promise.all([
+      one.run({ ...launchA }),
+      two.run({ ...launchB }),
+    ])) as unknown as RunAnswer[];
+
+    // Both requests complete, each inside its own staged copy: the
+    // bridge synchronization of one never refuses the other.
+    assert.equal(answers[0]?.status, "completed", JSON.stringify(answers[0]));
+    assert.equal(answers[1]?.status, "completed", JSON.stringify(answers[1]));
+    assert.notEqual(answers[1]?.operationId, answers[0]?.operationId);
+    assert.notEqual(
+      answers[1]?.verify?.verificationCopyId,
+      answers[0]?.verify?.verificationCopyId,
+    );
+
+    // Two distinct attempt directories appeared under the runs root.
+    const added = readdirSync(runsRoot).filter((name) => !before.has(name));
+    assert.equal(added.length, 2);
+  } finally {
+    state.done();
+  }
+});
+
 test("concurrent toolkits prepare one request once and stage distinct copies", async () => {
   const state = await bench();
   try {
