@@ -16,50 +16,65 @@ export interface CommandSpec {
   requires: readonly string[];
   /** Optional command-specific options. */
   extras: readonly string[];
+  /** Boolean options the command accepts; `--json` applies everywhere. */
+  booleans: readonly string[];
 }
+
+/** The boolean options every command accepts. */
+const ANY_BOOLEAN = ["--json"];
 
 /** The full command table. */
 const COMMANDS: ReadonlyMap<string, CommandSpec> = new Map([
-  ["session create", { requires: ["--policy-ref"], extras: ["--workspace"] }],
-  ["describe", { requires: [], extras: [] }],
+  ["session create", { requires: ["--policy-ref"], extras: ["--workspace"], booleans: ANY_BOOLEAN }],
+  ["describe", { requires: [], extras: [], booleans: ANY_BOOLEAN }],
   [
     "checkpoint",
-    { requires: ["--request", "--stability"], extras: ["--stability-detail"] },
+    { requires: ["--request", "--stability"], extras: ["--stability-detail"], booleans: ANY_BOOLEAN },
   ],
   [
     "materialize",
-    { requires: ["--revision", "--destination", "--mode", "--policy-file"], extras: [] },
+    { requires: ["--revision", "--destination", "--mode", "--policy-file"], extras: [], booleans: ANY_BOOLEAN },
   ],
   [
     "attach",
-    { requires: ["--request", "--request-key", "--adapter", "--principal", "--policy-file"], extras: [] },
+    {
+      requires: ["--request", "--request-key", "--adapter", "--principal", "--policy-file"],
+      extras: [],
+      booleans: ANY_BOOLEAN,
+    },
   ],
-  ["invoke", { requires: ["--request", "--policy-file"], extras: [] }],
-  ["operation inspect", { requires: ["--operation"], extras: [] }],
-  ["operation cancel", { requires: ["--operation", "--adapter"], extras: [] }],
+  ["invoke", { requires: ["--request", "--policy-file"], extras: [], booleans: ANY_BOOLEAN }],
+  ["operation inspect", { requires: ["--operation"], extras: [], booleans: ANY_BOOLEAN }],
+  ["operation cancel", { requires: ["--operation", "--adapter"], extras: [], booleans: ANY_BOOLEAN }],
   [
     "workspace propose",
     {
       requires: ["--attachment", "--generation", "--copy", "--request-key", "--stability"],
       extras: ["--stability-detail"],
+      booleans: ANY_BOOLEAN,
     },
   ],
-  ["workspace accept", { requires: ["--proposal", "--expected-head"], extras: [] }],
-  ["replace", { requires: ["--request"], extras: [] }],
+  ["workspace accept", { requires: ["--proposal", "--expected-head"], extras: [], booleans: ANY_BOOLEAN }],
+  [
+    "replace",
+    { requires: ["--request"], extras: [], booleans: ["--json", "--plan"] },
+  ],
   [
     "release",
     {
       requires: ["--attachment", "--generation", "--request-key", "--adapter", "--principal"],
       extras: [],
+      booleans: ANY_BOOLEAN,
     },
   ],
-  ["events", { requires: [], extras: ["--after"] }],
-  ["recover", { requires: [], extras: [] }],
+  ["events", { requires: [], extras: ["--after"], booleans: ANY_BOOLEAN }],
+  ["recover", { requires: [], extras: [], booleans: ANY_BOOLEAN }],
   [
     "conformance",
     {
       requires: ["--adapter", "--adapter-version"],
       extras: ["--profile", "--principal", "--policy-ref", "--case-timeout-ms"],
+      booleans: ["--json", "--external-effects", "--paid-allocation"],
     },
   ],
 ]);
@@ -98,8 +113,10 @@ function matchCommand(words: readonly string[]): { spec: CommandSpec; words: str
 /**
  * Parse one argument list.
  *
- * Command words come first; options follow. Returns a diagnostic
- * string on invalid grammar; the caller turns it into exit code 2.
+ * Command words come first; options follow. The matched command must
+ * consume every command word, and a boolean option must belong to the
+ * matched command. Returns a diagnostic string on invalid grammar; the
+ * caller turns it into exit code 2 before any store opens.
  */
 export function parseArguments(args: readonly string[]): string | ParsedArguments {
   const words: string[] = [];
@@ -136,8 +153,14 @@ export function parseArguments(args: readonly string[]): string | ParsedArgument
     index += 1;
   }
   const matched = matchCommand(words);
-  if (matched === null) {
+  if (matched === null || matched.words.length !== words.length) {
     return `Unknown command or option: ${words.join(" ") || args[0]}`;
+  }
+  const command = matched.words.join(" ");
+  for (const flag of booleans) {
+    if (!matched.spec.booleans.includes(flag)) {
+      return `Option ${flag} does not apply to ${command}.`;
+    }
   }
   return { words: matched.words, values, config, booleans };
 }

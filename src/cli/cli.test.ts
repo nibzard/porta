@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -238,6 +238,88 @@ test("extra arguments after --version exit 2", async () => {
   assert.equal(await runCli(["--version", "--json"], rec.io), 2);
   assert.deepEqual(rec.out, []);
   assert.ok(rec.err[0]?.includes("Unexpected argument"));
+});
+
+test("extra command words are invalid grammar, not a matched prefix", async () => {
+  const restoreEnv = clearPortableEnv();
+  const root = mkdtempSync(join(tmpdir(), "porta-cli-"));
+  try {
+    const db = join(root, "control.db");
+    // The matched prefix must consume every command word: an extra
+    // word is an unknown command, whatever its prefix matches.
+    const extra = await cli([
+      "session",
+      "create",
+      "accidental-extra-word",
+      "--policy-ref",
+      "policy://review",
+      "--store",
+      db,
+    ]);
+    assert.equal(extra.code, 2);
+    assert.deepEqual(extra.out, []);
+    assert.ok(extra.err[0]?.includes("Unknown command"));
+    assert.equal(existsSync(db), false, "no database may appear");
+
+    // Multiword commands reject extra words the same way.
+    const opExtra = await cli([
+      "operation",
+      "inspect",
+      "extra",
+      "--operation",
+      "op-1",
+      "--store",
+      db,
+      "--session",
+      "ses_x",
+    ]);
+    assert.equal(opExtra.code, 2);
+    assert.ok(opExtra.err[0]?.includes("Unknown command"));
+
+    // A valid command still runs and accepts --json everywhere.
+    const created = await cli([
+      "session",
+      "create",
+      "--policy-ref",
+      "policy://review",
+      "--store",
+      db,
+      "--json",
+    ]);
+    assert.equal(created.code, 0, created.err.join("\n"));
+    assert.equal(typeof recordOf(created.out[0])["id"], "string");
+  } finally {
+    restoreEnv();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("misplaced boolean options exit 2 without side effects", async () => {
+  const restoreEnv = clearPortableEnv();
+  const root = mkdtempSync(join(tmpdir(), "porta-cli-"));
+  try {
+    const db = join(root, "control.db");
+    // --plan belongs to replace alone; effect and payment grants
+    // belong to the conformance command alone.
+    const misplaced: Array<[string[], string]> = [
+      [["describe", "--plan", "--store", db, "--session", "ses_x"], "--plan"],
+      [["describe", "--external-effects", "--store", db, "--session", "ses_x"], "--external-effects"],
+      [["describe", "--paid-allocation", "--store", db, "--session", "ses_x"], "--paid-allocation"],
+      [["session", "create", "--plan", "--policy-ref", "policy://review", "--store", db], "--plan"],
+    ];
+    for (const [args, flag] of misplaced) {
+      const result = await cli(args);
+      assert.equal(result.code, 2, `${flag} on ${args[0]} must be invalid grammar`);
+      assert.ok(
+        result.err[0]?.includes(`Option ${flag} does not apply`),
+        `${flag}: ${result.err[0]}`,
+      );
+    }
+    assert.equal(existsSync(db), false, "no database may appear");
+  } finally {
+    restoreEnv();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // -- Configuration honesty ---------------------------------------------------
