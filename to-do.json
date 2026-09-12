@@ -1530,7 +1530,7 @@
     "id": "T061",
     "title": "Document and implement one harness integration",
     "priority": 3,
-    "status": "todo",
+    "status": "done",
     "details": "Select one existing coding harness and supply a wrapper or instructions for managed Portable execution.",
     "depends_on": [
       "T050",

@@ -720,3 +720,19 @@ export { eventsCases } from "./conformance/cases/events.js";
 
 // Conformance: the state bundle case pack (SPEC.md section 21).
 export { bundleCases } from "./conformance/cases/bundle.js";
+
+// Harness integration: the OpenAI Agents SDK toolkit (SPEC.md 17).
+export {
+  AgentsToolkit,
+  authorityForApproval,
+} from "./harness/agents-sdk.js";
+export type {
+  AgentsToolkitOptions,
+  ApprovalRequest,
+  BuiltInToolRoute,
+  EnvironmentContextUpdate,
+  HarnessApproval,
+  HarnessApprovalSource,
+  HarnessTool,
+  ReopenOutcome,
+} from "./harness/agents-sdk.js";
