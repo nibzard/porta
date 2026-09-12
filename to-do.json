@@ -1211,7 +1211,7 @@
     "id": "T048",
     "title": "Assemble the public library interface",
     "priority": 3,
-    "status": "todo",
+    "status": "done",
     "details": "Expose the complete Portable and Session interfaces with validated serializable results.",
     "depends_on": [
       "T019",

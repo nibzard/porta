@@ -1,12 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { assertValid } from "../schema/validate.js";
 import { sessionDescriptionSchema } from "../schema/session.js";
 import { sessionRecordSchema } from "../schema/session.js";
+import { PolicyAuthority } from "../core/policy.js";
+import { BlobStore } from "../store/blob-store.js";
+import { FakeEnvironmentAdapter } from "../adapters/test-adapter.js";
+import { handoffResultSchema } from "../schema/handoff.js";
+import type { HandoffResult } from "../schema/handoff.js";
+import type { InvocationRequest } from "../schema/operation.js";
 import { ControlStore } from "../store/control-store.js";
 import { ManagedSession, PortableRuntime } from "./session.js";
 
@@ -236,4 +242,260 @@ test("sessions survive restart with their inspection state", async () => {
   assert.deepEqual(description.pendingCleanup, ["clean-1"]);
   reopenedStore.close();
   rmSync(dir, { recursive: true, force: true });
+});
+
+// -- SPEC section 15 surface -----------------------------------------------------
+
+const AUTHORITY = PolicyAuthority.fromPolicy({
+  schemaVersion: 1,
+  operations: ["exec.process@1/run"],
+  transferDestinations: ["local"],
+});
+
+/** One facade session with an active worker attachment at generation 1. */
+async function facadeSession(): Promise<{
+  session: ManagedSession;
+  attachmentId: string;
+}> {
+  const rt = runtime();
+  const session = await rt.createSession({ policyRef: "policy://alpha" });
+  const attachmentId = "att-facade";
+  rt.controlStore.insertAttachment({
+    sessionId: session.id,
+    attachmentId,
+    name: "worker",
+    generation: 1,
+    status: "active",
+    capabilityIds: ["exec.process@1"],
+  });
+  return { session, attachmentId };
+}
+
+/** One run request through the facade. */
+function invocation(sessionId: string, attachmentId: string): InvocationRequest {
+  return {
+    attachment: { sessionId, attachmentId, generation: 1 },
+    capability: "exec.process@1",
+    operation: "run",
+    input: { command: "echo", args: ["hi"] },
+    requestKey: `req-${randomUUID()}`,
+  };
+}
+
+test("invoke exposes the durable operation before completion, and inspection reads it as stored", async () => {
+  const { session, attachmentId } = await facadeSession();
+  const operation = await session.invoke(invocation(session.id, attachmentId), {
+    authority: AUTHORITY,
+  });
+
+  // The identifier is durable the moment the call returns; completion
+  // has not happened and is not implied.
+  assert.equal(operation.status, "accepted");
+  assert.equal(session.controlStore.getOperation(operation.id)?.id, operation.id);
+  const inspected = await session.inspectOperation(operation.id);
+  assert.equal(inspected.status, "accepted");
+  assert.deepEqual(inspected.attachment, {
+    sessionId: session.id,
+    attachmentId,
+    generation: 1,
+  });
+
+  // Settling changes what inspection reports; nothing else moved.
+  const settled = await session.settle(operation.id, {
+    kind: "completed",
+    resultRef: `op:${operation.id}`,
+  });
+  assert.equal(settled.status, "completed");
+  assert.equal((await session.inspectOperation(operation.id)).status, "completed");
+});
+
+test("inspectOperation refuses operations of other sessions", async () => {
+  const mine = await facadeSession();
+  const theirs = await facadeSession();
+  const operation = await theirs.session.invoke(
+    invocation(theirs.session.id, theirs.attachmentId),
+    { authority: AUTHORITY },
+  );
+  await assert.rejects(
+    mine.session.inspectOperation(operation.id),
+    (error: unknown) => isPortableCode(error),
+  );
+});
+
+test("events iterates the journal in order from a sequence, and stopping changes nothing", async () => {
+  const { session, attachmentId } = await facadeSession();
+  const first = await session.invoke(invocation(session.id, attachmentId), {
+    authority: AUTHORITY,
+  });
+  const second = await session.invoke(invocation(session.id, attachmentId), {
+    authority: AUTHORITY,
+  });
+  await session.settle(first.id, {
+    kind: "completed",
+    resultRef: `op:${first.id}`,
+  });
+
+  const seen: string[] = [];
+  const all = session.controlStore.listEvents(session.id, 0, 1000);
+  const total = all.length;
+  const lastSequence = all[all.length - 1]!.sequence;
+  for await (const event of session.events(0)) {
+    seen.push(`${event.sequence}:${event.type}`);
+    if (event.sequence === lastSequence) {
+      break;
+    }
+  }
+  assert.equal(seen.length, total);
+  // Sequences are strictly increasing across the whole journal.
+  const sequences = seen.map((entry) => Number.parseInt(entry.split(":")[0]!, 10));
+  assert.deepEqual([...sequences].sort((a, b) => a - b), sequences);
+
+  // Iterating from a midpoint yields exactly the tail, and breaking
+  // out settled nothing: the second operation is still accepted.
+  const tail: number[] = [];
+  for await (const event of session.events(lastSequence - 1)) {
+    tail.push(event.sequence);
+  }
+  assert.deepEqual(tail, [lastSequence]);
+  assert.equal((await session.inspectOperation(second.id)).status, "accepted");
+});
+
+test("planReplace reports dispositions without moving anything", async () => {
+  const rt = runtime();
+  const session = await rt.createSession({ policyRef: "policy://alpha" });
+  const root = mkdtempSync(join(tmpdir(), "porta-facade-"));
+  try {
+    const blobs = new BlobStore(join(root, "blobs"), rt.controlStore);
+    const src = join(root, "src");
+    mkdirSync(src, { recursive: true });
+    writeFileSync(join(src, "app.txt"), "base");
+    const checkpoint = await session.checkpoint(
+      blobs,
+      { requestKey: "import-1", source: { kind: "bridge", rootPath: src } },
+      { stability: { kind: "locked" } },
+    );
+    rt.controlStore.insertAttachment({
+      sessionId: session.id,
+      attachmentId: "att-worker",
+      name: "worker",
+      generation: 1,
+      status: "active",
+      capabilityIds: ["exec.process@1"],
+    });
+    const plan = await session.planReplace({
+      source: { sessionId: session.id, attachmentId: "att-worker", generation: 1 },
+      destination: { requires: {} },
+      workspaceRevisionId: checkpoint.revision.id,
+      requiredResources: [],
+      reconstruct: [],
+      activeOperations: "reject",
+      requestKey: "plan-1",
+    });
+    assert.equal(plan.attachmentId, "att-worker");
+    assert.equal(plan.workspaceRevisionId, checkpoint.revision.id);
+    assert.deepEqual(plan.blockers, []);
+    // Planning moved no attachment and no head.
+    assert.equal(rt.controlStore.getAttachment("att-worker")!.status, "active");
+    assert.equal(
+      rt.controlStore.getWorkspaceHead(session.record().workspaceId),
+      checkpoint.revision.id,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("replace runs to a completed switch and reports it honestly", async () => {
+  const rt = runtime();
+  const session = await rt.createSession({ policyRef: "policy://alpha" });
+  const root = mkdtempSync(join(tmpdir(), "porta-facade-"));
+  try {
+    const blobs = new BlobStore(join(root, "blobs"), rt.controlStore);
+    const src = join(root, "src");
+    mkdirSync(src, { recursive: true });
+    writeFileSync(join(src, "app.txt"), "base");
+    const checkpoint = await session.checkpoint(
+      blobs,
+      { requestKey: "import-1", source: { kind: "bridge", rootPath: src } },
+      { stability: { kind: "locked" } },
+    );
+    const adapter = new FakeEnvironmentAdapter();
+    const attached = await session.attach({
+      adapter,
+      request: { name: "worker", requires: {} },
+      requestKey: "attach-1",
+      principal: "facade-test",
+      authority: AUTHORITY,
+    });
+    assert.equal(attached.status, "active");
+
+    const result = await session.replace(
+      {
+        source: {
+          sessionId: session.id,
+          attachmentId: attached.attachmentId,
+          generation: 1,
+        },
+        destination: { requires: {} },
+        workspaceRevisionId: checkpoint.revision.id,
+        requiredResources: [],
+        reconstruct: [],
+        activeOperations: "reject",
+        requestKey: "replace-1",
+      },
+      {
+        destination: {
+          adapter,
+          leaseOf: (environmentId) => Promise.resolve(adapter.lease(environmentId)),
+          bind: {
+            async bind(resource) {
+              return { status: "bound", binding: resource };
+            },
+          },
+          blobs,
+          copyRoot: join(root, "copy"),
+          principal: "facade-test",
+          authority: AUTHORITY,
+        },
+      },
+    );
+    assert.equal(result.outcome, "completed");
+    assert.equal(result.oldGeneration, 1);
+    assert.equal(result.newGeneration, 2);
+    assert.ok(result.transitionId.length > 0);
+    assertValid(handoffResultSchema, result);
+    const switched = rt.controlStore.getAttachment(attached.attachmentId)!;
+    assert.equal(switched.generation, result.newGeneration);
+    assert.equal(switched.status, "active");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the facade carries every method SPEC section 15 names", async () => {
+  const { session } = await facadeSession();
+  const surface = session as unknown as Record<string, unknown>;
+  for (const name of [
+    "describe",
+    "checkpoint",
+    "attach",
+    "invoke",
+    "inspectOperation",
+    "cancelOperation",
+    "propose",
+    "accept",
+    "planReplace",
+    "replace",
+    "resolve",
+    "release",
+    "events",
+    "close",
+  ]) {
+    assert.equal(typeof surface[name], "function", name);
+  }
+  const rt = runtime();
+  const runtimeSurface = rt as unknown as Record<string, unknown>;
+  for (const name of ["createSession", "openSession"]) {
+    assert.equal(typeof runtimeSurface[name], "function", name);
+  }
 });

@@ -94,7 +94,7 @@ import type {
   ProvenanceCaptureRequest,
   ProvenanceSettleRequest,
 } from "../schema/workspace.js";
-import type { ResourceDescription } from "../schema/resource.js";
+import type { ResourceDescription, ResourceRef } from "../schema/resource.js";
 import type {
   AcceptOutcome,
   CheckpointOptions,
@@ -116,6 +116,21 @@ import type {
 } from "../schema/operation.js";
 import type { CancellationResult } from "../schema/adapter.js";
 import type { AttachmentRef, AttachmentSummary } from "../schema/session.js";
+import { handoffResultSchema } from "../schema/handoff.js";
+import type { HandoffPlan, HandoffResult, ReplaceRequest } from "../schema/handoff.js";
+import type { PortableEvent } from "../schema/event.js";
+import {
+  checkpointReplacement,
+  planReplace as planReplaceFlow,
+  prepareDestination,
+  prepareReplacement,
+  switchReplacement,
+} from "./replacement.js";
+import type {
+  DestinationOptions,
+  PrepareOptions,
+  ReplacementCheckpointOptions,
+} from "./replacement.js";
 
 /**
  * Session identity and inspection (SPEC.md sections 5.1 and 15).
@@ -353,6 +368,42 @@ export class ManagedSession {
   }
 
   /**
+   * Admit one invocation and return its durable operation record
+   * (SPEC.md section 15).
+   *
+   * The record exists before this call returns: the identifier is
+   * durable the moment admission commits, and completion is a later
+   * `markDispatched`, `settle`, or `reconcile` call. The facade runs
+   * nothing itself, so adapter behavior stays behind the capability
+   * contract the admission checked.
+   */
+  async invoke(
+    request: InvocationRequest,
+    options: AdmissionOptions,
+  ): Promise<OperationRecord> {
+    const outcome = await admitInvocation(this.store, this.id, request, options);
+    return outcome.operation;
+  }
+
+  /**
+   * Read one operation record exactly as stored (SPEC.md section 15).
+   *
+   * Reports persisted state only: a running operation reads as
+   * running, an unknown outcome as unknown. Operations of other
+   * sessions are not this session's to read.
+   */
+  async inspectOperation(operationId: string): Promise<OperationRecord> {
+    const operation = this.store.getOperation(operationId);
+    if (operation === null || operation.attachment.sessionId !== this.id) {
+      throw invalidRequestError(
+        `Operation ${operationId} does not exist in session ${this.id}.`,
+        { sessionId: this.id, operationId },
+      );
+    }
+    return operation;
+  }
+
+  /**
    * Record that provider execution of one operation started.
    *
    * The record moves `accepted` to `running` under compare-and-set.
@@ -480,6 +531,27 @@ export class ManagedSession {
     options: ResourceFlowOptions,
   ): Promise<ResourceDescription> {
     return bindResourceFlow(this.store, this.id, input, transport, options);
+  }
+
+  /**
+   * Resolve one resource reference (SPEC.md section 15).
+   *
+   * Thin over `resolveResource`: the reference names its identifier
+   * and its session, and the answer reports validity exactly as the
+   * persisted state allows. The reference carries no credential and
+   * grants none.
+   */
+  async resolve(
+    resource: ResourceRef,
+    options: ResolveResourceOptions,
+  ): Promise<ResourceDescription> {
+    if (resource.sessionId !== this.id) {
+      throw invalidRequestError(
+        `The reference names session ${resource.sessionId}, not ${this.id}.`,
+        { sessionId: this.id, referenceSessionId: resource.sessionId },
+      );
+    }
+    return resolveResourceFlow(this.store, this.id, resource.id, options);
   }
 
   /**
@@ -644,6 +716,98 @@ export class ManagedSession {
   }
 
   /**
+   * Plan one replacement without side effects (SPEC.md sections 13.1
+   * and 15).
+   *
+   * Planning allocates nothing, quiesces nothing, and moves no head.
+   * The plan names what survives by disposition and what blocks the
+   * transition; a blocked plan refuses when preparation runs.
+   */
+  async planReplace(request: ReplaceRequest): Promise<HandoffPlan> {
+    return planReplaceFlow(this.store, request);
+  }
+
+  /**
+   * Run one replacement through to its switch (SPEC.md sections 13.1
+   * to 13.4 and 15).
+   *
+   * The flow prepares under the request's active-operation policy,
+   * checkpoints the source, provisions and validates the destination,
+   * and commits the switch. A destination that cannot validate fails
+   * the transition and returns a failed result with the durable error;
+   * authority never moves without a validated destination.
+   */
+  async replace(
+    request: ReplaceRequest,
+    flow: ReplaceFlowOptions,
+  ): Promise<HandoffResult> {
+    const plan = planReplaceFlow(this.store, request);
+    const prepared = await prepareReplacement(this.store, request, flow.prepare ?? {});
+    checkpointReplacement(this.store, prepared.transitionId, flow.checkpoint ?? {});
+    const destination = await prepareDestination(
+      this.store,
+      prepared.transitionId,
+      flow.destination,
+    );
+    const dispositions = {
+      preserved: plan.preserved,
+      reconstructed: plan.reconstructed,
+      reattached: plan.reattached,
+      invalidated: plan.invalidated,
+    };
+    if (destination.state !== "validated") {
+      const failed: HandoffResult = {
+        transitionId: prepared.transitionId,
+        sessionId: this.id,
+        attachmentId: request.source.attachmentId,
+        outcome: "failed",
+        workspaceRevisionId: request.workspaceRevisionId,
+        ...dispositions,
+        cleanup: [],
+        ...(destination.error !== undefined ? { error: destination.error } : {}),
+      };
+      return jsonRoundTrip(handoffResultSchema, failed) as HandoffResult;
+    }
+    const switched = switchReplacement(this.store, prepared.transitionId);
+    const completed: HandoffResult = {
+      transitionId: switched.transitionId,
+      sessionId: switched.sessionId,
+      attachmentId: switched.attachmentId,
+      outcome: "completed",
+      oldGeneration: switched.oldGeneration,
+      newGeneration: switched.newGeneration,
+      newEnvironmentId: switched.environmentId,
+      workspaceRevisionId: request.workspaceRevisionId,
+      ...dispositions,
+      cleanup: switched.cleanup,
+    };
+    return jsonRoundTrip(handoffResultSchema, completed) as HandoffResult;
+  }
+
+  /**
+   * Iterate the session journal from one sequence onward (SPEC.md
+   * section 15).
+   *
+   * The iterator reads durable events in order, across store windows.
+   * Breaking out of the iteration stops reading; it changes nothing,
+   * because the journal is a record, not a subscription.
+   */
+  async *events(afterSequence = 0): AsyncIterable<PortableEvent> {
+    const window = 500;
+    let cursor = afterSequence;
+    for (;;) {
+      const batch = this.store.listEvents(this.id, cursor, window);
+      for (const event of batch) {
+        yield event;
+      }
+      if (batch.length < window) {
+        return;
+      }
+      cursor += batch.length;
+    }
+  }
+
+  /**
    * Run one cleanup pass over the session's pending obligations.
    *
    * Each retry releases exactly the environment its obligation names.
@@ -653,6 +817,16 @@ export class ManagedSession {
   async runCleanup(options: CleanupOptions): Promise<CleanupReport> {
     return runCleanupFlow(this.store, this.id, this.record().policyRef, options);
   }
+}
+
+/** Options of one full replacement flow driven through `replace`. */
+export interface ReplaceFlowOptions {
+  /** Preparation options: cancellation transport and wait bounds. */
+  prepare?: PrepareOptions;
+  /** Checkpoint options, including the journal redactor. */
+  checkpoint?: ReplacementCheckpointOptions;
+  /** Destination provisioning: adapter, transports, blobs, authority. */
+  destination: DestinationOptions;
 }
 
 /** Error for a session identifier that names no durable record. */

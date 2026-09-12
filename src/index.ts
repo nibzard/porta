@@ -161,6 +161,7 @@ export type {
 
 // Runtime: session identity and inspection.
 export { ManagedSession, PortableRuntime } from "./runtime/session.js";
+export type { ReplaceFlowOptions } from "./runtime/session.js";
 
 // Runtime: durable acquisition and reconciliation.
 export {
