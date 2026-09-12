@@ -1,10 +1,11 @@
 # Project fix plan
 
-Status: proposed. No fixes in this plan are implemented yet.
+Status: complete. Every task F1–F8 finished on 2026-09-12.
+See the [completion record](#completion-record) for commits and results.
 
 Source: [Project review](project-review.md), findings 1–7.
 Review baseline: `8380d5350cedc442ce435c7b6cc8f55ce5001c30`.
-Recorded validation: 477 tests pass, zero fail, and one live E2B test skips.
+Recorded validation at the baseline: 477 tests pass, zero fail, and one live E2B test skips.
 These counts describe the review baseline, not future repair results.
 
 This plan is separate from the completed [R1–R9 repair plan](review-fix-plan.md).
@@ -14,14 +15,14 @@ Use F1–F8 below to identify the new work.
 
 | Order | Task | Priority | Dependency | Status |
 | --- | --- | --- | --- | --- |
-| 1 | F1: Hide resolved secret values | High | None | Pending |
-| 2 | F2: Prevent destination link traversal | High | None | Pending |
-| 3 | F3: Make verification preparation recoverable | Medium | F2 for file safety | Pending |
-| 4 | F4: Reject invalid approval expiry | Medium | None | Pending |
-| 5 | F5: Reject invalid command grammar | Medium | None | Pending |
-| 6 | F6: Honor policy configuration from the environment | Medium | F5 for parser changes | Pending |
-| 7 | F7: Repair and execute the README example | Medium | F1–F6 for integrated validation | Pending |
-| 8 | F8: Verify the repaired project and update evidence | Completion gate | F1–F7 | Pending |
+| 1 | F1: Hide resolved secret values | High | None | Done, `4ed62c0` |
+| 2 | F2: Prevent destination link traversal | High | None | Done, `5725181` |
+| 3 | F3: Make verification preparation recoverable | Medium | F2 for file safety | Done, `3f01913` and `8db4078` |
+| 4 | F4: Reject invalid approval expiry | Medium | None | Done, `5901599` |
+| 5 | F5: Reject invalid command grammar | Medium | None | Done, `74df319` |
+| 6 | F6: Honor policy configuration from the environment | Medium | F5 for parser changes | Done, `67fe53c` and `420ba48` |
+| 7 | F7: Repair and execute the README example | Medium | F1–F6 for integrated validation | Done, `4fe32d1` |
+| 8 | F8: Verify the repaired project and update evidence | Completion gate | F1–F7 | Done, this commit |
 
 Implement one task at a time. Keep each behavior repair and its regression tests in one commit.
 Start each repair with a failing test that reproduces its finding.
@@ -186,6 +187,55 @@ Use a controlled clock or fixed comparison boundary rather than timing-sensitive
 
 **Done means:** Every F1–F7 acceptance check passes, all seven review findings have evidence of repair, and F8 records the results.
 A skipped live provider test remains unverified. Passing local tests must not relabel it as verified.
+
+## Completion record
+
+Date: 2026-09-12. All work ran on Node.js `v24.18.0` under Linux.
+
+Each repair started with a failing test and landed with its regression
+in one commit. Test counts are total tests in the full suite.
+
+| Task | Commit | New tests | Regression that turned from failing to passing |
+| --- | --- | --- | --- |
+| F1 | `4ed62c0` | 2 | Serialization, enumeration, and inspection of resolved secrets and the resolver expose no value. |
+| F2 | `5725181` | 3 | Linked destination roots, ancestors, and entries refuse; a path replaced during blob retrieval never redirects the write; an exclusive create refuses a raced target. |
+| F3 | `3f01913` | 5 | Restart in the same runs directory, concurrent same-request preparation, completed retry, crash adoption, and refused-preparation recovery. |
+| F3 | `8db4078` | 1 | Concurrent different requests both complete in distinct copies under distinct directories. |
+| F4 | `5901599` | 1 | Malformed expiry values grant nothing and reach no admission; the equal-time boundary is expired. |
+| F5 | `74df319` | 3 | Extra command words exit 2 creating no database (in process and as a spawned binary); misplaced booleans exit 2. |
+| F6 | `67fe53c` | 3 | `PORTABLE_POLICY` admits attach, invoke, and materialize; an explicit flag wins; missing and empty policy exits 2. |
+| F6 | `420ba48` | 0 | Test hygiene: the policy tests restore every environment variable they set. |
+| F7 | `4fe32d1` | 4 | The exact README block runs green in a temporary directory; a denied policy refuses; a failed answer settles failed; repeated dispatches reach the provider once. |
+
+Final validation of the repaired tree at `420ba48`:
+
+- `npm test` on the working tree: 500 tests, 499 pass, 0 fail, 1 skip.
+- A clean checkout of `HEAD` (`git worktree`), then `npm ci` and
+  `npm test`: 500 tests, 499 pass, 0 fail, 1 skip. `npm ci` reported
+  zero vulnerabilities.
+- An adversarial re-verification ran one independent agent per finding
+  against the plan's acceptance checks. Five findings passed outright.
+  The two failures drove the amendments above: F3 lacked evidence that
+  concurrent different requests use distinct directories, and F6's new
+  tests leaked two environment variables. Both re-verified after the
+  amendments.
+- `git diff --check` is clean, and no repair commit carries unrelated
+  files. `.claude/ralph-loop.local.md` stays modified and uncommitted.
+
+Limitations, stated plainly:
+
+- The one skipped test is the live E2B lifecycle test. No live provider
+  behavior is established by this plan, and local passes do not verify it.
+- F2 relies on `lstat` chain checks and exclusive creation. Node has no
+  descriptor-relative directory operations, so the destination contract
+  requires a trusted parent that the caller owns exclusively. The public
+  callers document that requirement.
+- F3 chains bridge synchronizations inside one process. Separate
+  processes that share one bridge can still race their checkpoints; the
+  store's expected-head comparison refuses the loser, as designed.
+- F4 checks expiry when authority is derived. The derived authority
+  carries no expiry of its own; the harness re-derives from a fresh
+  approval on every run.
 
 ## Follow-up improvements
 

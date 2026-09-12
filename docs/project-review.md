@@ -1,6 +1,8 @@
 # Project review
 
 Date: 2026-09-12. Baseline: `8380d5350cedc442ce435c7b6cc8f55ce5001c30`.
+Status: repaired. All seven findings have evidence of repair; see the
+[repair record](#repair-record).
 
 The project has clear module boundaries, strict TypeScript settings, and substantial tests for failures and recovery.
 Seven focused reproductions expose gaps outside the passing suite. Fix secret serialization first.
@@ -165,3 +167,31 @@ These are follow-up proposals, not additional reproduced defects.
 
 Keep each behavior repair and its regression tests in a separate commit.
 The earlier R1–R9 repair plan remains historical evidence; this review records newly observed gaps.
+
+## Repair record
+
+The [project fix plan](project-fix-plan.md) repaired findings 1–7 on
+2026-09-12. Each repair started with a failing test and landed with its
+regression in one commit.
+
+| Finding | Commit | Regression that turned from failing to passing |
+| --- | --- | --- |
+| 1 | `4ed62c0` | Serialization, enumeration, spread, and inspection of a resolved secret expose only its reference. |
+| 2 | `5725181` | Linked destination roots, ancestors, and entries refuse; a path replaced during blob retrieval never redirects the write; an exclusive create refuses a raced target. |
+| 3 | `3f01913`, `8db4078` | Restart, concurrent same-request and different-request preparation, completed retry, crash adoption, and refused-preparation recovery. |
+| 4 | `5901599` | Malformed and non-string expiry values grant nothing and reach no admission; the equal-time boundary is expired. |
+| 5 | `74df319` | Extra command words exit two creating no database, in process and as a spawned binary; misplaced booleans exit two. |
+| 6 | `67fe53c`, `420ba48` | `PORTABLE_POLICY` admits attach, invoke, and materialize; an explicit flag wins; missing and empty policy exits two. The amendment restores every environment variable the policy tests set. |
+| 7 | `4fe32d1` | The exact README block runs green in a temporary directory; a denied policy refuses; a failed answer settles failed; repeated dispatches reach the provider once. |
+
+Validation of the repaired tree:
+
+- `npm test` on the working tree: 500 tests, 499 pass, 0 fail, 1 skip.
+- A clean checkout of the repaired head, then `npm ci` and `npm test`:
+  the same counts, and `npm ci` reported zero vulnerabilities.
+- One independent agent re-verified each finding against its acceptance
+  checks. Five passed outright; findings 3 and 6 each failed one check and
+  drove the amendment commits above. Both re-verified after repair.
+
+The skipped test stays the live E2B lifecycle test. Local passes do not
+verify any live provider behavior.
