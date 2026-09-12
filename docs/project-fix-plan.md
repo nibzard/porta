@@ -1,7 +1,7 @@
 # Project fix plan
 
-Status: complete. Every task F1–F8 finished on 2026-09-12.
-See the [completion record](#completion-record) for commits and results.
+Status: complete, including the four follow-up review repairs below.
+See the [follow-up completion record](#follow-up-completion-record) for current commits and results.
 
 Source: [Project review](project-review.md), findings 1–7.
 Review baseline: `8380d5350cedc442ce435c7b6cc8f55ce5001c30`.
@@ -188,7 +188,7 @@ Use a controlled clock or fixed comparison boundary rather than timing-sensitive
 **Done means:** Every F1–F7 acceptance check passes, all seven review findings have evidence of repair, and F8 records the results.
 A skipped live provider test remains unverified. Passing local tests must not relabel it as verified.
 
-## Completion record
+## Initial completion record
 
 Date: 2026-09-12. All work ran on Node.js `v24.18.0` under Linux.
 
@@ -236,6 +236,32 @@ Limitations, stated plainly:
 - F4 checks expiry when authority is derived. The derived authority
   carries no expiry of its own; the harness re-derives from a fresh
   approval on every run.
+
+## Follow-up completion record
+
+The review of `b5c2e54` found four remaining gaps. All four are now repaired.
+The initial completion record above describes the earlier tree and its evidence.
+
+| Task | Commit | Added regression coverage |
+| --- | --- | --- |
+| F2 | `512b791` | An existing directory behind an implicit linked ancestor cannot change outside permissions. A blob callback cannot redirect the destination through a replaced ancestor. |
+| F3 | `fe765a6` | Failed preparation preserves published input copies. A lost preparation response preserves and adopts the published verification copy. |
+| F6 | `1452261` | Missing, malformed, and schema-invalid policy files refuse before store creation or adapter loading for attach, invoke, and materialize. |
+| F7 | `6557b65` | The extracted README example releases attachments and closes stores after attachment, checkpoint, release, and reopen failures. |
+
+Verification at `6557b65`, on Node.js `v24.18.0` under Linux:
+
+- Focused suites: 58 tests pass, zero fail, zero skip.
+- Full working-tree suite: 506 tests, 505 pass, zero fail, one skip.
+- Detached clean checkout: `npm ci` and `npm test` succeed with the same full-suite counts.
+- The skipped test requires live E2B credentials. No live provider result is claimed.
+- `git diff --check` passes. The existing local agent state change remains uncommitted.
+
+F3 deliberately retains an attempt directory when a working-copy record references it.
+This includes input copies published before failed verification preparation.
+Only attempts without published copies are removed immediately.
+Unused published copies remain available for later retention work; this repair does not delete their durable records.
+F2 still requires exclusive ownership of the destination parent against hostile concurrent filesystem writers.
 
 ## Follow-up improvements
 

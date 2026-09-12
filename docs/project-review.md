@@ -2,7 +2,7 @@
 
 Date: 2026-09-12. Baseline: `8380d5350cedc442ce435c7b6cc8f55ce5001c30`.
 Status: repaired. All seven findings have evidence of repair; see the
-[repair record](#repair-record).
+[follow-up repair record](#follow-up-repair-record).
 
 The project has clear module boundaries, strict TypeScript settings, and substantial tests for failures and recovery.
 Seven focused reproductions expose gaps outside the passing suite. Fix secret serialization first.
@@ -195,3 +195,22 @@ Validation of the repaired tree:
 
 The skipped test stays the live E2B lifecycle test. Local passes do not
 verify any live provider behavior.
+
+
+## Follow-up repair record
+
+The review of `b5c2e54` reproduced four gaps in the initial repairs.
+These are repaired at `6557b65`:
+
+- `512b791`: Check directory ancestors before permission changes and recheck destination ancestors after blob retrieval.
+- `fe765a6`: Retain published working-copy files after preparation failure or a lost response.
+- `1452261`: Load policy before opening stores or importing adapters for attach, invoke, and materialize.
+- `6557b65`: Release attachments and close stores on failure in the exact README example.
+
+Six new regression tests cover these paths. The focused suites pass all 58 tests.
+Both the full working-tree run and a detached clean checkout pass 505 of 506 tests, with zero failures.
+One live E2B test skips. The clean checkout uses `npm ci` followed by `npm test` on Node.js `v24.18.0`.
+
+Published copies from failed preparation remain on disk to preserve their stored references.
+Their eventual removal belongs to the retention work item.
+See the [updated plan](project-fix-plan.md#follow-up-completion-record) for complete evidence and limits.
