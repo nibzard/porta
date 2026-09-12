@@ -1,0 +1,202 @@
+# Project fix plan
+
+Status: proposed. No fixes in this plan are implemented yet.
+
+Source: [Project review](project-review.md), findings 1–7.
+Review baseline: `8380d5350cedc442ce435c7b6cc8f55ce5001c30`.
+Recorded validation: 477 tests pass, zero fail, and one live E2B test skips.
+These counts describe the review baseline, not future repair results.
+
+This plan is separate from the completed [R1–R9 repair plan](review-fix-plan.md).
+Use F1–F8 below to identify the new work.
+
+## Order and dependencies
+
+| Order | Task | Priority | Dependency | Status |
+| --- | --- | --- | --- | --- |
+| 1 | F1: Hide resolved secret values | High | None | Pending |
+| 2 | F2: Prevent destination link traversal | High | None | Pending |
+| 3 | F3: Make verification preparation recoverable | Medium | F2 for file safety | Pending |
+| 4 | F4: Reject invalid approval expiry | Medium | None | Pending |
+| 5 | F5: Reject invalid command grammar | Medium | None | Pending |
+| 6 | F6: Honor policy configuration from the environment | Medium | F5 for parser changes | Pending |
+| 7 | F7: Repair and execute the README example | Medium | F1–F6 for integrated validation | Pending |
+| 8 | F8: Verify the repaired project and update evidence | Completion gate | F1–F7 | Pending |
+
+Implement one task at a time. Keep each behavior repair and its regression tests in one commit.
+Start each repair with a failing test that reproduces its finding.
+Use temporary directories and synthetic secret values. Use explicit barriers for concurrency tests.
+Preserve unrelated local changes, including `.claude/ralph-loop.local.md`.
+
+## F1: Hide resolved secret values
+
+**Files:** `src/core/secrets.ts`, `src/core/secrets.test.ts`.
+
+**Implementation**
+
+1. Replace `private secretValue` with an ECMAScript private field.
+2. Add `toJSON()` that returns only `{ reference }`.
+3. Preserve `use()` as the explicit method for consuming the value.
+4. Check the surrounding resolver fields for the same accidental exposure through enumeration or inspection.
+
+**Acceptance checks**
+
+- JSON serialization, object spread, `Object.keys`, and ordinary `util.inspect` output contain no synthetic secret value.
+- Nested serialization also exposes only the reference.
+- `use()` still passes the original value to its callback.
+- Existing authorization, redaction, and revoked-reference tests pass.
+
+**Boundary:** This protects accidental exposure. It does not isolate the value from authorized callback code.
+
+## F2: Prevent destination link traversal
+
+**Files:** `src/store/workspace-tree.ts`, `src/store/workspace-tree.test.ts`, and affected materialization callers and tests.
+
+**Implementation**
+
+1. Define the destination contract, including supported platforms and ownership of the destination parent directory.
+2. Validate the destination, existing ancestors, and manifest paths before writing. Use `lstat` to detect symbolic links.
+3. Reject directory links and dangling file links. Open new files exclusively and apply permissions through the opened descriptor.
+4. Check callback and write ordering. A `readBlob` callback must not invalidate checks and redirect a later write.
+5. Use private staging and controlled publication where callers cannot guarantee exclusive access to the destination.
+6. Preserve path names, executable bits, collision errors, and read-only behavior. Remove only staging owned by this operation.
+
+**Acceptance checks**
+
+- Directory links and dangling file links fail with structured errors. Outside files and permissions remain unchanged.
+- Test a linked destination root and a linked ancestor according to the documented contract.
+- Inject a path replacement during blob retrieval. The writer must refuse or remain confined to its owned destination.
+- Existing content is not overwritten, and failures do not remove caller-owned files.
+- Ordinary materialization, export, bundle, and verification tests still pass.
+
+**Design constraint:** Separate path checks do not prevent every concurrent rename attack.
+Do not claim protection against hostile concurrent writers from `lstat` alone.
+Use descriptor-relative operations where available, or require a trusted parent and exclusive destination ownership.
+Document any stricter destination requirement at the public API and its callers.
+
+## F3: Make verification preparation recoverable
+
+**Files:** `src/harness/agents-sdk.ts`, `src/harness/agents-sdk.test.ts`, `src/runtime/provenance.ts`, and related store methods if needed.
+
+**Implementation**
+
+1. Replace instance counters as directory identifiers with operation-owned records and unique directory allocation.
+2. Look up existing verification preparation before synchronizing the bridge or creating copies for a retry.
+3. Serialize preparation for the same operation. Persist the winning preparation so separate processes can adopt it.
+4. Derive `cwd` from the recorded verification copy, not a newly calculated directory name.
+5. Retain the existing dispatch claim. A retry must not execute a completed, running, or unknown operation again.
+6. Define cleanup and recovery for failed staging. Remove only uncommitted copies owned by the failed attempt.
+
+**Acceptance checks**
+
+- A new toolkit instance can verify a new request using the same session and runs directory.
+- Different requests from concurrent toolkit instances use distinct directories.
+- Concurrent preparation of one request records one authoritative preparation and causes at most one provider invocation.
+- A completed retry returns its recorded result and tested revision after the bridge changes.
+- A retry after preparation uses the recorded directory. A preparation failure leaves recoverable state.
+- Existing provenance and dispatch deduplication tests pass.
+
+**Compatibility:** Preserve existing working-copy records and their paths. Avoid a migration unless new durable state requires one.
+
+## F4: Reject invalid approval expiry
+
+**Files:** `src/harness/agents-sdk.ts`, `src/harness/agents-sdk.test.ts`, `src/core/time.ts` if a shared helper needs adjustment.
+
+**Implementation**
+
+1. Check the runtime type of any supplied `expiresAt` value.
+2. Validate it with the existing `isUtcTimestamp` contract before comparing its time.
+3. Return `InvalidRequest` for malformed timestamps and `PolicyDenied` for expired approvals.
+4. Preserve omitted expiry and valid future expiry behavior. Document the accepted timestamp format.
+
+**Acceptance checks**
+
+- Reject an invalid string, an impossible calendar date, an empty value, and a non-string value.
+- Reject an expiry equal to or earlier than the current time.
+- Accept a valid future timestamp and preserve authority narrowing.
+- Rejected approvals never reach invocation admission or provider dispatch.
+
+Use a controlled clock or fixed comparison boundary rather than timing-sensitive sleeps.
+
+## F5: Reject invalid command grammar
+
+**Files:** `src/cli/args.ts`, `src/cli/cli.ts`, `src/cli/cli.test.ts`, `src/cli/main.e2e.test.ts`.
+
+**Implementation**
+
+1. Require the matched command to consume every command word.
+2. Define accepted boolean options per command. Keep `--json` global and `--plan` specific to `replace`.
+3. Restrict effect and payment options to the conformance command.
+4. Complete grammar validation before opening a store or loading an adapter.
+
+**Acceptance checks**
+
+- `session create accidental-extra-word` exits two and creates no database or session.
+- Extra words on single-word and multiword commands are rejected.
+- Misplaced boolean options exit two without side effects.
+- Valid commands, help, version, and documented boolean combinations retain their behavior.
+
+## F6: Honor policy configuration from the environment
+
+**Files:** `src/cli/args.ts`, `src/cli/cli.ts`, `src/cli/config.ts`, and command configuration tests.
+
+**Implementation**
+
+1. Separate required request options from required resolved configuration.
+2. Resolve configuration after grammar validation and before checking required configuration values.
+3. Preserve explicit flag precedence over environment variables.
+4. Validate required policy input before opening a store or performing an adapter action.
+5. Preserve commands that need neither a policy nor a session. Update help text if validation rules change.
+
+**Acceptance checks**
+
+- `attach`, `invoke`, and `materialize` accept a valid `PORTABLE_POLICY` without `--policy-file`.
+- A supplied policy flag takes precedence. An invalid explicit file does not silently fall back to the environment.
+- Missing or empty policy configuration produces a clear error and exit code two.
+- Existing `PORTABLE_STORE` and `PORTABLE_SESSION` behavior remains correct.
+- Tests restore environment variables and remain isolated from each other.
+
+## F7: Repair and execute the README example
+
+**Files:** `README.md`, an executable example, and its smoke test under `src/acceptance` or the existing example tests.
+
+**Implementation**
+
+1. Add the local adapter's required location, network, host access, lifetime, and resource grants. Explain the grants briefly.
+2. Use `claimDispatch`. Invoke the provider only when the caller wins the claim.
+3. Handle completed, failed, and uncertain provider outcomes without recording false success.
+4. Release the attachment and close every store connection on success and failure.
+5. Execute the exact documented code through extraction or a shared example source. Avoid a separately maintained test copy.
+
+**Acceptance checks**
+
+- The example completes attachment, invocation, checkpoint, release, and reopen in temporary directories.
+- A denied policy refuses execution. A failed provider response does not become a completed operation.
+- Repeated dispatch attempts cause at most one provider call.
+- The smoke test requires no provider credentials and leaves no child processes or open stores.
+
+## F8: Verify the repaired project and update evidence
+
+1. Run each task's focused tests after its repair. Record the regression that changes from failing to passing.
+2. Run `npm test` on the final tree. Investigate every new failure or skip.
+3. Verify a clean checkout with `npm ci` followed by `npm test`.
+4. Record local conformance and acceptance results from the repaired tree. Keep live provider evidence explicitly separate.
+5. Update `project-review.md` and this plan with commit identifiers, test results, and any remaining limitations.
+6. Run `git diff --check` and verify that no unrelated files or local runtime artifacts enter repair commits.
+
+**Done means:** Every F1–F7 acceptance check passes, all seven review findings have evidence of repair, and F8 records the results.
+A skipped live provider test remains unverified. Passing local tests must not relabel it as verified.
+
+## Follow-up improvements
+
+Schedule these after the seven defects are repaired. They do not block this repair plan.
+
+| Work | Concrete completion criterion |
+| --- | --- |
+| Continuous integration | GitHub runs clean installs and tests across the supported Node.js matrix; the tested minimum matches `engines`. |
+| Package checks | Install a built package in a temporary consumer and exercise imports, types, and the executable. |
+| Conformance cancellation | A timed-out case cannot overlap later cases or leave unreported resources after cleanup. |
+| Storage durability | Document process-crash versus host-crash guarantees and test the required write ordering and recovery. |
+| Local state hygiene | Ignore documented runtime state paths and remove tracked local agent state while preserving the local file. |
+| Retention | Remove only unreachable copies, blobs, and records; retained revisions and recovery operations remain usable. |
+| Module size | Extract transfer and phase logic after repairs, with existing transaction and recovery tests passing. |
