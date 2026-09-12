@@ -8,6 +8,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  lstatSync,
   statSync,
   symlinkSync,
   writeFileSync,
@@ -407,3 +408,149 @@ function exists(dir: string, relative: string): boolean {
     return false;
   }
 }
+
+test("materialization refuses symbolic links in the destination and its path", () => {
+  const { blobs, done } = fixture();
+  const outside = scratch();
+  const holder = scratch();
+  try {
+    const hash = blobs.put(new TextEncoder().encode("data")).digest;
+    const linkFailure = (error: unknown): void => {
+      assert.ok(
+        isPortableCode(error) && error.code === "UnsupportedOperation",
+        `expected a link refusal, got ${String(error)}`,
+      );
+      assert.equal(
+        JSON.stringify((error as { details?: { reason?: string } }).details).includes(
+          "destination-link",
+        ),
+        true,
+      );
+    };
+    const fileEntry: TreeEntry = {
+      path: "file.txt",
+      kind: "file",
+      executable: false,
+      contentHash: hash,
+    };
+
+    // A destination root that is itself a symbolic link is refused.
+    symlinkSync(outside.dir, join(holder.dir, "linked-root"));
+    linkFailure(
+      thrownBy(() => materializeTree([fileEntry], join(holder.dir, "linked-root"), (d) => blobs.get(d))),
+    );
+    assert.deepEqual(readdirSync(outside.dir), []);
+
+    // A symbolic link on the way to the destination is refused.
+    mkdirSync(join(holder.dir, "way"));
+    symlinkSync(outside.dir, join(holder.dir, "way", "stop"));
+    linkFailure(
+      thrownBy(() =>
+        materializeTree([fileEntry], join(holder.dir, "way", "stop", "dest"), (d) => blobs.get(d)),
+      ),
+    );
+    assert.deepEqual(readdirSync(outside.dir), []);
+
+    // A manifest directory entry that names a link is refused: the
+    // review's reproduction redirects link/file.txt outside otherwise.
+    const dest = join(holder.dir, "dest");
+    mkdirSync(dest);
+    symlinkSync(outside.dir, join(dest, "link"));
+    linkFailure(
+      thrownBy(() =>
+        materializeTree(
+          [
+            { path: "link", kind: "directory", executable: false, contentHash: null },
+            { path: "link/file.txt", kind: "file", executable: false, contentHash: hash },
+          ],
+          dest,
+          (d) => blobs.get(d),
+        ),
+      ),
+    );
+    assert.deepEqual(readdirSync(outside.dir), []);
+
+    // A file entry whose only parent is a link is refused too.
+    linkFailure(
+      thrownBy(() =>
+        materializeTree(
+          [{ path: "link/only.txt", kind: "file", executable: false, contentHash: hash }],
+          dest,
+          (d) => blobs.get(d),
+        ),
+      ),
+    );
+    assert.deepEqual(readdirSync(outside.dir), []);
+
+    // A dangling symbolic link on a file target never receives content.
+    symlinkSync(join(outside.dir, "gone"), join(dest, "file.txt"));
+    linkFailure(thrownBy(() => materializeTree([fileEntry], dest, (d) => blobs.get(d))));
+    assert.equal(exists(outside.dir, "gone"), false);
+  } finally {
+    done();
+    outside.done();
+    holder.done();
+  }
+});
+
+test("a path replaced during blob retrieval never redirects the write", () => {
+  const { blobs, done } = fixture();
+  const outside = scratch();
+  const target = scratch();
+  try {
+    const hash = blobs.put(new TextEncoder().encode("payload")).digest;
+    const dest = target.dir;
+    mkdirSync(join(dest, "sub"));
+
+    // The blob callback replaces the validated directory with a link
+    // between the check and the write. The writer must refuse.
+    const replaced = thrownBy(() =>
+      materializeTree(
+        [{ path: "sub/data.txt", kind: "file", executable: false, contentHash: hash }],
+        dest,
+        (digest) => {
+          rmSync(join(dest, "sub"), { recursive: true });
+          symlinkSync(outside.dir, join(dest, "sub"));
+          return blobs.get(digest);
+        },
+      ),
+    );
+    assert.ok(isPortableCode(replaced) && replaced.code === "UnsupportedOperation");
+    assert.equal(exists(outside.dir, "data.txt"), false);
+    assert.equal(lstatSync(join(dest, "sub")).isSymbolicLink(), true);
+  } finally {
+    done();
+    outside.done();
+    target.done();
+  }
+});
+
+test("an exclusive create refuses a target installed while blobs are read", () => {
+  const { blobs, done } = fixture();
+  const target = scratch();
+  try {
+    const hash = blobs.put(new TextEncoder().encode("payload")).digest;
+    const raced = thrownBy(() =>
+      materializeTree(
+        [{ path: "data.txt", kind: "file", executable: false, contentHash: hash }],
+        target.dir,
+        (digest) => {
+          // A file appears at the target while the blob is read.
+          writeFileSync(join(target.dir, "data.txt"), "raced");
+          return blobs.get(digest);
+        },
+      ),
+    );
+    assert.ok(isPortableCode(raced) && raced.code === "InvalidRequest");
+    assert.equal(
+      JSON.stringify((raced as { details?: { reason?: string } }).details).includes(
+        "target-collision",
+      ),
+      true,
+    );
+    assert.equal(readFileSync(join(target.dir, "data.txt"), "utf8"), "raced");
+  } finally {
+    done();
+    target.done();
+  }
+});

@@ -738,7 +738,11 @@ export interface DestinationOptions {
   bind: BindTransport;
   /** The content-addressed store holding the transfer revision. */
   blobs: BlobStore;
-  /** The staging root the destination working copy materializes into. */
+  /**
+   * The staging root the destination working copy materializes into.
+   * Follows the `materializeTree` destination contract: no symbolic
+   * links, and a parent directory the caller owns exclusively.
+   */
   copyRoot: string;
   /** Authenticated principal supplied by the embedding application. */
   principal: string;

@@ -715,6 +715,10 @@ export interface MaterializedCopy {
  * A `read-only` copy lands without write permission; a `proposal` copy
  * is private and mutable and reaches the authoritative head only
  * through an accepted proposal.
+ *
+ * The destination follows the `materializeTree` contract: no symbolic
+ * links on the way or below it, and the destination's parent directory
+ * is owned exclusively by the caller. The destination must be empty.
  */
 export function materializeRevision(
   store: ControlStore,

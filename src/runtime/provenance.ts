@@ -71,7 +71,11 @@ export interface ProvenanceEnvironmentOptions {
 export interface VerificationRunOptions extends ProvenanceEnvironmentOptions {
   /** Policy authority that governs the private copy's destination. */
   authority: PolicyAuthority;
-  /** Empty directory the private verification copy materializes into. */
+  /**
+   * Empty directory the private verification copy materializes into.
+   * Follows the `materializeTree` destination contract: no symbolic
+   * links, and a parent directory the caller owns exclusively.
+   */
   destination: string;
   /** Paths excluded from the pre-run checkpoint (SPEC.md section 11.6). */
   exclusions?: string[];

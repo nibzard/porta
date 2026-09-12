@@ -1,14 +1,17 @@
 import { createHash } from "node:crypto";
 import {
-  chmodSync,
-  existsSync,
+  closeSync,
+  fchmodSync,
+  lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   statSync,
-  writeFileSync,
+  writeSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import type { Stats } from "node:fs";
+import { dirname, join, resolve, sep } from "node:path";
 import {
   integrityFailureError,
   invalidRequestError,
@@ -32,8 +35,9 @@ import type { BlobRef, BlobStore } from "./blob-store.js";
  * or `..` segments. Absolute paths, null bytes, and unpaired surrogates
  * are rejected. Importing a directory rejects symbolic links, device
  * files, sockets, and FIFOs with explicit errors instead of
- * dereferencing them. Materialization rejects colliding and
- * unrepresentable names without renaming anything.
+ * dereferencing them. Materialization refuses symbolic links in the
+ * destination and its path, rejects colliding and unrepresentable
+ * names, and renames nothing.
  */
 
 /** Kind of one tree entry. Version one has files and directories. */
@@ -283,6 +287,16 @@ export interface MaterializeOptions {
  * that differ only by Unicode normalization collide, because the
  * target filesystem cannot be assumed to keep them apart.
  *
+ * Destination contract: every component of the destination path that
+ * already exists must be a real directory, never a symbolic link, and
+ * the same rule holds for every directory the manifest creates below
+ * it. Files are created exclusively and take their permissions through
+ * the open descriptor. These checks stop an accidental redirect of the
+ * write through a link, including a link installed while blobs are
+ * being read. They do not stop a hostile writer that controls the
+ * destination's parent directory and races the checks: the caller must
+ * own the parent exclusively.
+ *
  * With `readOnly`, every written file and directory lands without
  * write permission: the result is a snapshot, advisory on platforms
  * that let the owner override permissions.
@@ -298,7 +312,15 @@ export function materializeTree(
     throw problem;
   }
   rejectNormalizationCollisions(entries);
+  checkDestinationChain(destination);
   mkdirSync(destination, { recursive: true });
+  const root = lstatOrNull(destination);
+  if (root === null) {
+    throw destinationChanged(destination);
+  }
+  if (root.isSymbolicLink() || !root.isDirectory()) {
+    throw linkTraversal(destination, "the destination itself is not a real directory");
+  }
   const sorted = [...entries].sort((a, b) => compareTreePaths(a.path, b.path));
   for (const entry of sorted) {
     materializeEntry(entry, destination, readBlob);
@@ -307,7 +329,16 @@ export function materializeTree(
     // Restrict permissions only after every entry exists: a directory
     // locked before its children are written refuses them.
     for (const entry of sorted) {
-      chmodSync(join(destination, entry.path), fileMode(entry, true));
+      const target = join(destination, entry.path);
+      const current = lstatOrNull(target);
+      if (
+        current === null ||
+        current.isSymbolicLink() ||
+        (entry.kind === "directory") !== current.isDirectory()
+      ) {
+        throw destinationChanged(entry.path);
+      }
+      chmodThroughDescriptor(target, fileMode(entry, true));
     }
   }
 }
@@ -406,15 +437,30 @@ function materializeEntry(
 ): void {
   const target = join(destination, entry.path);
   try {
+    const existing = lstatOrNull(target);
     if (entry.kind === "directory") {
-      if (existsSync(target) && !statSync(target).isDirectory()) {
-        throw collision(entry.path, "a non-directory already occupies it");
+      if (existing !== null) {
+        if (existing.isSymbolicLink()) {
+          throw linkTraversal(entry.path, "a symbolic link already occupies it");
+        }
+        if (!existing.isDirectory()) {
+          throw collision(entry.path, "a non-directory already occupies it");
+        }
+      } else {
+        ensureDirectoryChain(destination, dirname(entry.path));
+        mkdirSync(target);
+        const created = lstatOrNull(target);
+        if (created === null || !created.isDirectory()) {
+          throw destinationChanged(entry.path);
+        }
       }
-      mkdirSync(target, { recursive: true });
-      chmodSync(target, 0o755);
+      chmodThroughDescriptor(target, 0o755);
       return;
     }
-    if (existsSync(target)) {
+    if (existing !== null) {
+      if (existing.isSymbolicLink()) {
+        throw linkTraversal(entry.path, "a symbolic link already occupies it");
+      }
       throw collision(entry.path, "a file already occupies it");
     }
     const hash = entry.contentHash;
@@ -428,13 +474,28 @@ function materializeEntry(
     if (data === null) {
       throw integrityFailureError(`blob ${hash}`, hash, "absent");
     }
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, data);
-    // Chmod after the write: the mode option of a create is masked by
-    // the process umask, and materialization states exact permissions.
-    chmodSync(target, fileMode(entry, false));
+    // The blob callback runs outside this writer's control, so the
+    // whole chain is checked again after it: a directory replaced with
+    // a link during retrieval cannot redirect the write.
+    ensureDirectoryChain(destination, dirname(entry.path));
+    // Exclusive create: refuses a symbolic link at the target, a file
+    // installed meanwhile, and a dangling link alike.
+    const descriptor = openSync(target, "wx");
+    try {
+      writeAll(descriptor, data);
+      // Permissions through the descriptor: the mode of an exclusive
+      // create is masked by the process umask, materialization states
+      // exact permissions, and a later path swap cannot redirect the
+      // chmod.
+      fchmodSync(descriptor, fileMode(entry, false));
+    } finally {
+      closeSync(descriptor);
+    }
   } catch (error) {
     const code = fsErrorCode(error);
+    if (code === "EEXIST") {
+      throw collision(entry.path, "an entry already occupies it");
+    }
     if (code === "ENAMETOOLONG" || code === "EINVAL") {
       throw invalidRequestError(
         `The path ${entry.path} cannot be represented on this filesystem.`,
@@ -442,6 +503,121 @@ function materializeEntry(
       );
     }
     throw error;
+  }
+}
+
+/**
+ * Check every existing component of the destination path (SPEC.md 11.3).
+ *
+ * Each existing component must be a real directory; a symbolic link
+ * anywhere on the way refuses the whole write before anything is read.
+ */
+function checkDestinationChain(destination: string): void {
+  const absolute = resolve(destination);
+  const parts = absolute.split(sep).filter((part) => part.length > 0);
+  let prefix = absolute.startsWith(sep) ? sep : parts.shift() ?? absolute;
+  for (const part of parts) {
+    prefix = join(prefix, part);
+    const state = lstatOrNull(prefix);
+    if (state === null) {
+      // Nothing can exist below a missing component; the writer
+      // creates the rest itself.
+      return;
+    }
+    if (state.isSymbolicLink()) {
+      throw linkTraversal(prefix, "an existing component of the destination is a symbolic link");
+    }
+    if (!state.isDirectory()) {
+      throw invalidRequestError(
+        `The destination ${destination} passes through the non-directory ${prefix}.`,
+        { destination, component: prefix, reason: "destination-blocked" },
+      );
+    }
+  }
+}
+
+/**
+ * Validate the manifest directory chain below the destination, creating
+ * missing directories. Called after any callback the writer does not
+ * control, so a link installed while a blob was read is caught here.
+ */
+function ensureDirectoryChain(destination: string, relative: string): void {
+  const root = lstatOrNull(destination);
+  if (root === null) {
+    throw destinationChanged(destination);
+  }
+  if (root.isSymbolicLink() || !root.isDirectory()) {
+    throw linkTraversal(destination, "the destination itself is not a real directory");
+  }
+  if (relative === "" || relative === ".") {
+    return;
+  }
+  let current = destination;
+  let relativeSoFar = "";
+  for (const part of relative.split("/")) {
+    current = join(current, part);
+    relativeSoFar = relativeSoFar === "" ? part : `${relativeSoFar}/${part}`;
+    let state = lstatOrNull(current);
+    if (state === null) {
+      mkdirSync(current);
+      state = lstatOrNull(current);
+      if (state === null) {
+        throw destinationChanged(relativeSoFar);
+      }
+    }
+    if (state.isSymbolicLink()) {
+      throw linkTraversal(relativeSoFar, "a symbolic link occupies a directory of the manifest");
+    }
+    if (!state.isDirectory()) {
+      throw collision(relativeSoFar, "a non-directory already occupies it");
+    }
+  }
+}
+
+/** The structured link-traversal refusal of one materialization path. */
+function linkTraversal(path: string, detail: string): PortableError {
+  return unsupportedOperationError("workspace.tree@1", "materialize-link", {
+    path,
+    reason: "destination-link",
+    detail,
+  });
+}
+
+/** The structured refusal for a path that changed under the writer. */
+function destinationChanged(path: string): PortableError {
+  return invalidRequestError(
+    `The materialization path ${path} changed while the writer was working.`,
+    { path, reason: "destination-changed" },
+  );
+}
+
+/** The `lstat` of one path, or null when nothing is there. */
+function lstatOrNull(path: string): Stats | null {
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    if (fsErrorCode(error) === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/** Apply permissions through one open descriptor, never a path. */
+function chmodThroughDescriptor(path: string, mode: number): void {
+  const descriptor = openSync(path, "r");
+  try {
+    fchmodSync(descriptor, mode);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+/** Write one buffer fully through one descriptor. */
+function writeAll(descriptor: number, data: Uint8Array): void {
+  let written = 0;
+  while (written < data.byteLength) {
+    written += writeSync(descriptor, data, written);
   }
 }
 
