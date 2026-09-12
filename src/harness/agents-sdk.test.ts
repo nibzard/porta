@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { ControlStore } from "../store/control-store.js";
 import { BlobStore } from "../store/blob-store.js";
 import { PolicyAuthority } from "../core/policy.js";
-import { PortableRuntime } from "../runtime/session.js";
+import { ManagedSession, PortableRuntime } from "../runtime/session.js";
 import { LocalProcessAdapter } from "../adapters/local-process-adapter.js";
 import type { LocalProcessAdapter as Adapter } from "../adapters/local-process-adapter.js";
 import type { EnvironmentLease } from "../schema/adapter.js";
@@ -828,4 +828,38 @@ test("a refused preparation leaves the operation recoverable", async () => {
   } finally {
     state.done();
   }
+});
+
+test("failed preparation preserves every published working copy", async () => {
+  const state = await bench();
+  const prototype = ManagedSession.prototype;
+  const original = prototype.prepareVerificationRun;
+  try {
+    prototype.prepareVerificationRun = async () => { throw new Error("injected preparation failure"); };
+    state.granted.push({approvedBy: "user://ada", operations: ["exec.process@1"]});
+    const first = await state.toolkit.run({command: "true", verify: true, requestKey: "published-copy"});
+    assert.equal(first.status, "refused");
+    const copies = state.store.listWorkingCopies(state.sessionId);
+    assert.ok(copies.length > 0);
+    for (const copy of copies) assert.ok(existsSync(copy.rootPath), copy.rootPath);
+    prototype.prepareVerificationRun = original;
+    state.granted.push({approvedBy: "user://ada", operations: ["exec.process@1"]});
+    assert.equal((await state.toolkit.run({command: "true", verify: true, requestKey: "published-copy"})).status, "completed");
+    for (const copy of state.store.listWorkingCopies(state.sessionId)) assert.ok(existsSync(copy.rootPath), copy.rootPath);
+  } finally { prototype.prepareVerificationRun = original; state.done(); }
+});
+
+test("a lost preparation response preserves and adopts the published verification copy", async () => {
+  const state = await bench();
+  const original = ManagedSession.prototype.prepareVerificationRun;
+  try {
+    ManagedSession.prototype.prepareVerificationRun = async function(...args) {
+      await original.apply(this, args);
+      throw new Error("injected response loss after publication");
+    };
+    state.granted.push({approvedBy: "user://ada", operations: ["exec.process@1"]});
+    const result = await state.toolkit.run({command: "true", verify: true, requestKey: "lost-preparation"});
+    assert.equal(result.status, "completed", JSON.stringify(result));
+    for (const copy of state.store.listWorkingCopies(state.sessionId)) assert.ok(existsSync(copy.rootPath), copy.rootPath);
+  } finally { ManagedSession.prototype.prepareVerificationRun = original; state.done(); }
 });

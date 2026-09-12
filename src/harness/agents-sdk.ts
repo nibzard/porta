@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
-import { isAbsolute, relative } from "node:path";
+import { isAbsolute, relative, sep } from "node:path";
 import { invalidRequestError, policyDeniedError } from "../core/errors.js";
 import { isUtcTimestamp } from "../core/time.js";
 import type { PortableError } from "../schema/error.js";
@@ -596,10 +596,18 @@ export class AgentsToolkit {
         },
       };
     } catch (error) {
-      // Nothing of this attempt committed — the record insert is the
-      // last step of preparation — so only its own directories go. A
-      // concurrent winner's preparation survives and is adopted.
-      rmSync(attempt, { recursive: true, force: true });
+      // Materialization publishes working-copy records before provenance.
+      // Keep the attempt if any copy is recorded, including a preparation
+      // whose response was lost. Retention can later collect unused copies.
+      const published = this.options.session.controlStore
+        .listWorkingCopies(this.options.session.id)
+        .some((copy) => {
+          const path = relative(attempt, copy.rootPath);
+          return path === "" || (!isAbsolute(path) && path !== ".." && !path.startsWith(`..${sep}`));
+        });
+      if (!published) {
+        rmSync(attempt, { recursive: true, force: true });
+      }
       const winner = await this.options.session.executionProvenance(operation.id);
       if (winner !== null && winner.testedRevisionId !== undefined && winner.verificationCopyId !== undefined) {
         return this.adoptPreparation(winner);
