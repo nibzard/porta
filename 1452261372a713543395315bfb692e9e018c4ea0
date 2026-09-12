@@ -1,0 +1,1 @@
+Close the F6 validation-order gap. Attach, invoke, and materialize load one authority before opening a store or loading adapter code. Missing, malformed, and schema-invalid policy files cause no store creation.
